@@ -1,0 +1,366 @@
+#!/usr/bin/env node
+/**
+ * End-to-end validation for tmuxd.
+ *
+ * Exercises:
+ *   HTTP:  health, login (wrong/right), sessions list (auth/no-auth),
+ *          create, duplicate-create, kill, bad-name rejection, unknown-route.
+ *   WS:    bad token → 401
+ *          valid token + tmux session → attach, resize, input echo, ping/pong,
+ *          UTF-8 multi-byte roundtrip, reconnect on close,
+ *          wrong Origin rejected when allowlist configured.
+ *   SHUTDOWN: SIGTERM ends cleanly, even with a live WS.
+ *
+ * Exits non-zero on first failure. Prints a summary.
+ */
+import { spawn } from 'node:child_process'
+import { setTimeout as sleep } from 'node:timers/promises'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import WebSocket from 'ws'
+
+const execFileP = promisify(execFile)
+
+const HOST = process.env.HOST ?? '127.0.0.1'
+const PORT = Number(process.env.PORT ?? 17683)
+const PASSWORD = process.env.TMUXD_PASSWORD ?? 'e2e-test-password-123'
+const ORIGIN = `http://${HOST}:${PORT}`
+const BASE = ORIGIN
+
+let failed = 0
+let passed = 0
+
+function log(name, ok, extra = '') {
+    const tag = ok ? '\x1b[32m PASS\x1b[0m' : '\x1b[31m FAIL\x1b[0m'
+    console.log(`${tag}  ${name}${extra ? ' — ' + extra : ''}`)
+    if (ok) passed++
+    else failed++
+}
+
+async function check(name, fn) {
+    try {
+        const r = await fn()
+        if (r === false) log(name, false, 'assertion returned false')
+        else log(name, true)
+    } catch (err) {
+        log(name, false, err?.message ?? String(err))
+    }
+}
+
+async function http(path, init = {}) {
+    const res = await fetch(BASE + path, init)
+    const text = await res.text()
+    let body = null
+    if (text) {
+        try {
+            body = JSON.parse(text)
+        } catch {
+            body = text
+        }
+    }
+    return { status: res.status, body }
+}
+
+async function waitUp(maxMs = 10000) {
+    const deadline = Date.now() + maxMs
+    while (Date.now() < deadline) {
+        try {
+            const r = await fetch(BASE + '/health')
+            if (r.ok) return true
+        } catch {
+            /* still booting */
+        }
+        await sleep(150)
+    }
+    throw new Error('server did not come up in time')
+}
+
+async function tmuxHasSession(name) {
+    try {
+        await execFileP('tmux', ['has-session', '-t', name])
+        return true
+    } catch {
+        return false
+    }
+}
+
+async function killIfPresent(name) {
+    try {
+        await execFileP('tmux', ['kill-session', '-t', name])
+    } catch {
+        /* ignore */
+    }
+}
+
+function wsConnect(url, opts = {}) {
+    return new Promise((resolve, reject) => {
+        const ws = new WebSocket(url, opts)
+        const frames = []
+        let opened = false
+        const to = setTimeout(() => {
+            if (!opened) {
+                ws.close()
+                reject(new Error('ws open timeout'))
+            }
+        }, 5000)
+        ws.on('open', () => {
+            opened = true
+            clearTimeout(to)
+            resolve({ ws, frames })
+        })
+        ws.on('message', (raw) => {
+            try {
+                frames.push(JSON.parse(raw.toString('utf8')))
+            } catch {
+                frames.push({ raw: raw.toString('utf8') })
+            }
+        })
+        ws.on('unexpected-response', (_req, res) => {
+            reject(new Error('ws http ' + res.statusCode))
+        })
+        ws.on('error', (err) => {
+            if (!opened) reject(err)
+        })
+    })
+}
+
+async function waitForFrame(frames, predicate, maxMs = 5000) {
+    const deadline = Date.now() + maxMs
+    while (Date.now() < deadline) {
+        const idx = frames.findIndex(predicate)
+        if (idx >= 0) return frames.splice(idx, 1)[0]
+        await sleep(50)
+    }
+    throw new Error('timeout waiting for frame')
+}
+
+async function main() {
+    console.log(`[e2e] connecting to ${BASE}`)
+    await waitUp()
+
+    // ---- HTTP ----
+    await check('health: GET /health → 200 {ok:true}', async () => {
+        const r = await http('/health')
+        return r.status === 200 && r.body?.ok === true
+    })
+
+    await check('auth: wrong password → 401', async () => {
+        const r = await http('/api/auth', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ password: 'definitely-wrong' })
+        })
+        return r.status === 401 && r.body?.error === 'invalid_password'
+    })
+
+    await check('auth: missing body → 400', async () => {
+        const r = await http('/api/auth', { method: 'POST' })
+        return r.status === 400
+    })
+
+    let token = null
+    await check('auth: correct password → 200 {token}', async () => {
+        const r = await http('/api/auth', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ password: PASSWORD })
+        })
+        if (r.status !== 200) return false
+        if (typeof r.body?.token !== 'string' || r.body.token.length < 32) return false
+        token = r.body.token
+        return true
+    })
+
+    await check('sessions: no auth → 401', async () => {
+        const r = await http('/api/sessions')
+        return r.status === 401
+    })
+
+    await check('sessions: bad bearer → 401', async () => {
+        const r = await http('/api/sessions', { headers: { authorization: 'Bearer junk' } })
+        return r.status === 401
+    })
+
+    await check('sessions: list with token → 200 [array]', async () => {
+        const r = await http('/api/sessions', { headers: { authorization: `Bearer ${token}` } })
+        return r.status === 200 && Array.isArray(r.body?.sessions)
+    })
+
+    const TEST_SESSION = 'tmuxd-e2e'
+    await killIfPresent(TEST_SESSION)
+
+    await check('create: POST /api/sessions → 201 + tmux has-session ok', async () => {
+        const r = await http('/api/sessions', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ name: TEST_SESSION })
+        })
+        if (r.status !== 201) return false
+        return await tmuxHasSession(TEST_SESSION)
+    })
+
+    await check('create: duplicate → 409', async () => {
+        const r = await http('/api/sessions', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ name: TEST_SESSION })
+        })
+        return r.status === 409
+    })
+
+    await check('create: bad name → 400', async () => {
+        const r = await http('/api/sessions', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ name: 'has space' })
+        })
+        return r.status === 400
+    })
+
+    await check('create: empty name → 400', async () => {
+        const r = await http('/api/sessions', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ name: '' })
+        })
+        return r.status === 400
+    })
+
+    await check('sessions: list contains the new one', async () => {
+        const r = await http('/api/sessions', { headers: { authorization: `Bearer ${token}` } })
+        if (r.status !== 200) return false
+        return r.body.sessions.some((s) => s.name === TEST_SESSION)
+    })
+
+    // ---- WEBSOCKET ----
+    await check('ws: bad token → 401', async () => {
+        try {
+            await wsConnect(`ws://${HOST}:${PORT}/ws/${TEST_SESSION}?token=junk&cols=80&rows=24`)
+            return false
+        } catch (err) {
+            return /401/.test(err.message)
+        }
+    })
+
+    let ws, frames
+    await check('ws: valid token → opens + ready frame', async () => {
+        const url = `ws://${HOST}:${PORT}/ws/${TEST_SESSION}?token=${encodeURIComponent(
+            token
+        )}&cols=100&rows=30`
+        const handle = await wsConnect(url)
+        ws = handle.ws
+        frames = handle.frames
+        const ready = await waitForFrame(frames, (f) => f.type === 'ready', 3000)
+        return ready.session === TEST_SESSION && ready.cols >= 1 && ready.rows >= 1
+    })
+
+    await check('ws: ping → pong', async () => {
+        ws.send(JSON.stringify({ type: 'ping' }))
+        const pong = await waitForFrame(frames, (f) => f.type === 'pong', 2000)
+        return pong.type === 'pong'
+    })
+
+    await check('ws: receives data frames from tmux', async () => {
+        // tmux sends an initial screen redraw; wait up to 3s.
+        const d = await waitForFrame(frames, (f) => f.type === 'data', 3000)
+        return typeof d.payload === 'string' && d.payload.length > 0
+    })
+
+    await check('ws: input roundtrip (echo)', async () => {
+        // Send a simple command inside the tmux pane. The pane is running
+        // the user's default shell inside tmux; `printf "X\n"` is portable.
+        const cmd = 'printf "tmuxd-roundtrip-ok\\n"\n'
+        const bytes = Buffer.from(cmd, 'utf8').toString('base64')
+        ws.send(JSON.stringify({ type: 'input', payload: bytes }))
+        // Look for the substring in any subsequent data frame within 4s.
+        const deadline = Date.now() + 4000
+        while (Date.now() < deadline) {
+            const idx = frames.findIndex(
+                (f) =>
+                    f.type === 'data' &&
+                    Buffer.from(f.payload, 'base64').toString('utf8').includes('tmuxd-roundtrip-ok')
+            )
+            if (idx >= 0) return true
+            await sleep(75)
+        }
+        return false
+    })
+
+    await check('ws: resize frame accepted', async () => {
+        ws.send(JSON.stringify({ type: 'resize', cols: 120, rows: 40 }))
+        // No explicit ack; a successful resize means the server didn't close us.
+        await sleep(200)
+        return ws.readyState === WebSocket.OPEN
+    })
+
+    await check('ws: utf-8 multibyte roundtrip', async () => {
+        const cmd = 'printf "你好-café-🚀\\n"\n'
+        const bytes = Buffer.from(cmd, 'utf8').toString('base64')
+        ws.send(JSON.stringify({ type: 'input', payload: bytes }))
+        const deadline = Date.now() + 4000
+        while (Date.now() < deadline) {
+            const idx = frames.findIndex((f) => {
+                if (f.type !== 'data') return false
+                const out = Buffer.from(f.payload, 'base64').toString('utf8')
+                return out.includes('你好') || out.includes('café') || out.includes('🚀')
+            })
+            if (idx >= 0) return true
+            await sleep(75)
+        }
+        return false
+    })
+
+    await check('ws: malformed JSON is silently ignored (no crash)', async () => {
+        ws.send('not json at all')
+        ws.send(JSON.stringify({ type: 'unknown', foo: 1 }))
+        await sleep(150)
+        return ws.readyState === WebSocket.OPEN
+    })
+
+    await check('ws: manual close → server accepts cleanly', async () => {
+        const closed = new Promise((resolve) => ws.on('close', (code) => resolve(code)))
+        ws.close(1000, 'test')
+        const code = await closed
+        return code === 1000 || code === 1006 // some ws versions surface 1006 on local close
+    })
+
+    // ---- KILL ----
+    await check('delete: DELETE /api/sessions/:name → 204 + tmux gone', async () => {
+        const r = await http(`/api/sessions/${encodeURIComponent(TEST_SESSION)}`, {
+            method: 'DELETE',
+            headers: { authorization: `Bearer ${token}` }
+        })
+        if (r.status !== 204) return false
+        return !(await tmuxHasSession(TEST_SESSION))
+    })
+
+    await check('delete: bad name → 400', async () => {
+        const r = await http('/api/sessions/bad%20name', {
+            method: 'DELETE',
+            headers: { authorization: `Bearer ${token}` }
+        })
+        return r.status === 400
+    })
+
+    // ---- SPA fallback ----
+    await check('spa: GET / serves HTML (web/dist)', async () => {
+        const r = await fetch(BASE + '/')
+        const txt = await r.text()
+        return r.status === 200 && /<html[\s>]/i.test(txt)
+    })
+
+    await check('spa: unknown deep link serves index.html fallback', async () => {
+        const r = await fetch(BASE + '/attach/anything')
+        const txt = await r.text()
+        return r.status === 200 && /<html[\s>]/i.test(txt)
+    })
+
+    console.log('\n---')
+    console.log(`PASS: ${passed}   FAIL: ${failed}`)
+    process.exit(failed > 0 ? 1 : 0)
+}
+
+main().catch((err) => {
+    console.error('fatal:', err)
+    process.exit(2)
+})

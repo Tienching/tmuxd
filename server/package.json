@@ -1,0 +1,30 @@
+{
+    "name": "@tmuxd/server",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "main": "dist/index.js",
+    "scripts": {
+        "dev": "tsx watch src/index.ts",
+        "build": "tsc -p tsconfig.json --noEmit",
+        "start": "tsx src/index.ts",
+        "typecheck": "tsc -p tsconfig.json --noEmit",
+        "test": "node --test --import tsx --test-reporter spec src/**/*.test.ts"
+    },
+    "dependencies": {
+        "@tmuxd/shared": "*",
+        "@hono/node-server": "^1.13.7",
+        "dotenv": "^16.4.5",
+        "hono": "^4.6.12",
+        "jose": "^5.9.6",
+        "node-pty": "^1.0.0",
+        "ws": "^8.18.0",
+        "zod": "^3.23.8"
+    },
+    "devDependencies": {
+        "@types/node": "^22.9.0",
+        "@types/ws": "^8.5.13",
+        "tsx": "^4.19.2",
+        "typescript": "^5.6.3"
+    }
+}

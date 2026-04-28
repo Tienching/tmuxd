@@ -1,0 +1,35 @@
+{
+    "name": "@tmuxd/web",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "build": "tsc -p tsconfig.json && vite build",
+        "preview": "vite preview",
+        "typecheck": "tsc -p tsconfig.json --noEmit"
+    },
+    "dependencies": {
+        "@tanstack/react-query": "^5.62.3",
+        "@tanstack/react-router": "^1.85.3",
+        "@tmuxd/shared": "*",
+        "@xterm/addon-canvas": "^0.7.0",
+        "@xterm/addon-fit": "^0.10.0",
+        "@xterm/addon-web-links": "^0.11.0",
+        "@xterm/xterm": "^5.5.0",
+        "clsx": "^2.1.1",
+        "react": "^19.0.0",
+        "react-dom": "^19.0.0"
+    },
+    "devDependencies": {
+        "@tailwindcss/postcss": "^4.0.0-beta.7",
+        "@types/react": "^19.0.1",
+        "@types/react-dom": "^19.0.2",
+        "@vitejs/plugin-react": "^4.3.4",
+        "autoprefixer": "^10.4.20",
+        "postcss": "^8.5.0",
+        "tailwindcss": "^4.0.0-beta.7",
+        "typescript": "^5.6.3",
+        "vite": "^5.4.11"
+    }
+}

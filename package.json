@@ -1,0 +1,30 @@
+{
+    "name": "tmuxd",
+    "private": true,
+    "version": "0.1.0",
+    "description": "Web UI for local tmux sessions",
+    "license": "MIT",
+    "workspaces": [
+        "shared",
+        "server",
+        "web"
+    ],
+    "scripts": {
+        "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:web\"",
+        "dev:server": "npm -w @tmuxd/server run dev",
+        "dev:web": "npm -w @tmuxd/web run dev",
+        "build": "npm -w @tmuxd/web run build && npm -w @tmuxd/server run build",
+        "start": "npm -w @tmuxd/server run start",
+        "typecheck": "npm -ws run typecheck --if-present",
+        "test": "npm -w @tmuxd/server run test",
+        "e2e": "node scripts/e2e-all.mjs",
+        "e2e:api": "node scripts/e2e.mjs",
+        "e2e:multi": "node scripts/e2e-multi.mjs",
+        "e2e:shutdown": "node scripts/e2e-shutdown.mjs",
+        "e2e:web": "node scripts/e2e-web.mjs"
+    },
+    "devDependencies": {
+        "concurrently": "^9.1.0",
+        "typescript": "^5.6.3"
+    }
+}
