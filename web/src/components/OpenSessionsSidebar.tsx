@@ -7,9 +7,19 @@ import { createSessionWithOptionalName } from '../session/createSession'
 
 const SIDEBAR_HIDDEN_KEY = 'tmuxd.sidebarHidden'
 
-export function OpenSessionsSidebar({ currentName, hidden, onToggleHidden }: { currentName: string; hidden: boolean; onToggleHidden: () => void }) {
+export function OpenSessionsSidebar({
+    currentName,
+    hidden,
+    onToggleHidden,
+    onOpenSession
+}: {
+    currentName: string
+    hidden: boolean
+    onToggleHidden: () => void
+    onOpenSession?: (name: string) => void
+}) {
     const navigate = useNavigate()
-    const { createAndOpenSession, creating, createError } = useCreateAndOpenSession()
+    const { createAndOpenSession, creating, createError } = useCreateAndOpenSession({ onOpenSession })
     const [sessions, setSessions] = useState<OpenSession[]>(() => listOpenSessions())
     const { data, error, isLoading } = useQuery({
         queryKey: ['sessions'],
@@ -24,6 +34,10 @@ export function OpenSessionsSidebar({ currentName, hidden, onToggleHidden }: { c
     const openSession = (name: string) => {
         const trimmed = name.trim()
         if (!trimmed) return
+        if (onOpenSession) {
+            onOpenSession(trimmed)
+            return
+        }
         navigate({ to: '/attach/$name', params: { name: trimmed } })
     }
 
@@ -132,12 +146,13 @@ export function OpenSessionsSidebar({ currentName, hidden, onToggleHidden }: { c
     )
 }
 
-export function MobileSessionSelect({ currentName }: { currentName: string }) {
+export function MobileSessionSelect({ currentName, onOpenSession }: { currentName: string; onOpenSession?: (name: string) => void }) {
     const navigate = useNavigate()
     const [sessions, setSessions] = useState<OpenSession[]>(() => listOpenSessions())
     const [menuOpen, setMenuOpen] = useState(false)
     const { createAndOpenSession, creating, createError } = useCreateAndOpenSession({
-        onCreated: () => setMenuOpen(false)
+        onCreated: () => setMenuOpen(false),
+        onOpenSession
     })
     const { data, error, isLoading } = useQuery({
         queryKey: ['sessions'],
@@ -160,6 +175,10 @@ export function MobileSessionSelect({ currentName }: { currentName: string }) {
     const attachSession = (name: string) => {
         if (!name) return
         setMenuOpen(false)
+        if (onOpenSession) {
+            onOpenSession(name)
+            return
+        }
         if (name !== currentName) {
             navigate({ to: '/attach/$name', params: { name } })
         }
@@ -279,7 +298,7 @@ function SessionMenuButton({ name, active, onClick }: { name: string; active?: b
     )
 }
 
-function useCreateAndOpenSession(options: { onCreated?: () => void } = {}) {
+function useCreateAndOpenSession(options: { onCreated?: () => void; onOpenSession?: (name: string) => void } = {}) {
     const navigate = useNavigate()
     const queryClient = useQueryClient()
     const [creating, setCreating] = useState(false)
@@ -293,6 +312,10 @@ function useCreateAndOpenSession(options: { onCreated?: () => void } = {}) {
             const name = await createSessionWithOptionalName()
             await queryClient.invalidateQueries({ queryKey: ['sessions'] })
             options.onCreated?.()
+            if (options.onOpenSession) {
+                options.onOpenSession(name)
+                return
+            }
             navigate({ to: '/attach/$name', params: { name } })
         } catch {
             setCreateError('Failed to create session.')
