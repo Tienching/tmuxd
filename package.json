@@ -16,7 +16,7 @@
         "build": "npm -w @tmuxd/web run build && npm -w @tmuxd/server run build",
         "start": "npm -w @tmuxd/server run start",
         "typecheck": "npm -ws run typecheck --if-present",
-        "test": "npm -w @tmuxd/server run test",
+        "test": "npm -ws run test --if-present",
         "e2e": "node scripts/e2e-all.mjs",
         "e2e:api": "node scripts/e2e.mjs",
         "e2e:multi": "node scripts/e2e-multi.mjs",

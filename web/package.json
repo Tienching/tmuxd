@@ -7,7 +7,8 @@
         "dev": "vite",
         "build": "tsc -p tsconfig.json && vite build",
         "preview": "vite preview",
-        "typecheck": "tsc -p tsconfig.json --noEmit"
+        "typecheck": "tsc -p tsconfig.json --noEmit",
+        "test": "node --test --import tsx --test-reporter spec src/**/*.test.ts"
     },
     "dependencies": {
         "@tanstack/react-query": "^5.62.3",

@@ -1,6 +1,14 @@
 import type { AuthResponse, TmuxSession } from '@tmuxd/shared'
 import { getToken, notifyAuthRequired } from '../auth/tokenStore'
 
+interface CaptureResponse {
+    text: string
+    paneInMode: boolean
+    scrollPosition: number
+    historySize: number
+    paneHeight: number
+}
+
 export class ApiError extends Error {
     constructor(
         public status: number,
@@ -40,6 +48,7 @@ export const api = {
     listSessions: () => request<{ sessions: TmuxSession[] }>('/api/sessions'),
     createSession: (name: string) =>
         request<{ ok: true }>('/api/sessions', { method: 'POST', body: JSON.stringify({ name }) }),
+    captureSession: (name: string) => request<CaptureResponse>(`/api/sessions/${encodeURIComponent(name)}/capture`),
     createWsTicket: () => request<{ ticket: string; expiresAt: number }>('/api/ws-ticket', { method: 'POST' }),
     killSession: (name: string) =>
         request<null>(`/api/sessions/${encodeURIComponent(name)}`, { method: 'DELETE' })

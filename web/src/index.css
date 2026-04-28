@@ -30,3 +30,8 @@ body,
         height: 100dvh;
     }
 }
+
+.mobile-session-menu {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+}

@@ -8,10 +8,13 @@ A local-first web UI for `tmux` sessions. Open your browser, sign in with one pa
 
 - Lists all tmux sessions for the server user.
 - Creates, attaches to, and kills tmux sessions from the web UI.
+- Creates named sessions or auto-named sessions when you leave the name blank.
 - Streams an interactive terminal over WebSocket using xterm.js.
 - Keeps a browser-local **Opened** list for fast switching between recently attached sessions.
-- Provides an **All sessions** side panel on the terminal page.
+- Provides an **Opened / All sessions** side panel on the terminal page, including a quick **New session** action.
+- Starts newly-created sessions in the server user's home directory.
 - Supports mobile layouts and install-to-home-screen PWA metadata.
+- Adds mobile-friendly **Keys** and **Text** controls for special keys and selectable session text.
 - Uses password login + short-lived JWTs for the API.
 - Uses short-lived one-time WebSocket tickets instead of putting the long-lived JWT in the WebSocket URL.
 
@@ -25,11 +28,11 @@ A local-first web UI for `tmux` sessions. Open your browser, sign in with one pa
 
 ![Session list](docs/screenshots/02-sessions.png)
 
-### Terminal attach with side panel
+### Terminal attach with centered title and side panel
 
 ![Terminal with sidebar](docs/screenshots/03-terminal-sidebar.png)
 
-### Mobile layout
+### Mobile session picker
 
 ![Mobile sessions](docs/screenshots/04-mobile-sessions.png)
 
@@ -98,21 +101,35 @@ openssl rand -base64 48
 2. Enter the password from `.env`.
 3. Click **Sign in**.
 
-### Create a session
+### New session
 
-1. On the sessions page, enter a name using letters, digits, `.`, `_`, or `-`.
-2. Click **Create**.
-3. Click **Attach** to open the terminal.
+On the sessions page:
+
+1. Optionally enter a name using letters, digits, `.`, `_`, or `-`.
+2. Click **New**.
+3. If the name is blank, tmuxd creates an auto-named session such as `web-20260428-090507`.
+4. Click **Attach** to open the terminal.
+
+New sessions start in the server user's home directory.
 
 ### Attach and switch sessions
 
 On the terminal page:
 
+- The centered title shows the current session name.
 - **Opened** shows sessions opened in this browser.
 - **All sessions** shows live tmux sessions from the server.
+- **+ New session** creates an auto-named session and attaches to it.
 - Click any session name to switch.
 - Click `×` next to an opened session to remove it from the browser-local list.
 - Click **Hide** to collapse the side panel; click **Sessions** to show it again.
+
+On mobile:
+
+- Tap the session name in the top bar to open the session picker.
+- Use **+ New session** from the picker to create and attach to a new session.
+- Use **Keys** for mobile-friendly terminal keys and modifiers.
+- Use **Text** to open selectable tmux session text. The text view is positioned from tmux's current scroll position.
 
 ### Mobile / install as app
 
@@ -185,7 +202,9 @@ E2E coverage includes:
 
 - Login success/failure.
 - Authenticated session listing.
-- Create/duplicate/bad-name/delete session flows.
+- New/duplicate/bad-name/delete session flows.
+- New sessions starting in the server user's home directory.
+- Session text capture from tmux scrollback.
 - WebSocket attach, resize, ping/pong, input echo, UTF-8 roundtrip.
 - Multi-client shared attach.
 - Graceful shutdown with a live WebSocket.

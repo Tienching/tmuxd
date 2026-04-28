@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from '@tanstack/react-router'
 import type { Terminal, IDisposable } from '@xterm/xterm'
 import { TerminalView } from '../components/TerminalView'
-import { getInitialSidebarHidden, OpenSessionsSidebar, saveSidebarHidden } from '../components/OpenSessionsSidebar'
+import { MobileQuickKeys } from '../components/MobileQuickKeys'
+import { encodeTerminalInputPayload } from '../components/quickKeys'
+import { getScrollTopForTmuxPosition } from '../components/terminalText'
+import { getInitialSidebarHidden, MobileSessionSelect, OpenSessionsSidebar, saveSidebarHidden } from '../components/OpenSessionsSidebar'
 import { api } from '../api/client'
 import { getToken } from '../auth/tokenStore'
 import { markOpenSession } from '../session/openSessions'
@@ -22,10 +25,44 @@ export function AttachPage() {
         aborted: false
     })
     const dimsRef = useRef<{ cols: number; rows: number }>({ cols: 80, rows: 24 })
+    const copyRequestRef = useRef(0)
 
     const [status, setStatus] = useState<Status>('connecting')
     const [statusMsg, setStatusMsg] = useState<string | null>(null)
     const [sidebarHidden, setSidebarHidden] = useState(() => getInitialSidebarHidden())
+    const [copyText, setCopyText] = useState<string | null>(null)
+    const [copyScrollPosition, setCopyScrollPosition] = useState(0)
+    const [copyLoading, setCopyLoading] = useState(false)
+    const [copyError, setCopyError] = useState<string | null>(null)
+
+    function sendInput(input: string) {
+        const ws = wsRef.current
+        if (ws && ws.readyState === ws.OPEN) {
+            sendWs(ws, { type: 'input', payload: encodeTerminalInputPayload(input) })
+        }
+    }
+
+    async function openCopySheet() {
+        const requestId = copyRequestRef.current + 1
+        copyRequestRef.current = requestId
+        setCopyText(null)
+        setCopyScrollPosition(0)
+        setCopyError(null)
+        setCopyLoading(true)
+        try {
+            const res = await api.captureSession(name)
+            if (copyRequestRef.current !== requestId) return
+            setCopyText(res.text)
+            setCopyScrollPosition(res.text ? res.scrollPosition : 0)
+        } catch {
+            if (copyRequestRef.current !== requestId) return
+            setCopyText('')
+            setCopyScrollPosition(0)
+            setCopyError('Could not load full tmux history.')
+        } finally {
+            if (copyRequestRef.current === requestId) setCopyLoading(false)
+        }
+    }
 
     useEffect(() => {
         markOpenSession(name)
@@ -185,20 +222,37 @@ export function AttachPage() {
 
     return (
         <div className="flex h-full flex-col">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 bg-neutral-900/60 px-3 py-2 text-sm sm:px-4">
-                <div className="flex items-center gap-3">
+            <div className="border-b border-neutral-800 bg-neutral-900/60 px-3 py-2 text-sm sm:px-4">
+                <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 md:hidden">
                     <button
-                        className="rounded-md border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800"
+                        className="rounded-md border border-neutral-700 px-2 py-1 text-xs text-neutral-300 active:bg-neutral-800"
                         onClick={() => navigate({ to: '/' })}
                     >
                         ← Back
                     </button>
-                    <span className="font-mono">{name}</span>
+                    <div className="min-w-0 justify-self-center">
+                        <MobileSessionSelect currentName={name} />
+                    </div>
+                    <div className="flex items-center justify-end gap-1 text-xs">
+                        <StatusDot status={status} />
+                        <span className="text-neutral-400">{status}</span>
+                    </div>
                 </div>
-                <div className="flex items-center gap-2 text-xs">
-                    <StatusDot status={status} />
-                    <span className="text-neutral-400">{status}</span>
-                    {statusMsg && <span className="text-red-400">· {statusMsg}</span>}
+                <div className="hidden grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 md:grid">
+                    <div className="min-w-0 justify-self-start">
+                        <button
+                            className="rounded-md border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800"
+                            onClick={() => navigate({ to: '/' })}
+                        >
+                            ← Back
+                        </button>
+                    </div>
+                    <span className="max-w-[50vw] truncate font-mono">{name}</span>
+                    <div className="flex min-w-0 items-center justify-end gap-2 justify-self-end text-xs">
+                        <StatusDot status={status} />
+                        <span className="text-neutral-400">{status}</span>
+                        {statusMsg && <span className="truncate text-red-400">· {statusMsg}</span>}
+                    </div>
                 </div>
             </div>
             <div className="flex min-h-0 flex-1 flex-col md:flex-row">
@@ -213,40 +267,145 @@ export function AttachPage() {
                         })
                     }}
                 />
-                <div className="min-h-0 flex-1 bg-neutral-950 p-1 sm:p-2">
-                    <TerminalView
-                        key={name}
-                        className="rounded-md overflow-hidden"
-                        onMount={(term) => {
-                            termRef.current = term
-                            try {
-                                inputSubRef.current?.dispose()
-                            } catch {
-                                /* ignore */
-                            }
-                            inputSubRef.current = term.onData((d) => {
+                <div className="flex min-h-0 flex-1 flex-col bg-neutral-950">
+                    <div className="min-h-0 flex-1 p-1 sm:p-2">
+                        <TerminalView
+                            key={name}
+                            className="rounded-md overflow-hidden"
+                            onMount={(term) => {
+                                termRef.current = term
+                                try {
+                                    inputSubRef.current?.dispose()
+                                } catch {
+                                    /* ignore */
+                                }
+                                inputSubRef.current = term.onData(sendInput)
+                                connect(term)
+                            }}
+                            onResize={(cols, rows) => {
+                                dimsRef.current = { cols, rows }
                                 const ws = wsRef.current
                                 if (ws && ws.readyState === ws.OPEN) {
-                                    const bytes = new TextEncoder().encode(d)
-                                    let binary = ''
-                                    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
-                                    sendWs(ws, { type: 'input', payload: btoa(binary) })
+                                    sendWs(ws, { type: 'resize', cols, rows })
                                 }
-                            })
-                            connect(term)
+                            }}
+                        />
+                    </div>
+                    <MobileQuickKeys
+                        onInput={sendInput}
+                        onCopy={() => {
+                            void openCopySheet()
                         }}
-                        onResize={(cols, rows) => {
-                            dimsRef.current = { cols, rows }
-                            const ws = wsRef.current
-                            if (ws && ws.readyState === ws.OPEN) {
-                                sendWs(ws, { type: 'resize', cols, rows })
-                            }
-                        }}
+                        copyLoading={copyLoading}
                     />
+                </div>
+            </div>
+            {(copyLoading || copyText !== null || copyError !== null) && (
+                <TerminalCopySheet
+                    text={copyText}
+                    initialScrollPosition={copyScrollPosition}
+                    loading={copyLoading}
+                    error={copyError}
+                    onClose={() => {
+                        copyRequestRef.current += 1
+                        setCopyLoading(false)
+                        setCopyText(null)
+                        setCopyScrollPosition(0)
+                        setCopyError(null)
+                    }}
+                />
+            )}
+        </div>
+    )
+}
+
+function TerminalCopySheet({
+    text,
+    initialScrollPosition,
+    loading,
+    error,
+    onClose
+}: {
+    text: string | null
+    initialScrollPosition: number
+    loading: boolean
+    error: string | null
+    onClose: () => void
+}) {
+    const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+    const [copied, setCopied] = useState(false)
+
+    useEffect(() => {
+        if (loading || text === null) return
+        requestAnimationFrame(() => {
+            const textarea = textareaRef.current
+            if (!textarea) return
+            scrollTextareaToTmuxPosition(textarea, initialScrollPosition)
+        })
+    }, [initialScrollPosition, loading, text])
+
+    async function copy() {
+        if (text === null) return
+        const textarea = textareaRef.current
+        const copyText =
+            textarea && textarea.selectionEnd > textarea.selectionStart
+                ? text.slice(textarea.selectionStart, textarea.selectionEnd)
+                : text
+        try {
+            await navigator.clipboard.writeText(copyText)
+            setCopied(true)
+        } catch {
+            textareaRef.current?.focus()
+        }
+    }
+
+    return (
+        <div className="fixed inset-0 z-50 bg-black/60 p-3 pt-16 md:hidden" onClick={onClose}>
+            <div className="rounded-lg border border-neutral-700 bg-neutral-950 p-3 shadow-xl" onClick={(event) => event.stopPropagation()}>
+                <div className="mb-2 flex items-center justify-between">
+                    <h2 className="text-sm font-medium text-neutral-100">Session text</h2>
+                    <button type="button" className="rounded px-2 py-1 text-xs text-neutral-400 active:bg-neutral-800" onClick={onClose}>
+                        Close
+                    </button>
+                </div>
+                {loading ? (
+                    <div className="flex h-56 items-center justify-center rounded-md border border-neutral-800 bg-neutral-900 p-2 text-xs text-neutral-400">
+                        Loading full tmux pane history…
+                    </div>
+                ) : (
+                    <textarea
+                        ref={textareaRef}
+                        readOnly
+                        wrap="off"
+                        value={text ?? ''}
+                        className="h-56 w-full resize-none rounded-md border border-neutral-800 bg-neutral-900 p-2 font-mono text-xs text-neutral-100"
+                    />
+                )}
+                {error && <p className="mt-2 text-xs text-amber-400">{error}</p>}
+                <div className="mt-2 flex items-center justify-between gap-2">
+                    <p className="text-xs text-neutral-500">
+                        {loading ? 'Fetching scrollback from tmux…' : 'Scrolled by tmux position. Select a range, or send all to clipboard.'}
+                    </p>
+                    <button
+                        type="button"
+                        className="rounded-md border border-neutral-700 px-3 py-1.5 text-xs text-neutral-100 active:bg-neutral-800 disabled:opacity-50"
+                        disabled={loading || text === null}
+                        onClick={copy}
+                    >
+                        {copied ? 'Done' : 'Clipboard'}
+                    </button>
                 </div>
             </div>
         </div>
     )
+}
+
+function scrollTextareaToTmuxPosition(textarea: HTMLTextAreaElement, scrollPosition: number) {
+    const style = window.getComputedStyle(textarea)
+    const fontSize = Number.parseFloat(style.fontSize) || 12
+    const lineHeight = Number.parseFloat(style.lineHeight) || fontSize * 1.4
+    textarea.scrollTop = getScrollTopForTmuxPosition(textarea.scrollHeight, textarea.clientHeight, lineHeight, scrollPosition)
+    textarea.scrollLeft = 0
 }
 
 function StatusDot({ status }: { status: Status }) {

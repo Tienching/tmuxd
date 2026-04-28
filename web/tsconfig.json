@@ -11,5 +11,6 @@
             "@/*": ["./src/*"]
         }
     },
-    "include": ["src/**/*.ts", "src/**/*.tsx", "../shared/src/**/*.ts"]
+    "include": ["src/**/*.ts", "src/**/*.tsx", "../shared/src/**/*.ts"],
+    "exclude": ["src/**/*.test.ts"]
 }

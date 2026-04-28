@@ -3,6 +3,7 @@ import { useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
 import { api } from '../api/client'
 import { clearToken } from '../auth/tokenStore'
+import { createSessionWithOptionalName } from '../session/createSession'
 import type { TmuxSession } from '@tmuxd/shared'
 
 function formatUnix(ts: number): string {
@@ -27,7 +28,7 @@ export function SessionsPage() {
     const [newName, setNewName] = useState('')
     const [pendingKills, setPendingKills] = useState<Set<string>>(() => new Set())
     const createMut = useMutation({
-        mutationFn: (name: string) => api.createSession(name),
+        mutationFn: (name: string) => createSessionWithOptionalName(name),
         onSuccess: () => {
             setNewName('')
             qc.invalidateQueries({ queryKey: ['sessions'] })
@@ -84,12 +85,12 @@ export function SessionsPage() {
                 className="flex flex-col gap-2 sm:flex-row"
                 onSubmit={(e) => {
                     e.preventDefault()
-                    if (newName.trim()) createMut.mutate(newName.trim())
+                    createMut.mutate(newName)
                 }}
             >
                 <input
                     className="flex-1 rounded-md border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm outline-none focus:border-neutral-600"
-                    placeholder="New session name (letters, digits, ._-)"
+                    placeholder="Session name (optional; letters, digits, ._-)"
                     value={newName}
                     onChange={(e) => setNewName(e.target.value)}
                     pattern="[A-Za-z0-9._-]+"
@@ -97,10 +98,10 @@ export function SessionsPage() {
                 />
                 <button
                     type="submit"
-                    disabled={!newName.trim() || createMut.isPending}
+                    disabled={createMut.isPending}
                     className="rounded-md bg-neutral-100 px-3 py-2 text-sm font-medium text-neutral-900 disabled:opacity-50"
                 >
-                    Create
+                    {createMut.isPending ? 'New…' : 'New'}
                 </button>
                 <button
                     type="button"

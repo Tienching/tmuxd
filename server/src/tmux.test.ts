@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseListOutput, validateSessionName } from './tmux.js'
+import { parseCaptureMetadata, parseListOutput, validateSessionName } from './tmux.js'
 
 describe('tmux', () => {
     it('parses list-sessions output', () => {
@@ -37,5 +37,23 @@ describe('tmux', () => {
     it('validateSessionName accepts good names', () => {
         assert.equal(validateSessionName('main'), 'main')
         assert.equal(validateSessionName('my-session.1_test'), 'my-session.1_test')
+    })
+
+    it('parses capture metadata outside copy mode', () => {
+        assert.deepEqual(parseCaptureMetadata('0\t\t1804\t31\n'), {
+            paneInMode: false,
+            scrollPosition: 0,
+            historySize: 1804,
+            paneHeight: 31
+        })
+    })
+
+    it('parses capture metadata inside copy mode', () => {
+        assert.deepEqual(parseCaptureMetadata('1\t20\t1804\t31\n'), {
+            paneInMode: true,
+            scrollPosition: 20,
+            historySize: 1804,
+            paneHeight: 31
+        })
     })
 })

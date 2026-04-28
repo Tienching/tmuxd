@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { Context, Next } from 'hono'
 import { verifyJwt } from '../auth.js'
 import { createSessionSchema } from '@tmuxd/shared'
-import { createSession, killSession, listSessions, validateSessionName } from '../tmux.js'
+import { captureSession, createSession, killSession, listSessions, validateSessionName } from '../tmux.js'
 import { issueWsTicket } from '../wsTickets.js'
 
 function bearerAuth(jwtSecret: Uint8Array) {
@@ -45,6 +45,20 @@ export function createSessionsRoutes(jwtSecret: Uint8Array): Hono {
 
     app.post('/ws-ticket', (c) => {
         return c.json(issueWsTicket())
+    })
+
+    app.get('/sessions/:name/capture', async (c) => {
+        const name = c.req.param('name')
+        try {
+            const capture = await captureSession(name)
+            return c.json(capture)
+        } catch (err) {
+            const message = errMsg(err)
+            if (/can't find|no such|not found/i.test(message)) {
+                return c.json({ error: 'session_not_found' }, 404)
+            }
+            return c.json({ error: 'tmux_error', message }, 400)
+        }
     })
 
     app.delete('/sessions/:name', async (c) => {

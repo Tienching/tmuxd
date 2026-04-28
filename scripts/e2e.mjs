@@ -17,6 +17,7 @@ import { spawn } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { homedir } from 'node:os'
 import WebSocket from 'ws'
 
 const execFileP = promisify(execFile)
@@ -82,6 +83,11 @@ async function tmuxHasSession(name) {
     } catch {
         return false
     }
+}
+
+async function tmuxPanePath(name) {
+    const { stdout } = await execFileP('tmux', ['display-message', '-p', '-t', name, '#{pane_current_path}'])
+    return stdout.trim()
 }
 
 async function killIfPresent(name) {
@@ -199,6 +205,10 @@ async function main() {
         return await tmuxHasSession(TEST_SESSION)
     })
 
+    await check('create: new tmux session starts in home directory', async () => {
+        return (await tmuxPanePath(TEST_SESSION)) === homedir()
+    })
+
     await check('create: duplicate → 409', async () => {
         const r = await http('/api/sessions', {
             method: 'POST',
@@ -284,6 +294,19 @@ async function main() {
             await sleep(75)
         }
         return false
+    })
+
+    await check('sessions: capture returns pane scrollback', async () => {
+        const r = await http(`/api/sessions/${encodeURIComponent(TEST_SESSION)}/capture`, {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        return (
+            r.status === 200 &&
+            typeof r.body?.text === 'string' &&
+            r.body.text.includes('tmuxd-roundtrip-ok') &&
+            typeof r.body?.scrollPosition === 'number' &&
+            typeof r.body?.paneHeight === 'number'
+        )
     })
 
     await check('ws: resize frame accepted', async () => {

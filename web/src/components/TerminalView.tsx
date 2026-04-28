@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { CanvasAddon } from '@xterm/addon-canvas'
+import { installMobileTouchWheelBridge } from './mobileTouchWheel'
 
 /**
  * Ported/simplified from tencent-hapi/web/src/components/Terminal/TerminalView.tsx.
@@ -54,6 +55,7 @@ export function TerminalView(props: {
         terminal.loadAddon(links)
         terminal.loadAddon(canvas)
         terminal.open(container)
+        const touchWheel = installMobileTouchWheelBridge(terminal)
 
         const observer = new ResizeObserver(() => {
             requestAnimationFrame(() => {
@@ -69,6 +71,7 @@ export function TerminalView(props: {
 
         abort.signal.addEventListener('abort', () => {
             observer.disconnect()
+            touchWheel.dispose()
             fit.dispose()
             links.dispose()
             canvas.dispose()
