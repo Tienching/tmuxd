@@ -1,5 +1,14 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import {
+    forwardRef,
+    useEffect,
+    useImperativeHandle,
+    useRef,
+    useState,
+    type FormEvent,
+    type PointerEvent as ReactPointerEvent,
+    type ReactNode
+} from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useParams } from '@tanstack/react-router'
 import type { Terminal, IDisposable } from '@xterm/xterm'
 import { TerminalView } from '../components/TerminalView'
@@ -10,7 +19,7 @@ import { getInitialSidebarHidden, MobileSessionSelect, OpenSessionsSidebar, save
 import { api } from '../api/client'
 import { getToken } from '../auth/tokenStore'
 import { createSessionWithOptionalName } from '../session/createSession'
-import { markOpenSession } from '../session/openSessions'
+import { listOpenSessions, markOpenSession, subscribeOpenSessions, type OpenSession } from '../session/openSessions'
 import {
     closeWorkspacePane,
     createWorkspaceId,
@@ -38,6 +47,11 @@ interface PaneStatus {
     statusMsg: string | null
 }
 
+interface SplitRequest {
+    paneId: string
+    direction: WorkspaceDirection
+}
+
 const WORKSPACE_STORAGE_KEY = 'tmuxd.workspace.v1'
 const MAX_WORKSPACE_PANES = 6
 
@@ -55,7 +69,9 @@ export function AttachPage() {
     })
     const [paneStatuses, setPaneStatuses] = useState<Record<string, PaneStatus>>({})
     const [sidebarHidden, setSidebarHidden] = useState(() => getInitialSidebarHidden())
+    const [splitRequest, setSplitRequest] = useState<SplitRequest | null>(null)
     const [splittingPaneId, setSplittingPaneId] = useState<string | null>(null)
+    const [splitError, setSplitError] = useState<string | null>(null)
     const [workspaceError, setWorkspaceError] = useState<string | null>(null)
     const [copyText, setCopyText] = useState<string | null>(null)
     const [copyScrollPosition, setCopyScrollPosition] = useState(0)
@@ -147,24 +163,45 @@ export function AttachPage() {
         }
     }
 
-    async function splitPane(paneId: string, direction: WorkspaceDirection) {
-        if (splittingPaneId) return
+    function openSplitChooser(paneId: string, direction: WorkspaceDirection) {
         if (panes.length >= MAX_WORKSPACE_PANES) {
             setWorkspaceError(`Workspace supports up to ${MAX_WORKSPACE_PANES} panes in this version.`)
             return
         }
-
-        setSplittingPaneId(paneId)
         setWorkspaceError(null)
+        setSplitError(null)
+        setActivePaneId(paneId)
+        setSplitRequest({ paneId, direction })
+    }
+
+    function attachSessionToSplit(sessionName: string) {
+        const request = splitRequest
+        const trimmed = sessionName.trim()
+        if (!request || !trimmed) return
+        addSessionToSplit(request, trimmed)
+    }
+
+    function addSessionToSplit(request: SplitRequest, sessionName: string) {
         const newPaneId = createWorkspaceId('pane')
+        setWorkspace((current) => splitWorkspacePane(current, request.paneId, request.direction, sessionName, newPaneId))
+        setActivePaneId(newPaneId)
+        markOpenSession(sessionName)
+        setSplitRequest(null)
+        setSplitError(null)
+    }
+
+    async function createSessionForSplit(inputName: string) {
+        const request = splitRequest
+        if (!request || splittingPaneId) return
+
+        setSplittingPaneId(request.paneId)
+        setSplitError(null)
         try {
-            const newSessionName = await createSessionWithOptionalName()
-            setWorkspace((current) => splitWorkspacePane(current, paneId, direction, newSessionName, newPaneId))
-            setActivePaneId(newPaneId)
-            markOpenSession(newSessionName)
+            const newSessionName = await createSessionWithOptionalName(inputName)
+            addSessionToSplit(request, newSessionName)
             await queryClient.invalidateQueries({ queryKey: ['sessions'] })
         } catch {
-            setWorkspaceError('Failed to create a new tmux session for the split.')
+            setSplitError('Failed to create session.')
         } finally {
             setSplittingPaneId(null)
         }
@@ -257,9 +294,9 @@ export function AttachPage() {
                             activePaneId={activePane?.id ?? ''}
                             canClose={panes.length > 1}
                             canSplit={panes.length < MAX_WORKSPACE_PANES}
-                            splittingPaneId={splittingPaneId}
+                            splittingPaneId={splittingPaneId ?? splitRequest?.paneId ?? null}
                             onActivate={setActivePaneId}
-                            onSplit={(paneId, direction) => void splitPane(paneId, direction)}
+                            onSplit={openSplitChooser}
                             onClose={closePane}
                             onRatioChange={(splitId, ratio) => setWorkspace((current) => updateWorkspaceSplitRatio(current, splitId, ratio))}
                             onPaneStatus={updatePaneStatus}
@@ -288,6 +325,19 @@ export function AttachPage() {
                         setCopyScrollPosition(0)
                         setCopyError(null)
                     }}
+                />
+            )}
+            {splitRequest && (
+                <SplitSessionChooser
+                    direction={splitRequest.direction}
+                    currentSessionName={findWorkspacePaneSession(workspace, splitRequest.paneId) ?? activeSessionName}
+                    creating={splittingPaneId === splitRequest.paneId}
+                    error={splitError}
+                    onClose={() => {
+                        if (!splittingPaneId) setSplitRequest(null)
+                    }}
+                    onSelect={attachSessionToSplit}
+                    onCreate={(inputName) => void createSessionForSplit(inputName)}
                 />
             )}
         </div>
@@ -667,20 +717,20 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
                         type="button"
                         className="rounded border border-neutral-700 px-2 py-0.5 text-neutral-300 hover:bg-neutral-800 disabled:opacity-40"
                         disabled={!canSplit || splitting}
-                        title="Split right into a new tmux session"
+                        title="Split right and choose a tmux session"
                         onClick={(event) => {
                             event.stopPropagation()
                             onFocus()
                             onSplit('row')
                         }}
                     >
-                        {splitting ? 'New…' : 'Split →'}
+                        {splitting ? 'Choose…' : 'Split →'}
                     </button>
                     <button
                         type="button"
                         className="rounded border border-neutral-700 px-2 py-0.5 text-neutral-300 hover:bg-neutral-800 disabled:opacity-40"
                         disabled={!canSplit || splitting}
-                        title="Split down into a new tmux session"
+                        title="Split down and choose a tmux session"
                         onClick={(event) => {
                             event.stopPropagation()
                             onFocus()
@@ -728,6 +778,170 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
         </section>
     )
 })
+
+function SplitSessionChooser({
+    direction,
+    currentSessionName,
+    creating,
+    error,
+    onClose,
+    onSelect,
+    onCreate
+}: {
+    direction: WorkspaceDirection
+    currentSessionName: string
+    creating: boolean
+    error: string | null
+    onClose: () => void
+    onSelect: (sessionName: string) => void
+    onCreate: (inputName: string) => void
+}) {
+    const [openedSessions, setOpenedSessions] = useState<OpenSession[]>(() => listOpenSessions())
+    const [newName, setNewName] = useState('')
+    const { data, error: listError, isLoading } = useQuery({
+        queryKey: ['sessions'],
+        queryFn: () => api.listSessions(),
+        refetchInterval: 5000
+    })
+
+    useEffect(() => {
+        return subscribeOpenSessions(() => setOpenedSessions(listOpenSessions()))
+    }, [])
+
+    const liveNames = data ? new Set(data.sessions.map((session) => session.name)) : null
+    const visibleOpenedSessions = liveNames ? openedSessions.filter((session) => liveNames.has(session.name)) : openedSessions
+    const openedNames = new Set(visibleOpenedSessions.map((session) => session.name))
+    const otherSessions = data?.sessions.filter((session) => !openedNames.has(session.name)) ?? []
+    const knownNames = new Set([...visibleOpenedSessions.map((session) => session.name), ...otherSessions.map((session) => session.name)])
+    const showCurrentFallback = currentSessionName && !knownNames.has(currentSessionName)
+    const directionLabel = direction === 'row' ? 'right' : 'down'
+
+    const submitNewSession = (event: FormEvent) => {
+        event.preventDefault()
+        onCreate(newName)
+    }
+
+    return (
+        <div className="fixed inset-0 z-50 bg-black/60 p-3 pt-16 md:p-6" onClick={onClose}>
+            <div
+                className="mx-auto flex max-h-[82dvh] max-w-lg flex-col rounded-lg border border-neutral-700 bg-neutral-950 shadow-xl"
+                onClick={(event) => event.stopPropagation()}
+            >
+                <div className="flex items-start justify-between gap-3 border-b border-neutral-800 p-3">
+                    <div>
+                        <h2 className="text-sm font-medium text-neutral-100">Split {directionLabel}</h2>
+                        <p className="mt-1 text-xs text-neutral-500">Choose a session for the new web pane, or create one.</p>
+                    </div>
+                    <button
+                        type="button"
+                        className="rounded px-2 py-1 text-xs text-neutral-400 hover:bg-neutral-800 disabled:opacity-40"
+                        disabled={creating}
+                        onClick={onClose}
+                    >
+                        Close
+                    </button>
+                </div>
+
+                <div className="min-h-0 overflow-y-auto p-3">
+                    <form className="mb-3 flex gap-2" onSubmit={submitNewSession}>
+                        <input
+                            className="min-w-0 flex-1 rounded-md border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm outline-none focus:border-neutral-600"
+                            placeholder="New session name (optional)"
+                            value={newName}
+                            onChange={(event) => setNewName(event.target.value)}
+                            pattern="[A-Za-z0-9._-]+"
+                            maxLength={64}
+                            disabled={creating}
+                        />
+                        <button
+                            type="submit"
+                            className="rounded-md bg-neutral-100 px-3 py-2 text-sm font-medium text-neutral-900 disabled:opacity-50"
+                            disabled={creating}
+                        >
+                            {creating ? 'New…' : 'New'}
+                        </button>
+                    </form>
+                    {error && <p className="mb-3 text-xs text-red-400">{error}</p>}
+
+                    {showCurrentFallback && (
+                        <div className="mb-3">
+                            <SplitSessionButton name={currentSessionName} active disabled={creating} onClick={() => onSelect(currentSessionName)} />
+                        </div>
+                    )}
+
+                    {visibleOpenedSessions.length > 0 && (
+                        <SessionChoiceSection title="Opened">
+                            {visibleOpenedSessions.map((session) => (
+                                <SplitSessionButton
+                                    key={`opened-split-${session.name}`}
+                                    name={session.name}
+                                    active={session.name === currentSessionName}
+                                    disabled={creating}
+                                    onClick={() => onSelect(session.name)}
+                                />
+                            ))}
+                        </SessionChoiceSection>
+                    )}
+
+                    <SessionChoiceSection title="All sessions">
+                        {isLoading ? (
+                            <p className="px-1 text-xs text-neutral-600">Loading sessions…</p>
+                        ) : listError ? (
+                            <p className="px-1 text-xs text-red-400">Failed to load sessions.</p>
+                        ) : otherSessions.length === 0 ? (
+                            <p className="px-1 text-xs text-neutral-600">No more sessions.</p>
+                        ) : (
+                            otherSessions.map((session) => (
+                                <SplitSessionButton
+                                    key={`all-split-${session.name}`}
+                                    name={session.name}
+                                    active={session.name === currentSessionName}
+                                    disabled={creating}
+                                    onClick={() => onSelect(session.name)}
+                                />
+                            ))
+                        )}
+                    </SessionChoiceSection>
+                </div>
+            </div>
+        </div>
+    )
+}
+
+function SessionChoiceSection({ title, children }: { title: string; children: ReactNode }) {
+    return (
+        <section className="mb-3 last:mb-0">
+            <h3 className="mb-1 px-1 text-[10px] font-medium uppercase tracking-wide text-neutral-600">{title}</h3>
+            <div className="flex flex-col gap-1">{children}</div>
+        </section>
+    )
+}
+
+function SplitSessionButton({
+    name,
+    active,
+    disabled,
+    onClick
+}: {
+    name: string
+    active?: boolean
+    disabled?: boolean
+    onClick: () => void
+}) {
+    return (
+        <button
+            type="button"
+            className={`flex min-w-0 items-center justify-between gap-2 rounded-md border px-2 py-2 text-left text-xs text-neutral-100 disabled:opacity-50 ${
+                active ? 'border-neutral-500 bg-neutral-800' : 'border-neutral-800 bg-neutral-900/60 hover:bg-neutral-900'
+            }`}
+            disabled={disabled}
+            onClick={onClick}
+        >
+            <span className="truncate font-mono">{name}</span>
+            {active && <span className="shrink-0 text-[10px] text-neutral-500">current</span>}
+        </button>
+    )
+}
 
 function TerminalCopySheet({
     text,
@@ -843,6 +1057,11 @@ function loadInitialWorkspace(sessionName: string): WorkspaceNode {
         /* storage may be unavailable */
     }
     return createWorkspacePane(sessionName)
+}
+
+function findWorkspacePaneSession(workspace: WorkspaceNode, paneId: string): string | null {
+    if (workspace.type === 'pane') return workspace.id === paneId ? workspace.sessionName : null
+    return findWorkspacePaneSession(workspace.first, paneId) ?? findWorkspacePaneSession(workspace.second, paneId)
 }
 
 function saveWorkspace(workspace: WorkspaceNode): void {
