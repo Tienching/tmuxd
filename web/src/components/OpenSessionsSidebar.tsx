@@ -75,14 +75,7 @@ export function OpenSessionsSidebar({
                     </button>
                 </div>
             </div>
-            <button
-                type="button"
-                className="mb-2 w-full rounded-md border border-neutral-800 bg-neutral-900/60 px-2 py-2 text-left text-xs font-medium text-neutral-100 hover:bg-neutral-900 disabled:opacity-50"
-                disabled={creating}
-                onClick={createAndOpenSession}
-            >
-                {creating ? 'Creating…' : '+ New session'}
-            </button>
+            <NewSessionForm creating={creating} createError={createError} onCreate={createAndOpenSession} />
             {createError && <p className="mb-2 px-1 text-xs text-red-400">{createError}</p>}
             {visibleOpenedSessions.length === 0 ? (
                 <p className="px-1 text-xs text-neutral-600">No opened sessions yet.</p>
@@ -212,14 +205,7 @@ export function MobileSessionSelect({ currentName, onOpenSession }: { currentNam
                             </button>
                         </div>
 
-                        <button
-                            type="button"
-                            className="mb-2 w-full rounded-md border border-neutral-800 bg-neutral-900/60 px-2 py-2 text-left text-xs font-medium text-neutral-100 active:bg-neutral-800 disabled:opacity-50"
-                            disabled={creating}
-                            onClick={createAndOpenSession}
-                        >
-                            {creating ? 'Creating…' : '+ New session'}
-                        </button>
+                        <NewSessionForm creating={creating} createError={createError} onCreate={createAndOpenSession} mobile />
                         {createError && <p className="mb-2 px-1 text-xs text-red-400">{createError}</p>}
 
                         {showCurrentFallback && <SessionMenuButton name={currentName} active onClick={() => attachSession(currentName)} />}
@@ -298,27 +284,75 @@ function SessionMenuButton({ name, active, onClick }: { name: string; active?: b
     )
 }
 
+function NewSessionForm({
+    creating,
+    createError,
+    onCreate,
+    mobile = false
+}: {
+    creating: boolean
+    createError: string | null
+    onCreate: (name?: string) => Promise<boolean>
+    mobile?: boolean
+}) {
+    const [name, setName] = useState('')
+
+    return (
+        <form
+            className="mb-2 flex gap-1"
+            onSubmit={(event) => {
+                event.preventDefault()
+                void onCreate(name).then((ok) => {
+                    if (ok) setName('')
+                })
+            }}
+        >
+            <input
+                className="min-w-0 flex-1 rounded-md border border-neutral-800 bg-neutral-900 px-2 py-2 text-xs text-neutral-100 outline-none focus:border-neutral-600"
+                placeholder="Session name (optional)"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                pattern="[A-Za-z0-9._-]+"
+                maxLength={64}
+                disabled={creating}
+                aria-invalid={Boolean(createError)}
+            />
+            <button
+                type="submit"
+                className={`shrink-0 rounded-md border border-neutral-800 bg-neutral-900 px-2 py-2 text-xs font-medium text-neutral-100 disabled:opacity-50 ${
+                    mobile ? 'active:bg-neutral-800' : 'hover:bg-neutral-800'
+                }`}
+                disabled={creating}
+            >
+                {creating ? 'New…' : 'New'}
+            </button>
+        </form>
+    )
+}
+
 function useCreateAndOpenSession(options: { onCreated?: () => void; onOpenSession?: (name: string) => void } = {}) {
     const navigate = useNavigate()
     const queryClient = useQueryClient()
     const [creating, setCreating] = useState(false)
     const [createError, setCreateError] = useState<string | null>(null)
 
-    const createAndOpenSession = async () => {
-        if (creating) return
+    const createAndOpenSession = async (inputName = ''): Promise<boolean> => {
+        if (creating) return false
         setCreating(true)
         setCreateError(null)
         try {
-            const name = await createSessionWithOptionalName()
+            const name = await createSessionWithOptionalName(inputName)
             await queryClient.invalidateQueries({ queryKey: ['sessions'] })
             options.onCreated?.()
             if (options.onOpenSession) {
                 options.onOpenSession(name)
-                return
+                return true
             }
             navigate({ to: '/attach/$name', params: { name } })
+            return true
         } catch {
             setCreateError('Failed to create session.')
+            return false
         } finally {
             setCreating(false)
         }
