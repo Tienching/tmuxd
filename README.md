@@ -74,7 +74,8 @@ Sign in with the value after `TMUXD_PASSWORD=` in `.env`.
 | `PORT` | `7681` | HTTP port. |
 | `TMUXD_HOME` | `.tmuxd` in CWD | Directory for generated runtime secrets. |
 | `JWT_SECRET` | generated | Optional JWT signing secret. If set manually, it must be at least 32 bytes. |
-| `TMUXD_AGENT_TOKEN` | unset | Enables `/agent/connect` on the hub and authenticates agents. Use a long random value. |
+| `TMUXD_AGENT_TOKEN` | unset | Enables `/agent/connect` with one legacy shared agent token. Use only over trusted networks. |
+| `TMUXD_AGENT_TOKENS` | unset | Preferred hub/agent auth: comma-separated `hostId=token` entries that bind each agent token to one stable host ID. |
 
 Example `.env`:
 
@@ -110,7 +111,7 @@ On the hub:
 
 ```bash
 TMUXD_PASSWORD=replace-with-a-long-random-password \
-TMUXD_AGENT_TOKEN=replace-with-a-long-random-agent-token \
+TMUXD_AGENT_TOKENS=workstation=replace-with-a-long-random-agent-token \
 HOST=0.0.0.0 PORT=7681 npm start
 ```
 
@@ -135,6 +136,8 @@ Notes:
 - Agents make an outbound WebSocket connection to `/agent/connect`; they do not open an inbound HTTP port.
 - `TMUXD_AGENT_ID` is the stable ID stored in browser workspaces and URLs. Use letters, digits, `.`, `_`, or `-`.
 - `TMUXD_AGENT_NAME` is just the display name in the UI.
+- Agent tokens must be sent as `Authorization: Bearer ...`; tmuxd intentionally rejects token-in-URL authentication.
+- Prefer `TMUXD_AGENT_TOKENS=hostId=token,...` on the hub so each token can only register its matching `TMUXD_AGENT_ID`. `TMUXD_AGENT_TOKEN` remains available for simple single-agent compatibility.
 - Use HTTPS/WSS when the hub is reachable beyond a private network.
 - A connected agent advertises capabilities to the hub. Hosts with the `create` capability appear in New-session host pickers.
 
@@ -211,7 +214,7 @@ Recommended deployment:
 
 - Or put tmuxd behind an HTTPS reverse proxy such as Caddy, nginx, or Cloudflare Tunnel.
 - Use a long random password.
-- If hub/agent mode is enabled, use a separate long random `TMUXD_AGENT_TOKEN`; do not reuse the browser password.
+- If hub/agent mode is enabled, use separate long random agent tokens; do not reuse the browser password.
 - Restrict firewall/security-group access to trusted IPs.
 
 Implemented safeguards:
@@ -225,7 +228,7 @@ Implemented safeguards:
 - WebSocket Origin checks.
 - WebSocket connection limits and idle timeout.
 - API responses use `Cache-Control: no-store`.
-- PTY child environment strips `TMUXD_PASSWORD`, `TMUXD_AGENT_TOKEN`, and `JWT_SECRET`.
+- PTY child environment strips `TMUXD_PASSWORD`, `TMUXD_AGENT_TOKEN`, `TMUXD_AGENT_TOKENS`, and `JWT_SECRET`.
 - Browser JWTs are never forwarded to agents; the hub talks to agents over the separate agent token channel.
 
 ## Development

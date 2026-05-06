@@ -32,12 +32,7 @@ export const sessionTargetSchema = z.object({
     sessionName: sessionNameSchema
 })
 
-export const wsTicketRequestSchema = z
-    .object({
-        hostId: hostIdSchema.optional(),
-        sessionName: sessionNameSchema.optional()
-    })
-    .optional()
+export const wsTicketRequestSchema = sessionTargetSchema
 
 export const clientWsMessageSchema = z.discriminatedUnion('type', [
     z.object({ type: z.literal('input'), payload: base64Schema }),

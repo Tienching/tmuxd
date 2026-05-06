@@ -349,7 +349,7 @@ Current browser password login stays:
 
 Agents use separate tokens:
 
-- Hub reads one shared agent token from `TMUXD_AGENT_TOKEN` in v1.
+- Hub prefers per-host `TMUXD_AGENT_TOKENS=hostId=token,...`; legacy `TMUXD_AGENT_TOKEN` still supports simple single-token setups.
 - Agent token is never the browser password.
 - Agent token is sent in the `Authorization` header, not in the URL.
 - Agents should use `wss://` outside localhost/private test setups.
@@ -397,7 +397,7 @@ Implemented as `AgentRegistry` plus host-aware local routes. Current local alias
 Implemented:
 
 - `/agent/connect` WebSocket endpoint.
-- `TMUXD_AGENT_TOKEN` bearer-token validation.
+- Agent bearer-token validation. Prefer `TMUXD_AGENT_TOKENS=hostId=token,...` to bind each token to one stable host ID; `TMUXD_AGENT_TOKEN` remains as a single shared-token compatibility mode.
 - `list_sessions`, `create_session`, `kill_session`, and `capture_session` request/response frames.
 - `server/src/agent.ts` outbound Node agent entry point.
 
@@ -463,7 +463,7 @@ Hub/agent suite
 
 1. Ship host-aware local model first.
 2. Ship hub with local host only.
-3. Agent connection is enabled by setting `TMUXD_AGENT_TOKEN` on the hub. Remote terminal streaming and README updates are included in v1.
+3. Agent connection is enabled by setting `TMUXD_AGENT_TOKENS` or `TMUXD_AGENT_TOKEN` on the hub. Remote terminal streaming and README updates are included in v1.
 
 ## Risks and decisions
 
@@ -477,7 +477,7 @@ This already exists with multi-client attach. Remote hosts make it more visible.
 
 ### Risk: agent token leakage
 
-Agent tokens grant shell-level tmux control for that agent machine. v1 uses one shared `TMUXD_AGENT_TOKEN`; keep it secret and use HTTPS/WSS outside private networks.
+Agent tokens grant shell-level tmux control for that agent machine. Tokens are accepted only through the `Authorization: Bearer ...` header, not URL query parameters, to avoid proxy/browser log leakage. Prefer per-host `TMUXD_AGENT_TOKENS` bindings and keep all tokens secret; use HTTPS/WSS outside private networks.
 
 ### Decision: preserve current single-server default
 

@@ -3,6 +3,8 @@ import { dirname, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { config as loadDotenv } from 'dotenv'
+import { hostIdSchema } from '@tmuxd/shared'
+import type { AgentTokenBinding } from './agentRegistry.js'
 
 // Load .env from the repo root regardless of CWD.
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -16,7 +18,7 @@ export interface Config {
     port: number
     jwtSecret: Uint8Array
     dataDir: string
-    agentToken: string | null
+    agentTokens: AgentTokenBinding[]
 }
 
 function requireEnv(name: string): string {
@@ -62,6 +64,32 @@ export function loadConfig(): Config {
     }
     const dataDir = resolveDataDir()
     const jwtSecret = resolveJwtSecret(dataDir)
-    const agentToken = process.env.TMUXD_AGENT_TOKEN?.trim() || null
-    return { password, host, port, jwtSecret, dataDir, agentToken }
+    const agentTokens = resolveAgentTokens()
+    return { password, host, port, jwtSecret, dataDir, agentTokens }
+}
+
+function resolveAgentTokens(): AgentTokenBinding[] {
+    const bound = process.env.TMUXD_AGENT_TOKENS?.trim()
+    if (bound) return parseBoundAgentTokens(bound)
+
+    const token = process.env.TMUXD_AGENT_TOKEN?.trim()
+    return token ? [{ hostId: null, token }] : []
+}
+
+function parseBoundAgentTokens(value: string): AgentTokenBinding[] {
+    const bindings: AgentTokenBinding[] = []
+    for (const part of value.split(',')) {
+        const entry = part.trim()
+        if (!entry) continue
+        const separator = entry.indexOf('=')
+        if (separator <= 0) throw new Error('TMUXD_AGENT_TOKENS entries must use hostId=token')
+        const rawHostId = entry.slice(0, separator).trim()
+        const token = entry.slice(separator + 1).trim()
+        if (!token) throw new Error(`TMUXD_AGENT_TOKENS token is empty for host ${rawHostId}`)
+        const parsed = hostIdSchema.safeParse(rawHostId)
+        if (!parsed.success || parsed.data === 'local') throw new Error(`Invalid TMUXD_AGENT_TOKENS host id: ${rawHostId}`)
+        bindings.push({ hostId: parsed.data, token })
+    }
+    if (bindings.length === 0) throw new Error('TMUXD_AGENT_TOKENS did not contain any hostId=token entries')
+    return bindings
 }

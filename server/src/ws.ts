@@ -87,7 +87,11 @@ export function createWsServer(deps: WsDeps): WebSocketServer {
         ws.on('close', cleanup)
         ws.on('error', cleanup)
 
-        if (wss.clients.size > MAX_WS_CLIENTS || (sessionCounts.get(sessionKey) ?? 0) >= MAX_WS_CLIENTS_PER_SESSION) {
+        // `ws` has already added this socket to `wss.clients` before the
+        // connection callback runs, so compare the number of clients that were
+        // open before this one arrived.
+        const existingClientCount = Math.max(0, wss.clients.size - 1)
+        if (existingClientCount >= MAX_WS_CLIENTS || (sessionCounts.get(sessionKey) ?? 0) >= MAX_WS_CLIENTS_PER_SESSION) {
             sendJson(ws, { type: 'error', message: 'too_many_connections' })
             ws.close(1013, 'too_many_connections')
             return
@@ -321,7 +325,7 @@ export async function tryHandleUpgrade(
         }
     }
 
-    const authorized = ticket ? consumeWsTicket(ticket) : !!(await verifyJwt(jwtSecret, token))
+    const authorized = ticket ? consumeWsTicket(ticket, { hostId, sessionName: session }) : !!(await verifyJwt(jwtSecret, token))
     if (!authorized) {
         socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
         socket.destroy()

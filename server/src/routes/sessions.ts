@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { Context, Next } from 'hono'
 import { File } from 'node:buffer'
 import { randomUUID } from 'node:crypto'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { verifyJwt } from '../auth.js'
@@ -132,6 +132,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry?: Agen
         try {
             await sendTextToSession(safe, `${shellQuote(result.upload.path)} `)
         } catch (err) {
+            await rm(result.upload.path, { force: true }).catch(() => undefined)
             return c.json({ error: 'tmux_error', message: errMsg(err) }, 400)
         }
         return c.json(result.upload, 201)
@@ -221,9 +222,9 @@ async function issueTargetWsTicket(c: Context, agentRegistry?: AgentRegistry) {
     }
     const parsed = wsTicketRequestSchema.safeParse(body)
     if (!parsed.success) return c.json({ error: 'invalid_body' }, 400)
-    const hostId = parsed.data?.hostId
-    if (hostId && !isLocalHost(hostId) && !agentRegistry?.hasHost(hostId)) return c.json({ error: 'host_not_found' }, 404)
-    return c.json(issueWsTicket())
+    const { hostId, sessionName } = parsed.data
+    if (!isLocalHost(hostId) && !agentRegistry?.hasHost(hostId)) return c.json({ error: 'host_not_found' }, 404)
+    return c.json(issueWsTicket({ hostId: isLocalHost(hostId) ? getLocalHost().id : hostId, sessionName }))
 }
 
 function agentRouteError(c: Context, err: unknown) {

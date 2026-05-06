@@ -15,6 +15,15 @@ const STREAM_READY_TIMEOUT_MS = 10_000
 const MAX_AGENT_PAYLOAD = 512 * 1024
 const DEFAULT_CAPABILITIES: HostCapability[] = ['list', 'create', 'kill', 'capture', 'attach']
 
+export interface AgentTokenBinding {
+    /**
+     * When present, this token can only register the matching hostId.
+     * A null hostId is the legacy shared-token mode.
+     */
+    hostId: string | null
+    token: string
+}
+
 const tmuxSessionSchema = z.object({
     name: sessionNameSchema,
     windows: z.number().int().min(0),
@@ -46,8 +55,11 @@ export interface RemoteStreamBridge {
 export class AgentRegistry {
     private readonly wss = new WebSocketServer({ noServer: true, maxPayload: MAX_AGENT_PAYLOAD })
     private readonly agents = new Map<string, RemoteHostConnection>()
+    private readonly authenticatedHostIds = new WeakMap<WebSocket, string | null>()
+    private readonly agentTokens: AgentTokenBinding[]
 
-    constructor(private readonly agentToken: string | null) {
+    constructor(agentTokens: AgentTokenBinding[] | string | null) {
+        this.agentTokens = normalizeAgentTokens(agentTokens)
         this.wss.on('connection', (ws, request) => this.acceptAgent(ws, request))
     }
 
@@ -59,18 +71,19 @@ export class AgentRegistry {
         const url = new URL(request.url || '', 'http://localhost')
         if (url.pathname !== '/agent/connect') return false
 
-        if (!this.agentToken) {
+        if (this.agentTokens.length === 0) {
             writeHttp(socket, 404, 'Not Found')
             return true
         }
 
-        const token = readBearerToken(request) || url.searchParams.get('token') || ''
-        if (!sameSecret(token, this.agentToken)) {
+        const auth = this.matchToken(readBearerToken(request) || '')
+        if (!auth) {
             writeHttp(socket, 401, 'Unauthorized')
             return true
         }
 
         this.wss.handleUpgrade(request, socket, head, (ws) => {
+            this.authenticatedHostIds.set(ws, auth.hostId)
             this.wss.emit('connection', ws, request)
         })
         return true
@@ -141,9 +154,11 @@ export class AgentRegistry {
             }
             clearTimeout(timer)
             try {
-                const hostId = resolveHostId(msg)
+                const boundHostId = this.authenticatedHostIds.get(ws) ?? null
+                this.authenticatedHostIds.delete(ws)
+                const hostId = resolveHostId(msg, boundHostId)
                 const existing = this.agents.get(hostId)
-                if (existing) existing.close(1000, 'replaced')
+                if (existing) throw new AgentError('host_already_connected')
 
                 const conn = new RemoteHostConnection(ws, msg, hostId, () => {
                     if (this.agents.get(hostId) === conn) this.agents.delete(hostId)
@@ -166,6 +181,14 @@ export class AgentRegistry {
         const agent = this.agents.get(hostId)
         if (!agent) throw new AgentError('host_not_found')
         return agent
+    }
+
+    private matchToken(token: string): AgentTokenBinding | null {
+        if (!token) return null
+        for (const binding of this.agentTokens) {
+            if (sameSecret(token, binding.token)) return binding
+        }
+        return null
     }
 }
 
@@ -486,7 +509,11 @@ function parseAgentMessage(raw: Buffer): AgentClientMessage | null {
     }
 }
 
-function resolveHostId(hello: AgentHelloMessage): string {
+function resolveHostId(hello: AgentHelloMessage, boundHostId: string | null): string {
+    if (boundHostId) {
+        if (hello.id && hello.id !== boundHostId) throw new Error('host_id_token_mismatch')
+        return boundHostId
+    }
     const candidate = hello.id ?? slugHostId(hello.name)
     const parsed = hostIdSchema.safeParse(candidate)
     if (!parsed.success || parsed.data === LOCAL_HOST_ID) throw new Error('invalid_host_id')
@@ -513,6 +540,23 @@ function sameSecret(a: string, b: string): boolean {
     const left = Buffer.from(a)
     const right = Buffer.from(b)
     return left.length === right.length && timingSafeEqual(left, right)
+}
+
+function normalizeAgentTokens(agentTokens: AgentTokenBinding[] | string | null): AgentTokenBinding[] {
+    if (!agentTokens) return []
+    if (typeof agentTokens === 'string') {
+        const token = agentTokens.trim()
+        return token ? [{ hostId: null, token }] : []
+    }
+    const out: AgentTokenBinding[] = []
+    for (const binding of agentTokens) {
+        const token = binding.token.trim()
+        if (!token) continue
+        const hostId = binding.hostId === null ? null : hostIdSchema.parse(binding.hostId)
+        if (hostId === LOCAL_HOST_ID) throw new Error('invalid_agent_token_host_id')
+        out.push({ hostId, token })
+    }
+    return out
 }
 
 function writeHttp(socket: Duplex, status: number, text: string): void {

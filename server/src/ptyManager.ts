@@ -22,6 +22,7 @@ export function attachTmuxPty(session: string, cols: number, rows: number): PtyB
     const {
         TMUXD_PASSWORD: _tp,
         TMUXD_AGENT_TOKEN: _tat,
+        TMUXD_AGENT_TOKENS: _tats,
         JWT_SECRET: _js,
         ...cleanEnv
     } = process.env

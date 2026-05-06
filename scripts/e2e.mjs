@@ -16,7 +16,7 @@
 import { spawn } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { execFile } from 'node:child_process'
-import { rm, stat } from 'node:fs/promises'
+import { readdir, rm, stat } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import { homedir } from 'node:os'
 import WebSocket from 'ws'
@@ -27,6 +27,7 @@ const HOST = process.env.HOST ?? '127.0.0.1'
 const PORT = Number(process.env.PORT ?? 17683)
 const PASSWORD = process.env.TMUXD_PASSWORD ?? 'e2e-test-password-123'
 const AGENT_TOKEN = process.env.TMUXD_AGENT_TOKEN ?? ''
+const AGENT_HOST_BOUND = process.env.TMUXD_E2E_AGENT_HOST_BOUND === '1'
 const ORIGIN = `http://${HOST}:${PORT}`
 const BASE = ORIGIN
 
@@ -151,6 +152,40 @@ async function waitForHost(hostId, token, maxMs = 10000) {
         await sleep(150)
     }
     throw new Error(`host ${hostId} did not connect in time`)
+}
+
+function agentHelloOnce(hostId, token) {
+    return new Promise((resolve, reject) => {
+        const ws = new WebSocket(`ws://${HOST}:${PORT}/agent/connect`, {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        const to = setTimeout(() => {
+            ws.close()
+            reject(new Error('agent hello timeout'))
+        }, 5000)
+        ws.on('open', () => {
+            ws.send(
+                JSON.stringify({
+                    type: 'hello',
+                    id: hostId,
+                    name: 'Duplicate E2E Agent',
+                    capabilities: ['list']
+                })
+            )
+        })
+        ws.on('close', (code, reason) => {
+            clearTimeout(to)
+            resolve({ code, reason: reason.toString('utf8') })
+        })
+        ws.on('unexpected-response', (_req, res) => {
+            clearTimeout(to)
+            reject(new Error('agent ws http ' + res.statusCode))
+        })
+        ws.on('error', (err) => {
+            clearTimeout(to)
+            reject(err)
+        })
+    })
 }
 
 function startAgentProcess(hostId, token) {
@@ -328,6 +363,20 @@ async function main() {
         return capture.stdout.includes(r.body.path)
     })
 
+    await check('uploads: failed session image upload cleans saved file', async () => {
+        const uploadDir = `${homedir()}/.tmuxd/uploads`
+        const before = new Set(await readdir(uploadDir).catch(() => []))
+        const form = new FormData()
+        form.set('file', new Blob([Buffer.from([0x89, 0x50, 0x4e, 0x47])], { type: 'image/png' }), 'orphan.png')
+        const r = await http('/api/sessions/not-a-real-tmuxd-session/uploads/clipboard-image', {
+            method: 'POST',
+            headers: { authorization: `Bearer ${token}` },
+            body: form
+        })
+        const after = await readdir(uploadDir).catch(() => [])
+        return r.status === 400 && after.every((name) => before.has(name))
+    })
+
     // ---- WEBSOCKET ----
     await check('ws: bad token → 401', async () => {
         try {
@@ -336,6 +385,49 @@ async function main() {
         } catch (err) {
             return /401/.test(err.message)
         }
+    })
+
+    await check('ws-ticket: missing target → 400', async () => {
+        const r = await http('/api/ws-ticket', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({})
+        })
+        return r.status === 400
+    })
+
+    await check('ws-ticket: target mismatch is rejected and consumes ticket', async () => {
+        const r = await http('/api/ws-ticket', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ hostId: 'local', sessionName: TEST_SESSION })
+        })
+        if (r.status !== 200 || typeof r.body?.ticket !== 'string') return false
+        try {
+            await wsConnect(`ws://${HOST}:${PORT}/ws/local/not-a-real-session?ticket=${encodeURIComponent(r.body.ticket)}&cols=80&rows=24`)
+            return false
+        } catch (err) {
+            if (!/401/.test(err.message)) return false
+        }
+        try {
+            await wsConnect(`ws://${HOST}:${PORT}/ws/local/${TEST_SESSION}?ticket=${encodeURIComponent(r.body.ticket)}&cols=80&rows=24`)
+            return false
+        } catch (err) {
+            return /401/.test(err.message)
+        }
+    })
+
+    await check('ws-ticket: matching target opens websocket', async () => {
+        const r = await http('/api/ws-ticket', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ hostId: 'local', sessionName: TEST_SESSION })
+        })
+        if (r.status !== 200 || typeof r.body?.ticket !== 'string') return false
+        const handle = await wsConnect(`ws://${HOST}:${PORT}/ws/local/${TEST_SESSION}?ticket=${encodeURIComponent(r.body.ticket)}&cols=80&rows=24`)
+        const ready = await waitForFrame(handle.frames, (f) => f.type === 'ready', 3000)
+        handle.ws.close(1000, 'test')
+        return ready.session === TEST_SESSION && ready.hostId === 'local'
     })
 
     let ws, frames
@@ -454,6 +546,22 @@ async function main() {
         const AGENT_SESSION = 'tmuxd-e2e-agent'
         await killIfPresent(AGENT_SESSION)
 
+        await check('agent: query token is rejected', async () => {
+            try {
+                await wsConnect(`ws://${HOST}:${PORT}/agent/connect?token=${encodeURIComponent(AGENT_TOKEN)}`)
+                return false
+            } catch (err) {
+                return /401/.test(err.message)
+            }
+        })
+
+        if (AGENT_HOST_BOUND) {
+            await check('agent: bound token rejects mismatched host id', async () => {
+                const closed = await agentHelloOnce('wrong-e2e-agent', AGENT_TOKEN)
+                return closed.code === 1008 && /host_id_token_mismatch/.test(closed.reason)
+            })
+        }
+
         await check('agent: outbound client connects to hub', async () => {
             agentProc = startAgentProcess(AGENT_HOST, AGENT_TOKEN)
             agentProc.on('exit', (code, signal) => {
@@ -461,6 +569,13 @@ async function main() {
                 else if (signal) console.error(`[agent] exited by ${signal}`)
             })
             return await waitForHost(AGENT_HOST, token)
+        })
+
+        await check('agent: duplicate host id is rejected without replacing original', async () => {
+            const closed = await agentHelloOnce(AGENT_HOST, AGENT_TOKEN)
+            if (closed.code !== 1008 || !/host_already_connected/.test(closed.reason)) return false
+            const r = await http('/api/hosts', { headers: { authorization: `Bearer ${token}` } })
+            return r.status === 200 && r.body?.hosts?.some((h) => h.id === AGENT_HOST && h.status === 'online')
         })
 
         await check('agent: create remote session', async () => {

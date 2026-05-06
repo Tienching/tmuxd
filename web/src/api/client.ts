@@ -90,10 +90,10 @@ export const api = {
             : request<CaptureResponse>(
                   `/api/hosts/${encodeURIComponent(target.hostId)}/sessions/${encodeURIComponent(target.sessionName)}/capture`
               ),
-    createWsTicket: (target?: Partial<SessionTarget>) =>
+    createWsTicket: (target: SessionTarget) =>
         request<{ ticket: string; expiresAt: number }>('/api/ws-ticket', {
             method: 'POST',
-            body: JSON.stringify(target ?? {})
+            body: JSON.stringify(target)
         }),
     uploadClipboardImage: (file: File) => {
         const form = new FormData()

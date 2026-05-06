@@ -26,7 +26,7 @@ function resolveWebDist(): string | null {
 
 async function main() {
     const config = loadConfig()
-    const agentRegistry = new AgentRegistry(config.agentToken)
+    const agentRegistry = new AgentRegistry(config.agentTokens)
 
     const app = new Hono()
 

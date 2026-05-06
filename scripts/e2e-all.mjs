@@ -43,7 +43,7 @@ async function main() {
                 PORT: String(PORT),
                 HOST: '127.0.0.1',
                 TMUXD_HOME: '/tmp/tmuxd-e2e-all',
-                TMUXD_AGENT_TOKEN: AGENT_TOKEN
+                TMUXD_AGENT_TOKENS: `e2e-agent=${AGENT_TOKEN}`
             },
             stdio: ['ignore', 'inherit', 'inherit']
         }
@@ -55,7 +55,13 @@ async function main() {
 
         console.log('\n=== API suite ===')
         try {
-            await run('scripts/e2e.mjs', { PORT: String(PORT), TMUXD_PASSWORD: PASSWORD, HOST: '127.0.0.1', TMUXD_AGENT_TOKEN: AGENT_TOKEN })
+            await run('scripts/e2e.mjs', {
+                PORT: String(PORT),
+                TMUXD_PASSWORD: PASSWORD,
+                HOST: '127.0.0.1',
+                TMUXD_AGENT_TOKEN: AGENT_TOKEN,
+                TMUXD_E2E_AGENT_HOST_BOUND: '1'
+            })
         } catch (e) {
             fails.push('api')
         }
