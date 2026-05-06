@@ -812,29 +812,31 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
                 <div className="flex shrink-0 items-center gap-1">
                     <button
                         type="button"
-                        className="rounded border border-neutral-700 px-2 py-0.5 text-neutral-300 hover:bg-neutral-800 disabled:opacity-40"
+                        className="inline-flex h-6 w-6 items-center justify-center rounded text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 disabled:opacity-40"
                         disabled={!canSplit || splitting}
                         title="Split right and choose a tmux session"
+                        aria-label="Split right and choose a tmux session"
                         onClick={(event) => {
                             event.stopPropagation()
                             onFocus()
                             onSplit('row')
                         }}
                     >
-                        {splitting ? 'Choose…' : 'Split →'}
+                        {splitting ? '…' : '▣'}
                     </button>
                     <button
                         type="button"
-                        className="rounded border border-neutral-700 px-2 py-0.5 text-neutral-300 hover:bg-neutral-800 disabled:opacity-40"
+                        className="inline-flex h-6 w-6 items-center justify-center rounded text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 disabled:opacity-40"
                         disabled={!canSplit || splitting}
                         title="Split down and choose a tmux session"
+                        aria-label="Split down and choose a tmux session"
                         onClick={(event) => {
                             event.stopPropagation()
                             onFocus()
                             onSplit('column')
                         }}
                     >
-                        Split ↓
+                        ▤
                     </button>
                     <button
                         type="button"
