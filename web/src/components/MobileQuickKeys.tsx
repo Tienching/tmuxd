@@ -4,10 +4,12 @@ import { applyQuickModifiers, MOBILE_QUICK_KEY_ROWS, type QuickKey } from './qui
 export function MobileQuickKeys({
     onInput,
     onCopy,
+    onImage,
     copyLoading = false
 }: {
     onInput: (input: string) => void
     onCopy?: () => void
+    onImage?: () => void
     copyLoading?: boolean
 }) {
     const [open, setOpen] = useState(false)
@@ -41,7 +43,7 @@ export function MobileQuickKeys({
 
     return (
         <div className="border-t border-neutral-800 bg-neutral-950 p-1 pb-[calc(env(safe-area-inset-bottom)+0.25rem)] md:hidden">
-            <div className={onCopy ? 'grid grid-cols-2 gap-1' : ''}>
+            <div className={onCopy || onImage ? 'grid gap-1' : ''} style={{ gridTemplateColumns: `repeat(${1 + (onCopy ? 1 : 0) + (onImage ? 1 : 0)}, minmax(0, 1fr))` }}>
                 <button
                     type="button"
                     className="w-full rounded border border-neutral-800 bg-neutral-900 px-2 py-1.5 text-xs font-medium text-neutral-100 active:bg-neutral-700"
@@ -58,6 +60,15 @@ export function MobileQuickKeys({
                         onClick={onCopy}
                     >
                         {copyLoading ? 'Text…' : 'Text'}
+                    </button>
+                )}
+                {onImage && (
+                    <button
+                        type="button"
+                        className="w-full rounded border border-neutral-800 bg-neutral-900 px-2 py-1.5 text-xs font-medium text-neutral-100 active:bg-neutral-700"
+                        onClick={onImage}
+                    >
+                        Image
                     </button>
                 )}
             </div>

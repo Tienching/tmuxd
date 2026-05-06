@@ -9,6 +9,7 @@ import { installMobileTouchWheelBridge } from './mobileTouchWheel'
  * Ported/simplified from tencent-hapi/web/src/components/Terminal/TerminalView.tsx.
  */
 export function TerminalView(props: {
+    active?: boolean
     onMount?: (terminal: Terminal) => void
     onResize?: (cols: number, rows: number) => void
     onClipboardImage?: (file: File) => void | Promise<void>
@@ -18,10 +19,14 @@ export function TerminalView(props: {
     const onMountRef = useRef(props.onMount)
     const onResizeRef = useRef(props.onResize)
     const onClipboardImageRef = useRef(props.onClipboardImage)
+    const activeRef = useRef(props.active ?? true)
 
     useEffect(() => {
         onMountRef.current = props.onMount
     }, [props.onMount])
+    useEffect(() => {
+        activeRef.current = props.active ?? true
+    }, [props.active])
     useEffect(() => {
         onResizeRef.current = props.onResize
     }, [props.onResize])
@@ -69,6 +74,14 @@ export function TerminalView(props: {
             capture: true,
             signal: abort.signal
         })
+        window.addEventListener(
+            'paste',
+            (event) => {
+                if (!activeRef.current) return
+                handleClipboardPaste(event, onClipboardImageRef.current)
+            },
+            { capture: true, signal: abort.signal }
+        )
         container.addEventListener('pointerdown', (event) => primeContextMenuPasteTarget(terminal, container, event), {
             capture: true,
             signal: abort.signal

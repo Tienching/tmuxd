@@ -94,6 +94,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
 
     const paneHandlesRef = useRef<Record<string, TerminalPaneHandle | null>>({})
     const copyRequestRef = useRef(0)
+    const imageInputRef = useRef<HTMLInputElement | null>(null)
 
     const panes = listWorkspacePanes(workspace)
     const activePane = panes.find((pane) => pane.id === activePaneId) ?? panes[0] ?? null
@@ -154,6 +155,28 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
     function sendInput(input: string) {
         if (!activePane) return
         paneHandlesRef.current[activePane.id]?.sendInput(input)
+    }
+
+    async function pasteImageToPane(file: File, pane = activePane) {
+        if (!pane) return
+        if (pane.target.hostId !== LOCAL_HOST_ID) {
+            setPaneStatusMsg(pane.id, 'Image paste is only available for Local sessions.')
+            return
+        }
+
+        setPaneStatusMsg(pane.id, 'Saving image…')
+        try {
+            const upload = await api.uploadClipboardImage(file)
+            paneHandlesRef.current[pane.id]?.sendInput(`${shellQuote(upload.path)} `)
+            setPaneStatusMsg(pane.id, 'Pasted image path.')
+            window.setTimeout(() => clearPaneStatusMsg(pane.id, 'Pasted image path.'), 3000)
+        } catch {
+            setPaneStatusMsg(pane.id, 'Failed to paste image.')
+        }
+    }
+
+    function openImagePicker() {
+        imageInputRef.current?.click()
     }
 
     async function openCopySheet() {
@@ -253,8 +276,34 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
         })
     }
 
+    function setPaneStatusMsg(paneId: string, statusMsg: string) {
+        setPaneStatuses((current) => {
+            const previous = current[paneId] ?? { status: 'open' as Status, statusMsg: null }
+            return { ...current, [paneId]: { ...previous, statusMsg } }
+        })
+    }
+
+    function clearPaneStatusMsg(paneId: string, statusMsg: string) {
+        setPaneStatuses((current) => {
+            const previous = current[paneId]
+            if (!previous || previous.statusMsg !== statusMsg) return current
+            return { ...current, [paneId]: { ...previous, statusMsg: null } }
+        })
+    }
+
     return (
         <div className="flex h-full flex-col">
+            <input
+                ref={imageInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(event) => {
+                    const file = event.currentTarget.files?.[0]
+                    event.currentTarget.value = ''
+                    if (file) void pasteImageToPane(file)
+                }}
+            />
             <div className="border-b border-neutral-800 bg-neutral-900/60 px-3 py-2 text-sm sm:px-4">
                 <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 md:hidden">
                     <button
@@ -285,6 +334,14 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
                     </span>
                     <div className="flex min-w-0 items-center justify-end gap-2 justify-self-end text-xs">
                         {panes.length > 1 && <span className="text-neutral-500">{panes.length} panes</span>}
+                        <button
+                            type="button"
+                            className="rounded border border-neutral-700 px-2 py-0.5 text-neutral-300 hover:bg-neutral-800"
+                            title="Upload an image and paste its file path"
+                            onClick={openImagePicker}
+                        >
+                            Image
+                        </button>
                         <StatusDot status={activePaneStatus.status} />
                         <span className="text-neutral-400">{activePaneStatus.status}</span>
                         {activePaneStatus.statusMsg && <span className="truncate text-red-400">· {activePaneStatus.statusMsg}</span>}
@@ -327,6 +384,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
                         onCopy={() => {
                             void openCopySheet()
                         }}
+                        onImage={openImagePicker}
                         copyLoading={copyLoading}
                     />
                 </div>
@@ -797,6 +855,7 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
             <div className="min-h-0 flex-1">
                 <TerminalView
                     key={targetKey(pane.target)}
+                    active={active}
                     className="overflow-hidden"
                     onClipboardImage={pasteClipboardImage}
                     onMount={(term) => {

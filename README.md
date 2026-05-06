@@ -178,10 +178,13 @@ On mobile:
 - Use **New** from the picker to create and attach to a new session.
 - Use **Keys** for mobile-friendly terminal keys and modifiers.
 - Use **Text** to open selectable tmux session text. The text view is positioned from tmux's current scroll position.
+- Use **Image** when browser image paste is not available; it uploads an image file and pastes its path.
 
 ### Clipboard images
 
 When you paste an image into a **Local** terminal session, tmuxd saves it under `~/.tmuxd/uploads` on the server and pastes the shell-quoted file path into the terminal. This makes screenshots available to shell commands and terminal editors as normal files.
+
+If your browser does not expose clipboard images to web pages, use the **Image** button in the terminal UI to choose an image file manually.
 
 Remote agent sessions do not currently receive pasted image files; only local sessions can use this clipboard-image path paste.
 
