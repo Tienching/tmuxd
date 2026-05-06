@@ -576,6 +576,24 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
         }
     }
 
+    async function pasteClipboardImage(file: File) {
+        if (pane.target.hostId !== LOCAL_HOST_ID) {
+            setPaneStatusMsg('Image paste is only available for Local sessions.')
+            return
+        }
+        setPaneStatusMsg('Saving pasted image…')
+        try {
+            const upload = await api.uploadClipboardImage(file)
+            sendInput(`${shellQuote(upload.path)} `)
+            setPaneStatusMsg('Pasted image path.')
+            window.setTimeout(() => {
+                if (statusMsgRef.current === 'Pasted image path.') setPaneStatusMsg(null)
+            }, 3000)
+        } catch {
+            setPaneStatusMsg('Failed to paste image.')
+        }
+    }
+
     useEffect(() => {
         onStatusRef.current(statusRef.current, statusMsgRef.current)
         reconnectRef.current.aborted = false
@@ -780,6 +798,7 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
                 <TerminalView
                     key={targetKey(pane.target)}
                     className="overflow-hidden"
+                    onClipboardImage={pasteClipboardImage}
                     onMount={(term) => {
                         try {
                             inputSubRef.current?.dispose()
@@ -1241,6 +1260,10 @@ async function invalidateSessionQueries(queryClient: ReturnType<typeof useQueryC
 function navigateToTarget(navigate: ReturnType<typeof useNavigate>, target: SessionTarget): void {
     if (target.hostId === LOCAL_HOST_ID) navigate({ to: '/attach/$name', params: { name: target.sessionName } })
     else navigate({ to: '/attach/$hostId/$name', params: { hostId: target.hostId, name: target.sessionName } })
+}
+
+function shellQuote(value: string): string {
+    return `'${value.replace(/'/g, `'\\''`)}'`
 }
 
 function saveWorkspace(workspace: WorkspaceNode): void {

@@ -11,6 +11,7 @@ A local-first web UI for `tmux` sessions. Open your browser, sign in with one pa
 - Creates, attaches to, and kills tmux sessions from the web UI.
 - Creates named sessions or auto-named sessions when you leave the name blank.
 - Streams an interactive terminal over WebSocket using xterm.js.
+- Saves pasted clipboard images to `~/.tmuxd/uploads` and pastes the saved file path into local sessions.
 - Keeps a browser-local **Opened** list for fast switching between recently attached sessions.
 - Provides an **Opened / All sessions** side panel on the terminal page, including a quick **New session** action.
 - Starts newly-created sessions in the server user's home directory.
@@ -177,6 +178,12 @@ On mobile:
 - Use **New** from the picker to create and attach to a new session.
 - Use **Keys** for mobile-friendly terminal keys and modifiers.
 - Use **Text** to open selectable tmux session text. The text view is positioned from tmux's current scroll position.
+
+### Clipboard images
+
+When you paste an image into a **Local** terminal session, tmuxd saves it under `~/.tmuxd/uploads` on the server and pastes the shell-quoted file path into the terminal. This makes screenshots available to shell commands and terminal editors as normal files.
+
+Remote agent sessions do not currently receive pasted image files; only local sessions can use this clipboard-image path paste.
 
 ### Mobile / install as app
 

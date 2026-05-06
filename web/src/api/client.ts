@@ -1,4 +1,12 @@
-import { LOCAL_HOST_ID, type AuthResponse, type HostInfo, type SessionTarget, type TargetSession, type TmuxSession } from '@tmuxd/shared'
+import {
+    LOCAL_HOST_ID,
+    type AuthResponse,
+    type ClipboardImageUploadResponse,
+    type HostInfo,
+    type SessionTarget,
+    type TargetSession,
+    type TmuxSession
+} from '@tmuxd/shared'
 import { getToken, notifyAuthRequired } from '../auth/tokenStore'
 
 interface CaptureResponse {
@@ -42,6 +50,28 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     return body as T
 }
 
+async function uploadRequest<T>(path: string, form: FormData): Promise<T> {
+    const headers = new Headers()
+    const token = getToken()
+    if (token) headers.set('authorization', `Bearer ${token}`)
+    const res = await fetch(path, { method: 'POST', headers, body: form })
+    const text = await res.text()
+    let body: unknown = null
+    if (text) {
+        try {
+            body = JSON.parse(text)
+        } catch {
+            body = text
+        }
+    }
+    if (!res.ok) {
+        if (res.status === 401) notifyAuthRequired()
+        const msg = typeof body === 'object' && body && 'error' in body ? String((body as { error: unknown }).error) : `HTTP ${res.status}`
+        throw new ApiError(res.status, body, msg)
+    }
+    return body as T
+}
+
 export const api = {
     login: (password: string) =>
         request<AuthResponse>('/api/auth', { method: 'POST', body: JSON.stringify({ password }) }),
@@ -65,6 +95,11 @@ export const api = {
             method: 'POST',
             body: JSON.stringify(target ?? {})
         }),
+    uploadClipboardImage: (file: File) => {
+        const form = new FormData()
+        form.set('file', file, file.name || 'clipboard-image')
+        return uploadRequest<ClipboardImageUploadResponse>('/api/uploads/clipboard-image', form)
+    },
     killSession: (name: string) =>
         request<null>(`/api/sessions/${encodeURIComponent(name)}`, { method: 'DELETE' }),
     killTargetSession: (target: SessionTarget) =>

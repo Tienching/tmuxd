@@ -16,6 +16,7 @@
 import { spawn } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { execFile } from 'node:child_process'
+import { rm, stat } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import { homedir } from 'node:os'
 import WebSocket from 'ws'
@@ -293,6 +294,22 @@ async function main() {
     await check('hosts: unknown host sessions → 404', async () => {
         const r = await http('/api/hosts/missing/sessions', { headers: { authorization: `Bearer ${token}` } })
         return r.status === 404 && r.body?.error === 'host_not_found'
+    })
+
+    await check('uploads: clipboard image saves a local file', async () => {
+        const form = new FormData()
+        form.set('file', new Blob([Buffer.from([0x89, 0x50, 0x4e, 0x47])], { type: 'image/png' }), 'paste.png')
+        const r = await http('/api/uploads/clipboard-image', {
+            method: 'POST',
+            headers: { authorization: `Bearer ${token}` },
+            body: form
+        })
+        if (r.status !== 201 || typeof r.body?.path !== 'string') return false
+        const expectedPrefix = `${homedir()}/.tmuxd/uploads/`
+        if (!r.body.path.startsWith(expectedPrefix) || !r.body.name.endsWith('.png')) return false
+        const info = await stat(r.body.path)
+        await rm(r.body.path, { force: true })
+        return info.size === 4 && r.body.type === 'image/png'
     })
 
     // ---- WEBSOCKET ----

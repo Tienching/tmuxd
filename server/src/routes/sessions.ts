@@ -1,5 +1,10 @@
 import { Hono } from 'hono'
 import type { Context, Next } from 'hono'
+import { File } from 'node:buffer'
+import { randomUUID } from 'node:crypto'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { verifyJwt } from '../auth.js'
 import { createSessionSchema, wsTicketRequestSchema, type TmuxSession } from '@tmuxd/shared'
 import { getLocalHost, isLocalHost } from '../hosts.js'
@@ -16,6 +21,16 @@ function bearerAuth(jwtSecret: Uint8Array) {
         if (!payload) return c.json({ error: 'invalid_token' }, 401)
         await next()
     }
+}
+
+const MAX_CLIPBOARD_IMAGE_BYTES = 20 * 1024 * 1024
+const CLIPBOARD_IMAGE_EXTENSIONS: Record<string, string> = {
+    'image/png': '.png',
+    'image/jpeg': '.jpg',
+    'image/gif': '.gif',
+    'image/webp': '.webp',
+    'image/bmp': '.bmp',
+    'image/tiff': '.tiff'
 }
 
 export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry?: AgentRegistry): Hono {
@@ -94,6 +109,26 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry?: Agen
 
     app.post('/ws-ticket', (c) => {
         return issueTargetWsTicket(c, agentRegistry)
+    })
+
+    app.post('/uploads/clipboard-image', async (c) => {
+        const form = await c.req.raw.formData().catch(() => null)
+        const file = form?.get('file')
+        if (!(file instanceof File)) return c.json({ error: 'missing_file' }, 400)
+
+        const ext = CLIPBOARD_IMAGE_EXTENSIONS[file.type]
+        if (!ext) return c.json({ error: 'unsupported_image_type' }, 415)
+        if (file.size <= 0 || file.size > MAX_CLIPBOARD_IMAGE_BYTES) return c.json({ error: 'file_too_large' }, 413)
+
+        const uploadDir = join(homedir(), '.tmuxd', 'uploads')
+        await mkdir(uploadDir, { recursive: true, mode: 0o700 })
+
+        const name = `paste-${timestampForFile()}-${randomUUID().slice(0, 8)}${ext}`
+        const path = join(uploadDir, name)
+        const bytes = Buffer.from(await file.arrayBuffer())
+        await writeFile(path, bytes, { mode: 0o600 })
+
+        return c.json({ path, name, size: bytes.length, type: file.type }, 201)
     })
 
     app.get('/hosts/:hostId/sessions/:name/capture', async (c) => {
@@ -205,4 +240,8 @@ function toTargetSessions(sessions: TmuxSession[], hostId: string, hostName: str
 
 function errMsg(err: unknown): string {
     return err instanceof Error ? err.message : String(err)
+}
+
+function timestampForFile(): string {
+    return new Date().toISOString().replace(/\D/g, '').slice(0, 14)
 }

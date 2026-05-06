@@ -36,6 +36,13 @@ export interface AuthResponse {
     expiresAt: number // unix seconds
 }
 
+export interface ClipboardImageUploadResponse {
+    path: string
+    name: string
+    size: number
+    type: string
+}
+
 /** Server → client WebSocket frames */
 export type ServerWsMessage =
     | { type: 'ready'; session: string; cols: number; rows: number; hostId?: string }

@@ -11,11 +11,13 @@ import { installMobileTouchWheelBridge } from './mobileTouchWheel'
 export function TerminalView(props: {
     onMount?: (terminal: Terminal) => void
     onResize?: (cols: number, rows: number) => void
+    onClipboardImage?: (file: File) => void | Promise<void>
     className?: string
 }) {
     const containerRef = useRef<HTMLDivElement | null>(null)
     const onMountRef = useRef(props.onMount)
     const onResizeRef = useRef(props.onResize)
+    const onClipboardImageRef = useRef(props.onClipboardImage)
 
     useEffect(() => {
         onMountRef.current = props.onMount
@@ -23,6 +25,9 @@ export function TerminalView(props: {
     useEffect(() => {
         onResizeRef.current = props.onResize
     }, [props.onResize])
+    useEffect(() => {
+        onClipboardImageRef.current = props.onClipboardImage
+    }, [props.onClipboardImage])
 
     useEffect(() => {
         const container = containerRef.current
@@ -59,6 +64,10 @@ export function TerminalView(props: {
             if (isCopyShortcut(event)) return false
             if (isPasteShortcut(event)) return false
             return true
+        })
+        container.addEventListener('paste', (event) => handleClipboardPaste(event, onClipboardImageRef.current), {
+            capture: true,
+            signal: abort.signal
         })
         container.addEventListener('pointerdown', (event) => primeContextMenuPasteTarget(terminal, container, event), {
             capture: true,
@@ -111,6 +120,34 @@ function isPasteShortcut(event: KeyboardEvent): boolean {
 function isCopyShortcut(event: KeyboardEvent): boolean {
     if (!(event.ctrlKey || event.metaKey) || event.altKey) return false
     return event.key.toLowerCase() === 'c' || event.code === 'KeyC'
+}
+
+function handleClipboardPaste(event: ClipboardEvent, onClipboardImage?: (file: File) => void | Promise<void>): void {
+    if (!onClipboardImage) return
+    const file = getClipboardImage(event)
+    if (!file) return
+    event.preventDefault()
+    event.stopPropagation()
+    void onClipboardImage(file)
+}
+
+function getClipboardImage(event: ClipboardEvent): File | null {
+    const items = event.clipboardData?.items
+    if (items) {
+        for (const item of Array.from(items)) {
+            if (item.kind !== 'file' || !item.type.startsWith('image/')) continue
+            const file = item.getAsFile()
+            if (file) return file
+        }
+    }
+
+    const files = event.clipboardData?.files
+    if (files) {
+        for (const file of Array.from(files)) {
+            if (file.type.startsWith('image/')) return file
+        }
+    }
+    return null
 }
 
 function primeContextMenuPasteTarget(terminal: Terminal, container: HTMLElement, event: PointerEvent): void {
