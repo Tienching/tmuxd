@@ -45,6 +45,7 @@ export function OpenSessionsSidebar({
 
     const liveKeys = data ? new Set(data.sessions.map(targetSessionKey)) : null
     const visibleOpenedSessions = liveKeys ? sessions.filter((s) => liveKeys.has(openSessionKey(s))) : sessions
+    const openedGroups = groupedOpenSessions(visibleOpenedSessions)
     const openedKeys = new Set(visibleOpenedSessions.map(openSessionKey))
     const otherSessions = data?.sessions.filter((s) => !openedKeys.has(targetSessionKey(s))) ?? []
     const totalSessionCount = data?.sessions.length ?? 0
@@ -84,38 +85,39 @@ export function OpenSessionsSidebar({
             {visibleOpenedSessions.length === 0 ? (
                 <p className="px-1 text-xs text-neutral-600">No opened sessions yet.</p>
             ) : (
-                <nav className="flex flex-col gap-2">
-                    {visibleOpenedSessions.map((s) => {
-                        const active = s.name === currentName && s.hostId === currentHostId
-                        return (
-                            <div
-                                key={`${s.hostId}:${s.name}`}
-                                className={`flex min-w-0 items-center gap-1 rounded-md border ${
-                                    active
-                                        ? 'border-neutral-500 bg-neutral-800'
-                                        : 'border-neutral-800 bg-neutral-900/60 hover:bg-neutral-900'
-                                }`}
-                            >
-                                <button
-                                    className="min-w-0 flex-1 px-2 py-2 text-left text-xs text-neutral-100"
-                                    aria-current={active ? 'page' : undefined}
-                                    onClick={() => openSession(openSessionTarget(s))}
+                openedGroups.map((group) => (
+                    <SessionGroup key={`opened-${group.hostId}`} title={group.hostName} count={group.sessions.length}>
+                        {group.sessions.map((s) => {
+                            const active = s.name === currentName && s.hostId === currentHostId
+                            return (
+                                <div
+                                    key={`${s.hostId}:${s.name}`}
+                                    className={`flex min-w-0 items-center gap-1 rounded-md border ${
+                                        active
+                                            ? 'border-neutral-500 bg-neutral-800'
+                                            : 'border-neutral-800 bg-neutral-900/60 hover:bg-neutral-900'
+                                    }`}
                                 >
-                                    <span className="block truncate font-mono">{s.name}</span>
-                                    {s.hostId !== LOCAL_HOST_ID && <span className="block truncate text-[10px] text-neutral-500">{s.hostName}</span>}
-                                </button>
-                                <button
-                                    type="button"
-                                    className="px-2 py-2 text-xs text-neutral-500 hover:text-neutral-100"
-                                    aria-label={`Remove ${s.name} from opened sessions`}
-                                    onClick={() => removeOpenSession({ hostId: s.hostId, sessionName: s.name })}
-                                >
-                                    ×
-                                </button>
-                            </div>
-                        )
-                    })}
-                </nav>
+                                    <button
+                                        className="min-w-0 flex-1 px-2 py-2 text-left text-xs text-neutral-100"
+                                        aria-current={active ? 'page' : undefined}
+                                        onClick={() => openSession(openSessionTarget(s))}
+                                    >
+                                        <span className="block truncate font-mono">{s.name}</span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="px-2 py-2 text-xs text-neutral-500 hover:text-neutral-100"
+                                        aria-label={`Remove ${s.name} from opened sessions`}
+                                        onClick={() => removeOpenSession({ hostId: s.hostId, sessionName: s.name })}
+                                    >
+                                        ×
+                                    </button>
+                                </div>
+                            )
+                        })}
+                    </SessionGroup>
+                ))
             )}
             <div className="mt-3 mb-2 flex items-center justify-between gap-2 px-1">
                 <h2 className="text-xs font-medium uppercase tracking-wide text-neutral-500">Not opened</h2>
@@ -180,6 +182,7 @@ export function MobileSessionSelect({
 
     const liveKeys = data ? new Set(data.sessions.map(targetSessionKey)) : null
     const visibleOpenedSessions = liveKeys ? sessions.filter((s) => liveKeys.has(openSessionKey(s))) : sessions
+    const openedGroups = groupedOpenSessions(visibleOpenedSessions)
     const openedKeys = new Set(visibleOpenedSessions.map(openSessionKey))
     const otherSessions = data?.sessions.filter((s) => !openedKeys.has(targetSessionKey(s))) ?? []
     const totalSessionCount = data?.sessions.length ?? 0
@@ -244,36 +247,37 @@ export function MobileSessionSelect({
                         {visibleOpenedSessions.length > 0 && (
                             <>
                                 <div className="mt-2 mb-1 px-1 text-[10px] font-medium uppercase tracking-wide text-neutral-600">Opened</div>
-                                <nav className="flex flex-col gap-1">
-                                    {visibleOpenedSessions.map((s) => (
-                                        <div
-                                            key={`opened-mobile-${s.hostId}-${s.name}`}
-                                            className={`flex min-w-0 items-center gap-1 rounded-md border ${
-                                                s.name === currentName && s.hostId === currentHostId
-                                                    ? 'border-neutral-500 bg-neutral-800'
-                                                    : 'border-neutral-800 bg-neutral-900/60'
-                                            }`}
-                                        >
-                                            <button
-                                                type="button"
-                                                className="min-w-0 flex-1 px-2 py-2 text-left text-xs text-neutral-100"
-                                                aria-current={s.name === currentName && s.hostId === currentHostId ? 'page' : undefined}
-                                                onClick={() => attachSession(openSessionTarget(s))}
+                                {openedGroups.map((group) => (
+                                    <SessionGroup key={`opened-mobile-${group.hostId}`} title={group.hostName} count={group.sessions.length} mobile>
+                                        {group.sessions.map((s) => (
+                                            <div
+                                                key={`opened-mobile-${s.hostId}-${s.name}`}
+                                                className={`flex min-w-0 items-center gap-1 rounded-md border ${
+                                                    s.name === currentName && s.hostId === currentHostId
+                                                        ? 'border-neutral-500 bg-neutral-800'
+                                                        : 'border-neutral-800 bg-neutral-900/60'
+                                                }`}
                                             >
-                                                <span className="block truncate font-mono">{s.name}</span>
-                                                {s.hostId !== LOCAL_HOST_ID && <span className="block truncate text-[10px] text-neutral-500">{s.hostName}</span>}
-                                            </button>
-                                            <button
-                                                type="button"
-                                                className="px-3 py-2 text-xs text-neutral-500 active:bg-neutral-800 active:text-neutral-100"
-                                                aria-label={`Remove ${s.name} from opened sessions`}
-                                                onClick={() => removeOpenSession({ hostId: s.hostId, sessionName: s.name })}
-                                            >
-                                                ×
-                                            </button>
-                                        </div>
-                                    ))}
-                                </nav>
+                                                <button
+                                                    type="button"
+                                                    className="min-w-0 flex-1 px-2 py-2 text-left text-xs text-neutral-100"
+                                                    aria-current={s.name === currentName && s.hostId === currentHostId ? 'page' : undefined}
+                                                    onClick={() => attachSession(openSessionTarget(s))}
+                                                >
+                                                    <span className="block truncate font-mono">{s.name}</span>
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className="px-3 py-2 text-xs text-neutral-500 active:bg-neutral-800 active:text-neutral-100"
+                                                    aria-label={`Remove ${s.name} from opened sessions`}
+                                                    onClick={() => removeOpenSession({ hostId: s.hostId, sessionName: s.name })}
+                                                >
+                                                    ×
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </SessionGroup>
+                                ))}
                             </>
                         )}
 
@@ -471,6 +475,16 @@ function openSessionTarget(session: OpenSession): SessionTarget {
 
 function sameTarget(a: SessionTarget, b: SessionTarget): boolean {
     return a.hostId === b.hostId && a.sessionName === b.sessionName
+}
+
+function groupedOpenSessions(sessions: OpenSession[]): Array<{ hostId: string; hostName: string; sessions: OpenSession[] }> {
+    const groups = new Map<string, { hostId: string; hostName: string; sessions: OpenSession[] }>()
+    for (const session of sessions) {
+        const existing = groups.get(session.hostId)
+        if (existing) existing.sessions.push(session)
+        else groups.set(session.hostId, { hostId: session.hostId, hostName: session.hostName, sessions: [session] })
+    }
+    return [...groups.values()]
 }
 
 function countSessionsByHost(sessions: TargetSession[]): Map<string, number> {

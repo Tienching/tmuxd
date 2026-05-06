@@ -833,6 +833,7 @@ function SplitSessionChooser({
 
     const liveKeys = data ? new Set(data.sessions.map(targetSessionKey)) : null
     const visibleOpenedSessions = liveKeys ? openedSessions.filter((session) => liveKeys.has(openSessionKey(session))) : openedSessions
+    const openedGroups = groupedOpenSessions(visibleOpenedSessions)
     const openedKeys = new Set(visibleOpenedSessions.map(openSessionKey))
     const otherSessions = data?.sessions.filter((session) => !openedKeys.has(targetSessionKey(session))) ?? []
     const currentTarget = { hostId: currentHostId, sessionName: currentSessionName }
@@ -901,20 +902,20 @@ function SplitSessionChooser({
                         </div>
                     )}
 
-                    {visibleOpenedSessions.length > 0 && (
-                        <SessionChoiceSection title="Opened">
-                            {visibleOpenedSessions.map((session) => (
-                                <SplitSessionButton
-                                    key={`opened-split-${session.hostId}-${session.name}`}
-                                    name={session.name}
-                                    hostName={session.hostId === LOCAL_HOST_ID ? undefined : session.hostName}
-                                    active={session.name === currentSessionName && session.hostId === currentHostId}
-                                    disabled={creating}
-                                    onClick={() => onSelect({ hostId: session.hostId, sessionName: session.name })}
-                                />
-                            ))}
-                        </SessionChoiceSection>
-                    )}
+                    {visibleOpenedSessions.length > 0 &&
+                        openedGroups.map((group) => (
+                            <SessionChoiceSection key={`opened-split-${group.hostId}`} title={`${group.hostName} opened`}>
+                                {group.sessions.map((session) => (
+                                    <SplitSessionButton
+                                        key={`opened-split-${session.hostId}-${session.name}`}
+                                        name={session.name}
+                                        active={session.name === currentSessionName && session.hostId === currentHostId}
+                                        disabled={creating}
+                                        onClick={() => onSelect({ hostId: session.hostId, sessionName: session.name })}
+                                    />
+                                ))}
+                            </SessionChoiceSection>
+                        ))}
 
                     {isLoading ? (
                         <SessionChoiceSection title="Not opened">
@@ -1124,6 +1125,16 @@ function targetSessionKey(session: TargetSession): string {
 
 function openSessionKey(session: OpenSession): string {
     return targetKey({ hostId: session.hostId, sessionName: session.name })
+}
+
+function groupedOpenSessions(sessions: OpenSession[]): Array<{ hostId: string; hostName: string; sessions: OpenSession[] }> {
+    const groups = new Map<string, { hostId: string; hostName: string; sessions: OpenSession[] }>()
+    for (const session of sessions) {
+        const group = groups.get(session.hostId)
+        if (group) group.sessions.push(session)
+        else groups.set(session.hostId, { hostId: session.hostId, hostName: session.hostName, sessions: [session] })
+    }
+    return [...groups.values()]
 }
 
 function groupedTargetSessions(sessions: TargetSession[]): Array<{ hostId: string; hostName: string; sessions: TargetSession[] }> {
