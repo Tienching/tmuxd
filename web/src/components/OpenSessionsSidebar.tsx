@@ -47,6 +47,8 @@ export function OpenSessionsSidebar({
     const visibleOpenedSessions = liveKeys ? sessions.filter((s) => liveKeys.has(openSessionKey(s))) : sessions
     const openedKeys = new Set(visibleOpenedSessions.map(openSessionKey))
     const otherSessions = data?.sessions.filter((s) => !openedKeys.has(targetSessionKey(s))) ?? []
+    const totalSessionCount = data?.sessions.length ?? 0
+    const hostTotals = countSessionsByHost(data?.sessions ?? [])
     const currentHostName = data?.hosts.find((host) => host.id === currentHostId)?.name ?? hostLabel(currentHostId)
 
     if (hidden) {
@@ -118,18 +120,23 @@ export function OpenSessionsSidebar({
                 </nav>
             )}
             <div className="mt-3 mb-2 flex items-center justify-between gap-2 px-1">
-                <h2 className="text-xs font-medium uppercase tracking-wide text-neutral-500">Other sessions</h2>
-                <span className="text-[10px] text-neutral-600">{otherSessions.length}</span>
+                <h2 className="text-xs font-medium uppercase tracking-wide text-neutral-500">Not opened</h2>
+                <span className="text-[10px] text-neutral-600">{otherSessions.length} / {totalSessionCount} total</span>
             </div>
             {isLoading ? (
                 <p className="px-1 text-xs text-neutral-600">Loading sessions…</p>
             ) : error ? (
                 <p className="px-1 text-xs text-red-400">Failed to load sessions.</p>
             ) : otherSessions.length === 0 ? (
-                <p className="px-1 text-xs text-neutral-600">No more sessions.</p>
+                <p className="px-1 text-xs text-neutral-600">All live sessions are already in Opened.</p>
             ) : (
                 groupedTargetSessions(otherSessions).map((group) => (
-                    <SessionGroup key={group.hostId} title={group.hostName} count={group.sessions.length}>
+                    <SessionGroup
+                        key={group.hostId}
+                        title={group.hostName}
+                        count={group.sessions.length}
+                        countLabel={formatSessionCount(group.sessions.length, hostTotals.get(group.hostId) ?? group.sessions.length)}
+                    >
                         {group.sessions.map((s) => (
                             <button
                                 key={`${s.hostId}:${s.name}`}
@@ -177,6 +184,8 @@ export function MobileSessionSelect({
     const visibleOpenedSessions = liveKeys ? sessions.filter((s) => liveKeys.has(openSessionKey(s))) : sessions
     const openedKeys = new Set(visibleOpenedSessions.map(openSessionKey))
     const otherSessions = data?.sessions.filter((s) => !openedKeys.has(targetSessionKey(s))) ?? []
+    const totalSessionCount = data?.sessions.length ?? 0
+    const hostTotals = countSessionsByHost(data?.sessions ?? [])
     const currentKey = targetKey({ hostId: currentHostId, sessionName: currentName })
     const knownKeys = new Set([...visibleOpenedSessions.map(openSessionKey), ...otherSessions.map(targetSessionKey)])
     const showCurrentFallback = !knownKeys.has(currentKey)
@@ -271,16 +280,25 @@ export function MobileSessionSelect({
                             </>
                         )}
 
-                        <div className="mt-3 mb-1 px-1 text-[10px] font-medium uppercase tracking-wide text-neutral-600">Other sessions</div>
+                        <div className="mt-3 mb-1 flex items-center justify-between gap-2 px-1">
+                            <span className="text-[10px] font-medium uppercase tracking-wide text-neutral-600">Not opened</span>
+                            <span className="text-[10px] text-neutral-700">{otherSessions.length} / {totalSessionCount} total</span>
+                        </div>
                         {error ? (
                             <p className="px-1 text-xs text-red-400">Failed to load sessions.</p>
                         ) : !hasAnySession ? (
                             <p className="px-1 text-xs text-neutral-600">No sessions.</p>
                         ) : otherSessions.length === 0 ? (
-                            <p className="px-1 text-xs text-neutral-600">No more sessions.</p>
+                            <p className="px-1 text-xs text-neutral-600">All live sessions are already in Opened.</p>
                         ) : (
                             groupedTargetSessions(otherSessions).map((group) => (
-                                <SessionGroup key={`mobile-${group.hostId}`} title={group.hostName} count={group.sessions.length} mobile>
+                                <SessionGroup
+                                    key={`mobile-${group.hostId}`}
+                                    title={group.hostName}
+                                    count={group.sessions.length}
+                                    countLabel={formatSessionCount(group.sessions.length, hostTotals.get(group.hostId) ?? group.sessions.length)}
+                                    mobile
+                                >
                                     {group.sessions.map((s) => (
                                         <SessionMenuButton
                                             key={`all-mobile-${s.hostId}-${s.name}`}
@@ -299,12 +317,24 @@ export function MobileSessionSelect({
     )
 }
 
-function SessionGroup({ title, count, mobile, children }: { title: string; count: number; mobile?: boolean; children: ReactNode }) {
+function SessionGroup({
+    title,
+    count,
+    countLabel,
+    mobile,
+    children
+}: {
+    title: string
+    count: number
+    countLabel?: string
+    mobile?: boolean
+    children: ReactNode
+}) {
     return (
         <section className="mb-3 last:mb-0">
             <div className="mb-1 flex items-center justify-between gap-2 px-1">
                 <h3 className="truncate text-[10px] font-medium uppercase tracking-wide text-neutral-600">{title}</h3>
-                <span className="text-[10px] text-neutral-700">{count}</span>
+                <span className="shrink-0 text-[10px] text-neutral-700">{countLabel ?? count}</span>
             </div>
             <nav className={`flex flex-col ${mobile ? 'gap-1' : 'gap-2'}`}>{children}</nav>
         </section>
@@ -444,6 +474,16 @@ function openSessionTarget(session: OpenSession): SessionTarget {
 
 function sameTarget(a: SessionTarget, b: SessionTarget): boolean {
     return a.hostId === b.hostId && a.sessionName === b.sessionName
+}
+
+function countSessionsByHost(sessions: TargetSession[]): Map<string, number> {
+    const counts = new Map<string, number>()
+    for (const session of sessions) counts.set(session.hostId, (counts.get(session.hostId) ?? 0) + 1)
+    return counts
+}
+
+function formatSessionCount(visible: number, total: number): string {
+    return `${visible} / ${total} total`
 }
 
 function groupedTargetSessions(sessions: TargetSession[]): Array<{ hostId: string; hostName: string; sessions: TargetSession[] }> {
