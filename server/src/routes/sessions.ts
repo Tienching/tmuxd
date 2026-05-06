@@ -5,6 +5,7 @@ import { createSessionSchema, wsTicketRequestSchema, type TmuxSession } from '@t
 import { getLocalHost, isLocalHost } from '../hosts.js'
 import { captureSession, createSession, killSession, listSessions, validateSessionName } from '../tmux.js'
 import { issueWsTicket } from '../wsTickets.js'
+import { AgentError, type AgentRegistry } from '../agentRegistry.js'
 
 function bearerAuth(jwtSecret: Uint8Array) {
     return async (c: Context, next: Next) => {
@@ -17,12 +18,12 @@ function bearerAuth(jwtSecret: Uint8Array) {
     }
 }
 
-export function createSessionsRoutes(jwtSecret: Uint8Array): Hono {
+export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry?: AgentRegistry): Hono {
     const app = new Hono()
     app.use('*', bearerAuth(jwtSecret))
 
     app.get('/hosts', (c) => {
-        return c.json({ hosts: [getLocalHost()] })
+        return c.json({ hosts: [getLocalHost(), ...(agentRegistry?.listHosts() ?? [])] })
     })
 
     app.get('/sessions', async (c) => {
@@ -35,7 +36,15 @@ export function createSessionsRoutes(jwtSecret: Uint8Array): Hono {
     })
 
     app.get('/hosts/:hostId/sessions', async (c) => {
-        if (!isLocalHost(c.req.param('hostId'))) return c.json({ error: 'host_not_found' }, 404)
+        const hostId = c.req.param('hostId')
+        if (!isLocalHost(hostId)) {
+            if (!agentRegistry?.hasHost(hostId)) return c.json({ error: 'host_not_found' }, 404)
+            try {
+                return c.json({ sessions: await agentRegistry.listSessions(hostId) })
+            } catch (err) {
+                return agentRouteError(c, err)
+            }
+        }
         try {
             const host = getLocalHost()
             const list = await listSessions()
@@ -60,10 +69,19 @@ export function createSessionsRoutes(jwtSecret: Uint8Array): Hono {
     })
 
     app.post('/hosts/:hostId/sessions', async (c) => {
-        if (!isLocalHost(c.req.param('hostId'))) return c.json({ error: 'host_not_found' }, 404)
+        const hostId = c.req.param('hostId')
         const body = await c.req.json().catch(() => null)
         const parsed = createSessionSchema.safeParse(body)
         if (!parsed.success) return c.json({ error: 'invalid_body' }, 400)
+        if (!isLocalHost(hostId)) {
+            if (!agentRegistry?.hasHost(hostId)) return c.json({ error: 'host_not_found' }, 404)
+            try {
+                await agentRegistry.createSession(hostId, parsed.data.name)
+                return c.json({ ok: true }, 201)
+            } catch (err) {
+                return agentRouteError(c, err)
+            }
+        }
         try {
             await createSession(parsed.data.name)
             return c.json({ ok: true }, 201)
@@ -75,12 +93,20 @@ export function createSessionsRoutes(jwtSecret: Uint8Array): Hono {
     })
 
     app.post('/ws-ticket', (c) => {
-        return issueTargetWsTicket(c)
+        return issueTargetWsTicket(c, agentRegistry)
     })
 
     app.get('/hosts/:hostId/sessions/:name/capture', async (c) => {
-        if (!isLocalHost(c.req.param('hostId'))) return c.json({ error: 'host_not_found' }, 404)
+        const hostId = c.req.param('hostId')
         const name = c.req.param('name')
+        if (!isLocalHost(hostId)) {
+            if (!agentRegistry?.hasHost(hostId)) return c.json({ error: 'host_not_found' }, 404)
+            try {
+                return c.json(await agentRegistry.captureSession(hostId, name))
+            } catch (err) {
+                return agentRouteError(c, err)
+            }
+        }
         try {
             const capture = await captureSession(name)
             return c.json(capture)
@@ -94,8 +120,17 @@ export function createSessionsRoutes(jwtSecret: Uint8Array): Hono {
     })
 
     app.delete('/hosts/:hostId/sessions/:name', async (c) => {
-        if (!isLocalHost(c.req.param('hostId'))) return c.json({ error: 'host_not_found' }, 404)
+        const hostId = c.req.param('hostId')
         const name = c.req.param('name')
+        if (!isLocalHost(hostId)) {
+            if (!agentRegistry?.hasHost(hostId)) return c.json({ error: 'host_not_found' }, 404)
+            try {
+                await agentRegistry.killSession(hostId, name)
+                return c.body(null, 204)
+            } catch (err) {
+                return agentRouteError(c, err)
+            }
+        }
         try {
             const safe = validateSessionName(name)
             await killSession(safe)
@@ -133,7 +168,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array): Hono {
     return app
 }
 
-async function issueTargetWsTicket(c: Context) {
+async function issueTargetWsTicket(c: Context, agentRegistry?: AgentRegistry) {
     const raw = await c.req.text().catch(() => '')
     let body: unknown = undefined
     if (raw.trim()) {
@@ -146,8 +181,22 @@ async function issueTargetWsTicket(c: Context) {
     const parsed = wsTicketRequestSchema.safeParse(body)
     if (!parsed.success) return c.json({ error: 'invalid_body' }, 400)
     const hostId = parsed.data?.hostId
-    if (hostId && !isLocalHost(hostId)) return c.json({ error: 'host_not_found' }, 404)
+    if (hostId && !isLocalHost(hostId) && !agentRegistry?.hasHost(hostId)) return c.json({ error: 'host_not_found' }, 404)
     return c.json(issueWsTicket())
+}
+
+function agentRouteError(c: Context, err: unknown) {
+    const message = errMsg(err)
+    if (err instanceof AgentError) {
+        if (message === 'host_not_found') return c.json({ error: 'host_not_found' }, 404)
+        if (message === 'capability_not_supported') return c.json({ error: 'capability_not_supported' }, 405)
+        if (/already exists/i.test(message)) return c.json({ error: 'session_exists' }, 409)
+        if (/can't find|no such|not found/i.test(message)) return c.json({ error: 'session_not_found' }, 404)
+        if (/timeout/i.test(message)) return c.json({ error: 'agent_timeout' }, 504)
+    }
+    if (/already exists/i.test(message)) return c.json({ error: 'session_exists' }, 409)
+    if (/can't find|no such|not found/i.test(message)) return c.json({ error: 'session_not_found' }, 404)
+    return c.json({ error: 'agent_error', message }, 502)
 }
 
 function toTargetSessions(sessions: TmuxSession[], hostId: string, hostName: string) {

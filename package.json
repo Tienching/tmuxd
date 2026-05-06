@@ -21,7 +21,8 @@
         "e2e:api": "node scripts/e2e.mjs",
         "e2e:multi": "node scripts/e2e-multi.mjs",
         "e2e:shutdown": "node scripts/e2e-shutdown.mjs",
-        "e2e:web": "node scripts/e2e-web.mjs"
+        "e2e:web": "node scripts/e2e-web.mjs",
+        "agent": "npm -w @tmuxd/server run agent"
     },
     "devDependencies": {
         "concurrently": "^9.1.0",

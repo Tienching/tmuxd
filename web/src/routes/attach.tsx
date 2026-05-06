@@ -17,6 +17,7 @@ import { encodeTerminalInputPayload } from '../components/quickKeys'
 import { getScrollTopForTmuxPosition } from '../components/terminalText'
 import { getInitialSidebarHidden, MobileSessionSelect, OpenSessionsSidebar, saveSidebarHidden } from '../components/OpenSessionsSidebar'
 import { api } from '../api/client'
+import { listHostSessionsData } from '../hosts/sessionData'
 import { getToken } from '../auth/tokenStore'
 import { createSessionWithOptionalName } from '../session/createSession'
 import { listOpenSessions, markOpenSession, subscribeOpenSessions, type OpenSession } from '../session/openSessions'
@@ -37,7 +38,7 @@ import {
     type WorkspacePane,
     type WorkspaceSplit
 } from '../workspace/layout'
-import { LOCAL_HOST_ID, type ClientWsMessage, type ServerWsMessage, type SessionTarget } from '@tmuxd/shared'
+import { LOCAL_HOST_ID, type ClientWsMessage, type ServerWsMessage, type SessionTarget, type TargetSession } from '@tmuxd/shared'
 
 type Status = 'connecting' | 'open' | 'closed' | 'error'
 
@@ -231,15 +232,16 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
         }
     }
 
-    function attachSessionToActive(sessionName: string) {
-        const trimmed = sessionName.trim()
+    function attachSessionToActive(target: SessionTarget) {
         const paneId = activePane?.id
+        const trimmed = target.sessionName.trim()
+        const hostId = target.hostId.trim() || LOCAL_HOST_ID
         if (!trimmed || !paneId) return
-        const target = { hostId: LOCAL_HOST_ID, sessionName: trimmed }
-        setWorkspace((current) => setWorkspacePaneTarget(current, paneId, target))
+        const nextTarget = { hostId, sessionName: trimmed }
+        setWorkspace((current) => setWorkspacePaneTarget(current, paneId, nextTarget))
         setActivePaneId(paneId)
-        markOpenSession(target)
-        navigate({ to: '/attach/$name', params: { name: trimmed } })
+        markOpenSession(nextTarget, hostLabel(hostId))
+        navigateToTarget(navigate, nextTarget)
     }
 
     function updatePaneStatus(paneId: string, status: Status, statusMsg: string | null) {
@@ -820,8 +822,8 @@ function SplitSessionChooser({
     const [openedSessions, setOpenedSessions] = useState<OpenSession[]>(() => listOpenSessions())
     const [newName, setNewName] = useState('')
     const { data, error: listError, isLoading } = useQuery({
-        queryKey: ['sessions', currentHostId],
-        queryFn: () => api.listHostSessions(currentHostId),
+        queryKey: ['hostSessions'],
+        queryFn: listHostSessionsData,
         refetchInterval: 5000
     })
 
@@ -829,15 +831,16 @@ function SplitSessionChooser({
         return subscribeOpenSessions(() => setOpenedSessions(listOpenSessions()))
     }, [])
 
-    const liveNames = data ? new Set(data.sessions.map((session) => session.name)) : null
-    const visibleOpenedSessions = liveNames
-        ? openedSessions.filter((session) => session.hostId === currentHostId && liveNames.has(session.name))
-        : openedSessions.filter((session) => session.hostId === currentHostId)
-    const openedNames = new Set(visibleOpenedSessions.map((session) => session.name))
-    const otherSessions = data?.sessions.filter((session) => !openedNames.has(session.name)) ?? []
-    const knownNames = new Set([...visibleOpenedSessions.map((session) => session.name), ...otherSessions.map((session) => session.name)])
-    const showCurrentFallback = currentSessionName && !knownNames.has(currentSessionName)
+    const liveKeys = data ? new Set(data.sessions.map(targetSessionKey)) : null
+    const visibleOpenedSessions = liveKeys ? openedSessions.filter((session) => liveKeys.has(openSessionKey(session))) : openedSessions
+    const openedKeys = new Set(visibleOpenedSessions.map(openSessionKey))
+    const otherSessions = data?.sessions.filter((session) => !openedKeys.has(targetSessionKey(session))) ?? []
+    const currentTarget = { hostId: currentHostId, sessionName: currentSessionName }
+    const currentKey = targetKey(currentTarget)
+    const knownKeys = new Set([...visibleOpenedSessions.map(openSessionKey), ...otherSessions.map(targetSessionKey)])
+    const showCurrentFallback = currentSessionName && !knownKeys.has(currentKey)
     const directionLabel = direction === 'row' ? 'right' : 'down'
+    const currentHostName = data?.hosts.find((host) => host.id === currentHostId)?.name ?? hostLabel(currentHostId)
 
     const submitNewSession = (event: FormEvent) => {
         event.preventDefault()
@@ -866,6 +869,7 @@ function SplitSessionChooser({
                 </div>
 
                 <div className="min-h-0 overflow-y-auto p-3">
+                    <p className="mb-1 px-1 text-[10px] text-neutral-600">New on {currentHostName}</p>
                     <form className="mb-3 flex gap-2" onSubmit={submitNewSession}>
                         <input
                             className="min-w-0 flex-1 rounded-md border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm outline-none focus:border-neutral-600"
@@ -890,9 +894,10 @@ function SplitSessionChooser({
                         <div className="mb-3">
                             <SplitSessionButton
                                 name={currentSessionName}
+                                hostName={currentHostId === LOCAL_HOST_ID ? undefined : currentHostName}
                                 active
                                 disabled={creating}
-                                onClick={() => onSelect({ hostId: currentHostId, sessionName: currentSessionName })}
+                                onClick={() => onSelect(currentTarget)}
                             />
                         </div>
                     )}
@@ -901,9 +906,10 @@ function SplitSessionChooser({
                         <SessionChoiceSection title="Opened">
                             {visibleOpenedSessions.map((session) => (
                                 <SplitSessionButton
-                                    key={`opened-split-${session.name}`}
+                                    key={`opened-split-${session.hostId}-${session.name}`}
                                     name={session.name}
-                                    active={session.name === currentSessionName}
+                                    hostName={session.hostId === LOCAL_HOST_ID ? undefined : session.hostName}
+                                    active={session.name === currentSessionName && session.hostId === currentHostId}
                                     disabled={creating}
                                     onClick={() => onSelect({ hostId: session.hostId, sessionName: session.name })}
                                 />
@@ -911,25 +917,33 @@ function SplitSessionChooser({
                         </SessionChoiceSection>
                     )}
 
-                    <SessionChoiceSection title={`${hostLabel(currentHostId)} sessions`}>
-                        {isLoading ? (
+                    {isLoading ? (
+                        <SessionChoiceSection title="All sessions">
                             <p className="px-1 text-xs text-neutral-600">Loading sessions…</p>
-                        ) : listError ? (
+                        </SessionChoiceSection>
+                    ) : listError ? (
+                        <SessionChoiceSection title="All sessions">
                             <p className="px-1 text-xs text-red-400">Failed to load sessions.</p>
-                        ) : otherSessions.length === 0 ? (
+                        </SessionChoiceSection>
+                    ) : otherSessions.length === 0 ? (
+                        <SessionChoiceSection title="All sessions">
                             <p className="px-1 text-xs text-neutral-600">No more sessions.</p>
-                        ) : (
-                            otherSessions.map((session) => (
-                                <SplitSessionButton
-                                    key={`all-split-${session.name}`}
-                                    name={session.name}
-                                    active={session.name === currentSessionName}
-                                    disabled={creating}
-                                    onClick={() => onSelect({ hostId: session.hostId, sessionName: session.name })}
-                                />
-                            ))
-                        )}
-                    </SessionChoiceSection>
+                        </SessionChoiceSection>
+                    ) : (
+                        groupedTargetSessions(otherSessions).map((group) => (
+                            <SessionChoiceSection key={`split-group-${group.hostId}`} title={`${group.hostName} sessions`}>
+                                {group.sessions.map((session) => (
+                                    <SplitSessionButton
+                                        key={`all-split-${session.hostId}-${session.name}`}
+                                        name={session.name}
+                                        active={session.name === currentSessionName && session.hostId === currentHostId}
+                                        disabled={creating}
+                                        onClick={() => onSelect({ hostId: session.hostId, sessionName: session.name })}
+                                    />
+                                ))}
+                            </SessionChoiceSection>
+                        ))
+                    )}
                 </div>
             </div>
         </div>
@@ -947,11 +961,13 @@ function SessionChoiceSection({ title, children }: { title: string; children: Re
 
 function SplitSessionButton({
     name,
+    hostName,
     active,
     disabled,
     onClick
 }: {
     name: string
+    hostName?: string
     active?: boolean
     disabled?: boolean
     onClick: () => void
@@ -965,7 +981,10 @@ function SplitSessionButton({
             disabled={disabled}
             onClick={onClick}
         >
-            <span className="truncate font-mono">{name}</span>
+            <span className="min-w-0">
+                <span className="block truncate font-mono">{name}</span>
+                {hostName && <span className="block truncate text-[10px] text-neutral-500">{hostName}</span>}
+            </span>
             {active && <span className="shrink-0 text-[10px] text-neutral-500">current</span>}
         </button>
     )
@@ -1100,12 +1119,36 @@ function hostLabel(hostId: string): string {
     return hostId === LOCAL_HOST_ID ? 'Local' : hostId
 }
 
+function targetSessionKey(session: TargetSession): string {
+    return targetKey({ hostId: session.hostId, sessionName: session.name })
+}
+
+function openSessionKey(session: OpenSession): string {
+    return targetKey({ hostId: session.hostId, sessionName: session.name })
+}
+
+function groupedTargetSessions(sessions: TargetSession[]): Array<{ hostId: string; hostName: string; sessions: TargetSession[] }> {
+    const groups = new Map<string, { hostId: string; hostName: string; sessions: TargetSession[] }>()
+    for (const session of sessions) {
+        const group = groups.get(session.hostId)
+        if (group) group.sessions.push(session)
+        else groups.set(session.hostId, { hostId: session.hostId, hostName: session.hostName, sessions: [session] })
+    }
+    return [...groups.values()]
+}
+
 async function invalidateSessionQueries(queryClient: ReturnType<typeof useQueryClient>, hostId: string): Promise<void> {
     await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['sessions'] }),
+        queryClient.invalidateQueries({ queryKey: ['hostSessions'] }),
         queryClient.invalidateQueries({ queryKey: ['sessions', hostId] }),
         queryClient.invalidateQueries({ queryKey: ['hosts'] })
     ])
+}
+
+function navigateToTarget(navigate: ReturnType<typeof useNavigate>, target: SessionTarget): void {
+    if (target.hostId === LOCAL_HOST_ID) navigate({ to: '/attach/$name', params: { name: target.sessionName } })
+    else navigate({ to: '/attach/$hostId/$name', params: { hostId: target.hostId, name: target.sessionName } })
 }
 
 function saveWorkspace(workspace: WorkspaceNode): void {

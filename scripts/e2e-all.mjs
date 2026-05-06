@@ -10,6 +10,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 const PORT = 17686
 const PASSWORD = 'e2e-all-password'
+const AGENT_TOKEN = 'e2e-agent-token'
 
 async function waitUp(port, maxMs = 10000) {
     const deadline = Date.now() + maxMs
@@ -41,7 +42,8 @@ async function main() {
                 TMUXD_PASSWORD: PASSWORD,
                 PORT: String(PORT),
                 HOST: '127.0.0.1',
-                TMUXD_HOME: '/tmp/tmuxd-e2e-all'
+                TMUXD_HOME: '/tmp/tmuxd-e2e-all',
+                TMUXD_AGENT_TOKEN: AGENT_TOKEN
             },
             stdio: ['ignore', 'inherit', 'inherit']
         }
@@ -53,7 +55,7 @@ async function main() {
 
         console.log('\n=== API suite ===')
         try {
-            await run('scripts/e2e.mjs', { PORT: String(PORT), TMUXD_PASSWORD: PASSWORD, HOST: '127.0.0.1' })
+            await run('scripts/e2e.mjs', { PORT: String(PORT), TMUXD_PASSWORD: PASSWORD, HOST: '127.0.0.1', TMUXD_AGENT_TOKEN: AGENT_TOKEN })
         } catch (e) {
             fails.push('api')
         }

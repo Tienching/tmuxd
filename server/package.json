@@ -9,7 +9,8 @@
         "build": "tsc -p tsconfig.json --noEmit",
         "start": "tsx src/index.ts",
         "typecheck": "tsc -p tsconfig.json --noEmit",
-        "test": "node --test --import tsx --test-reporter spec src/**/*.test.ts"
+        "test": "node --test --import tsx --test-reporter spec src/**/*.test.ts",
+        "agent": "tsx src/agent.ts"
     },
     "dependencies": {
         "@tmuxd/shared": "*",

@@ -1,6 +1,6 @@
 # tmuxd Hub / Agent Design
 
-Status: draft v1, Phase 1 implemented
+Status: implemented v1
 
 Branch: `feature/hub-agent-design`
 
@@ -14,7 +14,7 @@ Today tmuxd is server-local:
 browser -> tmuxd server -> local tmux
 ```
 
-The proposed feature adds a hub and outbound agents:
+The implemented feature adds a hub and outbound agents:
 
 ```text
 browser -> tmuxd hub
@@ -349,7 +349,7 @@ Current browser password login stays:
 
 Agents use separate tokens:
 
-- Hub stores agent token hashes in `TMUXD_HOME`.
+- Hub reads one shared agent token from `TMUXD_AGENT_TOKEN` in v1.
 - Agent token is never the browser password.
 - Agent token is sent in the `Authorization` header, not in the URL.
 - Agents should use `wss://` outside localhost/private test setups.
@@ -360,7 +360,7 @@ A connected agent can execute tmux operations on its own machine. The hub can as
 
 ### Safeguards for v1
 
-- Agent name is display-only. Hub assigns stable `hostId`.
+- Agent display name is separate from stable `hostId`; agents can provide `TMUXD_AGENT_ID`, otherwise the hub derives one from the name.
 - Per-agent capability flags.
 - Per-agent and global terminal stream limits.
 - Heartbeat and offline timeout.
@@ -384,38 +384,41 @@ This keeps risk low. If this phase is wrong, no network protocol has shipped yet
 
 ### Phase 2, target registry on the server
 
-- Introduce `TmuxTarget` and `TargetRegistry`.
-- Move current local tmux calls behind `LocalTmuxTarget`.
-- Change host-aware routes to use the registry.
-- Keep old `/api/sessions` and `/ws/:name` as local aliases.
+Implemented as `AgentRegistry` plus host-aware local routes. Current local aliases remain:
+
+```text
+/api/sessions
+/ws/:name
+/attach/:name
+```
 
 ### Phase 3, agent control channel
 
-- Add `/agent/connect` WebSocket endpoint.
-- Add agent auth token validation.
-- Add `AgentRegistry` with online/offline state.
-- Implement `list_sessions`, `create_session`, `kill_session`, and `capture_session` over the agent protocol.
-- Add a small Node agent entry point that reuses current tmux helpers.
+Implemented:
+
+- `/agent/connect` WebSocket endpoint.
+- `TMUXD_AGENT_TOKEN` bearer-token validation.
+- `list_sessions`, `create_session`, `kill_session`, and `capture_session` request/response frames.
+- `server/src/agent.ts` outbound Node agent entry point.
 
 ### Phase 4, remote terminal streaming
 
-- Add multiplexed `attach/input/resize/detach` stream frames.
-- Bridge browser `/ws/:hostId/:sessionName` to local or remote target.
-- Preserve current backpressure limits on browser WebSocket.
-- Add agent-side stream limits and cleanup.
+Implemented:
 
-### Phase 5, CLI and docs
+- Multiplexed `attach/input/resize/detach` stream frames over the agent WebSocket.
+- Browser `/ws/:hostId/:sessionName` bridges to either local tmux or a connected agent.
+- Browser-facing WebSocket limits, tickets, and Origin checks are preserved.
 
-- Add explicit commands or npm scripts for:
+### Phase 5, npm scripts and docs
 
-  ```bash
-  tmuxd serve
-  tmuxd hub
-  tmuxd agent
-  ```
+Implemented:
 
-- Document hub setup, agent setup, reverse proxy, and security notes.
-- Add screenshots for host grouping and multi-host workspace.
+```bash
+npm start
+npm run agent -- --hub http://hub.example:7681 --token <token> --id workstation --name Workstation
+```
+
+The README documents hub setup, agent setup, and security notes.
 
 ## Test plan
 
@@ -440,7 +443,7 @@ Validate:
 - browser WebSocket attaches through hub to agent tmux.
 - input echo works through the remote stream.
 - resize is forwarded.
-- agent disconnect marks host offline.
+- agent disconnect removes the host from the active host list.
 
 ### E2E tests
 
@@ -453,21 +456,14 @@ Hub/agent suite
   PASS hosts list includes agent
   PASS remote session create/list/delete
   PASS remote ws attach/input/resize
-  PASS agent disconnect disables remote host
+  PASS agent process can be stopped after remote tests
 ```
 
 ## Rollout strategy
 
 1. Ship host-aware local model first.
 2. Ship hub with local host only.
-3. Add agent connection behind an env flag:
-
-   ```env
-   TMUXD_AGENT_ENABLED=1
-   ```
-
-4. Enable remote terminal streaming after API control paths pass.
-5. Update README and screenshots.
+3. Agent connection is enabled by setting `TMUXD_AGENT_TOKEN` on the hub. Remote terminal streaming and README updates are included in v1.
 
 ## Risks and decisions
 
@@ -481,7 +477,7 @@ This already exists with multi-client attach. Remote hosts make it more visible.
 
 ### Risk: agent token leakage
 
-Agent tokens grant shell-level tmux control for that agent machine. Store hashes on the hub, never show tokens after creation, and recommend HTTPS.
+Agent tokens grant shell-level tmux control for that agent machine. v1 uses one shared `TMUXD_AGENT_TOKEN`; keep it secret and use HTTPS/WSS outside private networks.
 
 ### Decision: preserve current single-server default
 
@@ -499,21 +495,22 @@ Names can change. IDs should not. The UI can show `desktop`, but stored layouts 
 4. Should workspaces persist per browser only, or eventually sync on the hub?
 5. Should we support direct browser-to-agent mode later for fully local LAN setups?
 
-## Recommended next step
+## Implemented status
 
-Phase 1 is now implemented on this branch:
+This branch now includes the complete v1 hub/agent path:
 
-- `local` host metadata is exposed through `GET /api/hosts`.
-- Host-aware local session APIs are available under `/api/hosts/local/sessions`.
-- Host-aware browser attach is available at `/ws/local/:sessionName`.
-- Workspace panes now persist `{ hostId, sessionName }` targets and migrate old `sessionName`-only layouts.
-- Browser-local opened sessions now store host metadata.
-- The existing `/api/sessions`, `/ws/:sessionName`, and `/attach/:sessionName` paths remain compatible.
+- `local` host metadata through `GET /api/hosts`.
+- Host-aware APIs under `/api/hosts/:hostId/sessions`.
+- Agent auth and outbound connection at `/agent/connect`.
+- Remote list/create/kill/capture through the agent protocol.
+- Remote terminal attach through `/ws/:hostId/:sessionName`.
+- Workspace panes persist `{ hostId, sessionName }` targets and migrate old layouts.
+- Home page, desktop sidebar, mobile picker, and split chooser group sessions by host.
+- `npm run agent` starts the outbound agent.
+- E2E coverage starts a hub plus agent and validates remote create/list/capture/delete and WebSocket input.
 
-The next implementation step is Phase 2:
+Known v1 limits:
 
-```text
-target registry on the server, still no remote networking yet
-```
-
-That will put local tmux behind the same interface remote agents will use later.
+- One shared agent token is configured by environment variable; there is no web UI token manager yet.
+- Offline agents are removed from the current host list instead of retained with historical last-seen state.
+- There is no packaged `tmuxd hub` CLI yet; `npm start` is the hub/server and `npm run agent` is the agent.

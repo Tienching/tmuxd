@@ -7,6 +7,7 @@ A local-first web UI for `tmux` sessions. Open your browser, sign in with one pa
 ## What it does
 
 - Lists all tmux sessions for the server user.
+- Can act as a hub for outbound tmuxd agents, so one page can show tmux sessions from multiple machines.
 - Creates, attaches to, and kills tmux sessions from the web UI.
 - Creates named sessions or auto-named sessions when you leave the name blank.
 - Streams an interactive terminal over WebSocket using xterm.js.
@@ -72,6 +73,7 @@ Sign in with the value after `TMUXD_PASSWORD=` in `.env`.
 | `PORT` | `7681` | HTTP port. |
 | `TMUXD_HOME` | `.tmuxd` in CWD | Directory for generated runtime secrets. |
 | `JWT_SECRET` | generated | Optional JWT signing secret. If set manually, it must be at least 32 bytes. |
+| `TMUXD_AGENT_TOKEN` | unset | Enables `/agent/connect` on the hub and authenticates agents. Use a long random value. |
 
 Example `.env`:
 
@@ -92,6 +94,50 @@ Generate a strong JWT secret if you want to manage it yourself:
 ```bash
 openssl rand -base64 48
 ```
+
+Generate an agent token when using hub/agent mode:
+
+```bash
+openssl rand -base64 32
+```
+
+## Hub / agent mode
+
+By default, tmuxd controls tmux on the same machine as the web server. To show tmux sessions from other machines in the same web UI, run the normal server as the hub and start one outbound agent per remote machine.
+
+On the hub:
+
+```bash
+TMUXD_PASSWORD=replace-with-a-long-random-password \
+TMUXD_AGENT_TOKEN=replace-with-a-long-random-agent-token \
+HOST=0.0.0.0 PORT=7681 npm start
+```
+
+On an agent machine:
+
+```bash
+TMUXD_HUB_URL=http://hub.example:7681 \
+TMUXD_AGENT_TOKEN=replace-with-a-long-random-agent-token \
+TMUXD_AGENT_ID=workstation \
+TMUXD_AGENT_NAME=Workstation \
+npm run agent
+```
+
+You can also pass agent options as flags:
+
+```bash
+npm run agent -- --hub http://hub.example:7681 --token replace-with-a-long-random-agent-token --id workstation --name Workstation
+```
+
+Notes:
+
+- Agents make an outbound WebSocket connection to `/agent/connect`; they do not open an inbound HTTP port.
+- `TMUXD_AGENT_ID` is the stable ID stored in browser workspaces and URLs. Use letters, digits, `.`, `_`, or `-`.
+- `TMUXD_AGENT_NAME` is just the display name in the UI.
+- Use HTTPS/WSS when the hub is reachable beyond a private network.
+- A connected agent can list, create, kill, capture, and attach tmux sessions for the user running the agent process.
+
+The home page, terminal sidebar, mobile picker, and split chooser group sessions by host. Existing local routes such as `/attach/main` still mean the hub's `local/main`; remote sessions use `/attach/:hostId/:name`.
 
 ## Using the app
 
@@ -118,8 +164,8 @@ On the terminal page:
 
 - The centered title shows the current session name.
 - **Opened** shows sessions opened in this browser.
-- **All sessions** shows live tmux sessions from the server.
-- **+ New session** creates an auto-named session and attaches to it.
+- **All sessions** shows live tmux sessions grouped by host.
+- **New** creates a named or auto-named session on the current host and attaches to it.
 - Click any session name to switch.
 - Click `×` next to an opened session to remove it from the browser-local list.
 - Click **Hide** to collapse the side panel; click **Sessions** to show it again.
@@ -127,7 +173,7 @@ On the terminal page:
 On mobile:
 
 - Tap the session name in the top bar to open the session picker.
-- Use **+ New session** from the picker to create and attach to a new session.
+- Use **New** from the picker to create and attach to a new session.
 - Use **Keys** for mobile-friendly terminal keys and modifiers.
 - Use **Text** to open selectable tmux session text. The text view is positioned from tmux's current scroll position.
 
@@ -154,6 +200,7 @@ Recommended deployment:
 
 - Or put tmuxd behind an HTTPS reverse proxy such as Caddy, nginx, or Cloudflare Tunnel.
 - Use a long random password.
+- If hub/agent mode is enabled, use a separate long random `TMUXD_AGENT_TOKEN`; do not reuse the browser password.
 - Restrict firewall/security-group access to trusted IPs.
 
 Implemented safeguards:
@@ -167,7 +214,8 @@ Implemented safeguards:
 - WebSocket Origin checks.
 - WebSocket connection limits and idle timeout.
 - API responses use `Cache-Control: no-store`.
-- PTY child environment strips `TMUXD_PASSWORD` and `JWT_SECRET`.
+- PTY child environment strips `TMUXD_PASSWORD`, `TMUXD_AGENT_TOKEN`, and `JWT_SECRET`.
+- Browser JWTs are never forwarded to agents; the hub talks to agents over the separate agent token channel.
 
 ## Development
 
@@ -189,6 +237,12 @@ Run only the web app:
 npm run dev:web
 ```
 
+Run an outbound agent:
+
+```bash
+npm run agent -- --hub http://127.0.0.1:7681 --token your-agent-token --id dev-agent --name DevAgent
+```
+
 ## Validation
 
 ```bash
@@ -206,6 +260,7 @@ E2E coverage includes:
 - New sessions starting in the server user's home directory.
 - Session text capture from tmux scrollback.
 - WebSocket attach, resize, ping/pong, input echo, UTF-8 roundtrip.
+- Hub/agent remote host connect, remote session create/list/capture/delete, and remote WebSocket attach/input.
 - Multi-client shared attach.
 - Graceful shutdown with a live WebSocket.
 - Production web build smoke test.
@@ -213,7 +268,7 @@ E2E coverage includes:
 ## Project structure
 
 ```text
-server/   Hono HTTP API, WebSocket upgrade, tmux/PTY bridge
+server/   Hono HTTP API, WebSocket upgrade, tmux/PTY bridge, outbound agent
 shared/   TypeScript types and Zod schemas
 web/      Vite + React + TanStack Router + xterm.js
 scripts/  E2E validation scripts

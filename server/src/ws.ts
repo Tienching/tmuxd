@@ -6,9 +6,11 @@ import { isLocalHost } from './hosts.js'
 import { attachTmuxPty, type PtyBridge } from './ptyManager.js'
 import { consumeWsTicket } from './wsTickets.js'
 import { clientWsMessageSchema, LOCAL_HOST_ID, type ServerWsMessage } from '@tmuxd/shared'
+import type { AgentRegistry } from './agentRegistry.js'
 
 export interface WsDeps {
     jwtSecret: Uint8Array
+    agentRegistry?: AgentRegistry
 }
 
 const MAX_PAYLOAD = 64 * 1024 // 64KB cap on inbound WS frames
@@ -18,18 +20,40 @@ const MAX_WS_CLIENTS = 32
 const MAX_WS_CLIENTS_PER_SESSION = 4
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000
 
-export function createWsServer(_deps: WsDeps): WebSocketServer {
+interface BrowserWsContext {
+    hostId: string
+    session: string
+    cols: number
+    rows: number
+}
+
+interface TerminalBridge {
+    session: string
+    cols: number
+    rows: number
+    onData(cb: (payload: string) => void): { dispose(): void }
+    onExit(cb: (event: { exitCode: number | null; signal: string | null }) => void): { dispose(): void }
+    onError(cb: (message: string) => void): { dispose(): void }
+    writePayload(payload: string): void
+    resize(cols: number, rows: number): void
+    pause?(): void
+    resume?(): void
+    dispose(): void
+}
+
+export function createWsServer(deps: WsDeps): WebSocketServer {
     const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD })
     const sessionCounts = new Map<string, number>()
 
-    wss.on('connection', (ws: WebSocket, _request: IncomingMessage, context: { hostId: string; session: string; cols: number; rows: number }) => {
+    wss.on('connection', (ws: WebSocket, _request: IncomingMessage, context: BrowserWsContext) => {
         const sessionKey = `${context.hostId}/${context.session}`
-        let bridge: PtyBridge | null = null
+        let bridge: TerminalBridge | null = null
         let paused = false
         let cleaned = false
         let counted = false
         let dataSub: { dispose(): void } | null = null
         let exitSub: { dispose(): void } | null = null
+        let errorSub: { dispose(): void } | null = null
         let lastActivity = Date.now()
         let idleTimer: NodeJS.Timeout | null = null
 
@@ -44,6 +68,11 @@ export function createWsServer(_deps: WsDeps): WebSocketServer {
             }
             try {
                 exitSub?.dispose()
+            } catch {
+                /* ignore */
+            }
+            try {
+                errorSub?.dispose()
             } catch {
                 /* ignore */
             }
@@ -67,75 +96,92 @@ export function createWsServer(_deps: WsDeps): WebSocketServer {
         sessionCounts.set(sessionKey, (sessionCounts.get(sessionKey) ?? 0) + 1)
         counted = true
 
-        try {
-            bridge = attachTmuxPty(context.session, context.cols, context.rows)
-        } catch (err) {
+        void startBridge().catch((err) => {
             sendJson(ws, { type: 'error', message: errMsg(err) })
             try {
                 ws.close(1011, 'attach_failed')
             } catch {
                 /* ignore */
             }
-            return
-        }
-
-        idleTimer = setInterval(() => {
-            if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
-                sendJson(ws, { type: 'error', message: 'idle_timeout' })
-                ws.close(1001, 'idle_timeout')
-            }
-        }, 60_000)
-
-        sendJson(ws, {
-            type: 'ready',
-            hostId: context.hostId,
-            session: bridge.session,
-            cols: bridge.cols,
-            rows: bridge.rows
         })
 
-        dataSub = bridge.proc.onData((chunk) => {
-            lastActivity = Date.now()
-            const payload = Buffer.from(chunk, 'utf8').toString('base64')
-            sendJson(ws, { type: 'data', payload })
-
-            // Backpressure: if the socket buffer grows past the high water mark,
-            // pause the PTY. `ws` does not emit 'drain', so poll the buffered
-            // amount on a timer — cheap (every 100ms while paused).
-            if (!paused && ws.bufferedAmount > HIGH_WATER) {
-                paused = true
-                try {
-                    // `node-pty` ≥1.0 supports pause/resume for flow control.
-                    bridge?.proc.pause?.()
-                } catch {
-                    /* older node-pty without pause — fall back to best-effort */
-                }
-                const drain = setInterval(() => {
-                    if (ws.readyState !== ws.OPEN) {
-                        clearInterval(drain)
-                        return
-                    }
-                    if (ws.bufferedAmount <= LOW_WATER) {
-                        paused = false
-                        try {
-                            bridge?.proc.resume?.()
-                        } catch {
-                            /* ignore */
-                        }
-                        clearInterval(drain)
-                    }
-                }, 100)
-            }
-        })
-
-        exitSub = bridge.proc.onExit(({ exitCode, signal }) => {
-            sendJson(ws, { type: 'exit', code: exitCode ?? null, signal: signal ? String(signal) : null })
+        async function startBridge() {
             try {
-                ws.close(1000, 'pty_exited')
-            } catch {
-                /* ignore */
+                bridge = await attachTarget(context, deps.agentRegistry)
+            } catch (err) {
+                sendJson(ws, { type: 'error', message: errMsg(err) })
+                try {
+                    ws.close(1011, 'attach_failed')
+                } catch {
+                    /* ignore */
+                }
+                return
             }
-        })
+            if (cleaned) {
+                bridge.dispose()
+                bridge = null
+                return
+            }
+
+            idleTimer = setInterval(() => {
+                if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
+                    sendJson(ws, { type: 'error', message: 'idle_timeout' })
+                    ws.close(1001, 'idle_timeout')
+                }
+            }, 60_000)
+
+            sendJson(ws, {
+                type: 'ready',
+                hostId: context.hostId,
+                session: bridge.session,
+                cols: bridge.cols,
+                rows: bridge.rows
+            })
+
+            dataSub = bridge.onData((payload) => {
+                lastActivity = Date.now()
+                sendJson(ws, { type: 'data', payload })
+
+                // Backpressure: local node-pty supports pause/resume. Remote agents
+                // currently keep streaming best-effort over their single control socket.
+                if (!paused && bridge?.pause && ws.bufferedAmount > HIGH_WATER) {
+                    paused = true
+                    try {
+                        bridge.pause()
+                    } catch {
+                        /* older bridge without pause — fall back to best-effort */
+                    }
+                    const drain = setInterval(() => {
+                        if (ws.readyState !== ws.OPEN) {
+                            clearInterval(drain)
+                            return
+                        }
+                        if (ws.bufferedAmount <= LOW_WATER) {
+                            paused = false
+                            try {
+                                bridge?.resume?.()
+                            } catch {
+                                /* ignore */
+                            }
+                            clearInterval(drain)
+                        }
+                    }, 100)
+                }
+            })
+
+            exitSub = bridge.onExit(({ exitCode, signal }) => {
+                sendJson(ws, { type: 'exit', code: exitCode, signal })
+                try {
+                    ws.close(1000, 'pty_exited')
+                } catch {
+                    /* ignore */
+                }
+            })
+
+            errorSub = bridge.onError((message) => {
+                sendJson(ws, { type: 'error', message })
+            })
+        }
 
         ws.on('message', (raw: Buffer) => {
             if (!bridge) return
@@ -149,14 +195,8 @@ export function createWsServer(_deps: WsDeps): WebSocketServer {
             const msg = clientWsMessageSchema.safeParse(parsed)
             if (!msg.success) return
             if (msg.data.type === 'input') {
-                let buf: string
                 try {
-                    buf = Buffer.from(msg.data.payload, 'base64').toString('utf8')
-                } catch {
-                    return
-                }
-                try {
-                    bridge.proc.write(buf)
+                    bridge.writePayload(msg.data.payload)
                 } catch {
                     /* PTY gone — cleanup will run from exit/error */
                 }
@@ -164,7 +204,7 @@ export function createWsServer(_deps: WsDeps): WebSocketServer {
                 bridge.cols = msg.data.cols
                 bridge.rows = msg.data.rows
                 try {
-                    bridge.proc.resize(msg.data.cols, msg.data.rows)
+                    bridge.resize(msg.data.cols, msg.data.rows)
                 } catch {
                     /* ignore */
                 }
@@ -172,10 +212,67 @@ export function createWsServer(_deps: WsDeps): WebSocketServer {
                 sendJson(ws, { type: 'pong' })
             }
         })
-
     })
 
     return wss
+}
+
+async function attachTarget(context: BrowserWsContext, agentRegistry?: AgentRegistry): Promise<TerminalBridge> {
+    if (isLocalHost(context.hostId)) {
+        return wrapLocalBridge(attachTmuxPty(context.session, context.cols, context.rows))
+    }
+    if (!agentRegistry) throw new Error('host_not_found')
+    const remote = await agentRegistry.attach(context.hostId, context.session, context.cols, context.rows)
+    return {
+        session: remote.session,
+        cols: remote.cols,
+        rows: remote.rows,
+        onData: (cb) => remote.onData(cb),
+        onExit: (cb) => remote.onExit(cb),
+        onError: (cb) => remote.onError(cb),
+        writePayload: (payload) => remote.writeBase64Payload(payload),
+        resize(cols, rows) {
+            remote.cols = cols
+            remote.rows = rows
+            remote.resize(cols, rows)
+        },
+        dispose: () => remote.dispose()
+    }
+}
+
+function wrapLocalBridge(bridge: PtyBridge): TerminalBridge {
+    return {
+        session: bridge.session,
+        cols: bridge.cols,
+        rows: bridge.rows,
+        onData(cb) {
+            return bridge.proc.onData((chunk) => cb(Buffer.from(chunk, 'utf8').toString('base64')))
+        },
+        onExit(cb) {
+            return bridge.proc.onExit(({ exitCode, signal }) => cb({ exitCode: exitCode ?? null, signal: signal ? String(signal) : null }))
+        },
+        onError() {
+            return { dispose() {} }
+        },
+        writePayload(payload) {
+            const buf = Buffer.from(payload, 'base64').toString('utf8')
+            bridge.proc.write(buf)
+        },
+        resize(cols, rows) {
+            bridge.cols = cols
+            bridge.rows = rows
+            bridge.proc.resize(cols, rows)
+        },
+        pause() {
+            bridge.proc.pause?.()
+        },
+        resume() {
+            bridge.proc.resume?.()
+        },
+        dispose() {
+            bridge.dispose()
+        }
+    }
 }
 
 function sendJson(ws: WebSocket, msg: ServerWsMessage): void {
@@ -198,18 +295,13 @@ export async function tryHandleUpgrade(
     request: IncomingMessage,
     socket: Duplex,
     head: Buffer,
-    opts?: { allowedOrigins?: string[] }
+    opts?: { allowedOrigins?: string[]; agentRegistry?: AgentRegistry }
 ): Promise<boolean> {
     const urlStr = request.url || ''
     const url = new URL(urlStr, 'http://localhost')
     const target = parseWsTarget(url.pathname)
     if (!target) return false
     const { hostId, session } = target
-    if (!isLocalHost(hostId)) {
-        socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n')
-        socket.destroy()
-        return true
-    }
     const token = url.searchParams.get('token') || ''
     const ticket = url.searchParams.get('ticket') || ''
     const cols = Number.parseInt(url.searchParams.get('cols') || '80', 10)
@@ -232,6 +324,12 @@ export async function tryHandleUpgrade(
     const authorized = ticket ? consumeWsTicket(ticket) : !!(await verifyJwt(jwtSecret, token))
     if (!authorized) {
         socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
+        socket.destroy()
+        return true
+    }
+
+    if (!isLocalHost(hostId) && !opts?.agentRegistry?.hasHost(hostId)) {
+        socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n')
         socket.destroy()
         return true
     }

@@ -21,6 +21,7 @@ export function attachTmuxPty(session: string, cols: number, rows: number): PtyB
     // Strip sensitive env vars from the shell the user will interact with.
     const {
         TMUXD_PASSWORD: _tp,
+        TMUXD_AGENT_TOKEN: _tat,
         JWT_SECRET: _js,
         ...cleanEnv
     } = process.env

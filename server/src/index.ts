@@ -9,6 +9,7 @@ import { createAuthRoutes } from './routes/auth.js'
 import { createSessionsRoutes } from './routes/sessions.js'
 import { createHealthRoutes } from './routes/health.js'
 import { createWsServer, tryHandleUpgrade } from './ws.js'
+import { AgentRegistry } from './agentRegistry.js'
 
 function resolveWebDist(): string | null {
     const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -25,6 +26,7 @@ function resolveWebDist(): string | null {
 
 async function main() {
     const config = loadConfig()
+    const agentRegistry = new AgentRegistry(config.agentToken)
 
     const app = new Hono()
 
@@ -39,7 +41,7 @@ async function main() {
 
     app.route('/', createHealthRoutes())
     app.route('/api', createAuthRoutes(config.password, config.jwtSecret))
-    app.route('/api', createSessionsRoutes(config.jwtSecret))
+    app.route('/api', createSessionsRoutes(config.jwtSecret, agentRegistry))
 
     const webDist = resolveWebDist()
     if (webDist) {
@@ -77,10 +79,12 @@ async function main() {
         }
     )
 
-    const wss = createWsServer({ jwtSecret: config.jwtSecret })
+    const wss = createWsServer({ jwtSecret: config.jwtSecret, agentRegistry })
     server.on('upgrade', async (request, socket, head) => {
         try {
-            const handled = await tryHandleUpgrade(wss, config.jwtSecret, request, socket, head)
+            const handledAgent = await agentRegistry.tryHandleUpgrade(request, socket, head)
+            if (handledAgent) return
+            const handled = await tryHandleUpgrade(wss, config.jwtSecret, request, socket, head, { agentRegistry })
             if (!handled) {
                 socket.destroy()
             }
@@ -100,6 +104,7 @@ async function main() {
             }
         }
         wss.close()
+        agentRegistry.close()
         server.close(() => process.exit(0))
         // Safety net: if sockets linger, force-exit after 3s.
         setTimeout(() => process.exit(0), 3000).unref()

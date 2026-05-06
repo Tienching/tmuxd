@@ -16,6 +16,7 @@ export interface Config {
     port: number
     jwtSecret: Uint8Array
     dataDir: string
+    agentToken: string | null
 }
 
 function requireEnv(name: string): string {
@@ -61,5 +62,6 @@ export function loadConfig(): Config {
     }
     const dataDir = resolveDataDir()
     const jwtSecret = resolveJwtSecret(dataDir)
-    return { password, host, port, jwtSecret, dataDir }
+    const agentToken = process.env.TMUXD_AGENT_TOKEN?.trim() || null
+    return { password, host, port, jwtSecret, dataDir, agentToken }
 }

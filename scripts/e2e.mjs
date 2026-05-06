@@ -25,6 +25,7 @@ const execFileP = promisify(execFile)
 const HOST = process.env.HOST ?? '127.0.0.1'
 const PORT = Number(process.env.PORT ?? 17683)
 const PASSWORD = process.env.TMUXD_PASSWORD ?? 'e2e-test-password-123'
+const AGENT_TOKEN = process.env.TMUXD_AGENT_TOKEN ?? ''
 const ORIGIN = `http://${HOST}:${PORT}`
 const BASE = ORIGIN
 
@@ -138,6 +139,42 @@ async function waitForFrame(frames, predicate, maxMs = 5000) {
         await sleep(50)
     }
     throw new Error('timeout waiting for frame')
+}
+
+
+async function waitForHost(hostId, token, maxMs = 10000) {
+    const deadline = Date.now() + maxMs
+    while (Date.now() < deadline) {
+        const r = await http('/api/hosts', { headers: { authorization: `Bearer ${token}` } })
+        if (r.status === 200 && r.body?.hosts?.some((h) => h.id === hostId && h.status === 'online')) return true
+        await sleep(150)
+    }
+    throw new Error(`host ${hostId} did not connect in time`)
+}
+
+function startAgentProcess(hostId, token) {
+    return spawn('node', ['node_modules/.bin/tsx', 'server/src/agent.ts'], {
+        env: {
+            ...process.env,
+            TMUXD_HUB_URL: BASE,
+            TMUXD_AGENT_TOKEN: token,
+            TMUXD_AGENT_ID: hostId,
+            TMUXD_AGENT_NAME: 'E2E Agent',
+            TMUXD_HOME: '/tmp/tmuxd-e2e-agent'
+        },
+        stdio: ['ignore', 'inherit', 'inherit']
+    })
+}
+
+async function stopProcess(proc) {
+    if (!proc || proc.exitCode !== null) return
+    proc.kill('SIGTERM')
+    await Promise.race([
+        new Promise((resolve) => proc.once('exit', resolve)),
+        sleep(3000).then(() => {
+            if (proc.exitCode === null) proc.kill('SIGKILL')
+        })
+    ])
 }
 
 async function main() {
@@ -377,6 +414,89 @@ async function main() {
         handle.ws.close(1000, 'test')
         return ready.session === TEST_SESSION && ready.hostId === 'local'
     })
+
+    let agentProc = null
+    if (AGENT_TOKEN) {
+        const AGENT_HOST = 'e2e-agent'
+        const AGENT_SESSION = 'tmuxd-e2e-agent'
+        await killIfPresent(AGENT_SESSION)
+
+        await check('agent: outbound client connects to hub', async () => {
+            agentProc = startAgentProcess(AGENT_HOST, AGENT_TOKEN)
+            agentProc.on('exit', (code, signal) => {
+                if (code !== null && code !== 0) console.error(`[agent] exited ${code}`)
+                else if (signal) console.error(`[agent] exited by ${signal}`)
+            })
+            return await waitForHost(AGENT_HOST, token)
+        })
+
+        await check('agent: create remote session', async () => {
+            const r = await http(`/api/hosts/${AGENT_HOST}/sessions`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+                body: JSON.stringify({ name: AGENT_SESSION })
+            })
+            return r.status === 201 && (await tmuxHasSession(AGENT_SESSION))
+        })
+
+        await check('agent: list remote sessions with host metadata', async () => {
+            const r = await http(`/api/hosts/${AGENT_HOST}/sessions`, { headers: { authorization: `Bearer ${token}` } })
+            if (r.status !== 200) return false
+            return r.body.sessions.some((s) => s.name === AGENT_SESSION && s.hostId === AGENT_HOST && s.hostName === 'E2E Agent')
+        })
+
+        let remoteWs, remoteFrames
+        await check('agent: remote websocket attach opens + ready hostId', async () => {
+            const ticket = await http('/api/ws-ticket', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+                body: JSON.stringify({ hostId: AGENT_HOST, sessionName: AGENT_SESSION })
+            })
+            if (ticket.status !== 200 || typeof ticket.body?.ticket !== 'string') return false
+            const url = `ws://${HOST}:${PORT}/ws/${AGENT_HOST}/${AGENT_SESSION}?ticket=${encodeURIComponent(ticket.body.ticket)}&cols=90&rows=25`
+            const handle = await wsConnect(url)
+            remoteWs = handle.ws
+            remoteFrames = handle.frames
+            const ready = await waitForFrame(remoteFrames, (f) => f.type === 'ready', 3000)
+            return ready.session === AGENT_SESSION && ready.hostId === AGENT_HOST
+        })
+
+        await check('agent: remote input roundtrip', async () => {
+            const cmd = 'printf "tmuxd-agent-roundtrip-ok\\n"\n'
+            remoteWs.send(JSON.stringify({ type: 'input', payload: Buffer.from(cmd, 'utf8').toString('base64') }))
+            const deadline = Date.now() + 5000
+            while (Date.now() < deadline) {
+                const idx = remoteFrames.findIndex(
+                    (f) =>
+                        f.type === 'data' &&
+                        Buffer.from(f.payload, 'base64').toString('utf8').includes('tmuxd-agent-roundtrip-ok')
+                )
+                if (idx >= 0) return true
+                await sleep(75)
+            }
+            return false
+        })
+
+        await check('agent: remote capture returns scrollback', async () => {
+            const r = await http(`/api/hosts/${AGENT_HOST}/sessions/${encodeURIComponent(AGENT_SESSION)}/capture`, {
+                headers: { authorization: `Bearer ${token}` }
+            })
+            return r.status === 200 && typeof r.body?.text === 'string' && r.body.text.includes('tmuxd-agent-roundtrip-ok')
+        })
+
+        await check('agent: remote delete session', async () => {
+            remoteWs?.close(1000, 'test')
+            const r = await http(`/api/hosts/${AGENT_HOST}/sessions/${encodeURIComponent(AGENT_SESSION)}`, {
+                method: 'DELETE',
+                headers: { authorization: `Bearer ${token}` }
+            })
+            if (r.status !== 204) return false
+            return !(await tmuxHasSession(AGENT_SESSION))
+        })
+
+        await stopProcess(agentProc)
+        agentProc = null
+    }
 
     // ---- KILL ----
     await check('delete: DELETE /api/sessions/:name → 204 + tmux gone', async () => {

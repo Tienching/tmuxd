@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { LOCAL_HOST_ID, type SessionTarget, type TargetSession } from '@tmuxd/shared'
 import { api } from '../api/client'
+import { listHostSessionsData } from '../hosts/sessionData'
 import { listOpenSessions, removeOpenSession, subscribeOpenSessions, type OpenSession } from '../session/openSessions'
 import { createSessionWithOptionalName } from '../session/createSession'
-import { LOCAL_HOST_ID } from '@tmuxd/shared'
 
 const SIDEBAR_HIDDEN_KEY = 'tmuxd.sidebarHidden'
 
@@ -19,14 +20,14 @@ export function OpenSessionsSidebar({
     currentHostId?: string
     hidden: boolean
     onToggleHidden: () => void
-    onOpenSession?: (name: string) => void
+    onOpenSession?: (target: SessionTarget) => void
 }) {
     const navigate = useNavigate()
-    const { createAndOpenSession, creating, createError } = useCreateAndOpenSession({ onOpenSession })
+    const { createAndOpenSession, creating, createError } = useCreateAndOpenSession({ hostId: currentHostId, onOpenSession })
     const [sessions, setSessions] = useState<OpenSession[]>(() => listOpenSessions())
     const { data, error, isLoading } = useQuery({
-        queryKey: ['sessions', LOCAL_HOST_ID],
-        queryFn: () => api.listHostSessions(LOCAL_HOST_ID),
+        queryKey: ['hostSessions'],
+        queryFn: listHostSessionsData,
         refetchInterval: 5000
     })
 
@@ -34,22 +35,19 @@ export function OpenSessionsSidebar({
         return subscribeOpenSessions(() => setSessions(listOpenSessions()))
     }, [])
 
-    const openSession = (name: string) => {
-        const trimmed = name.trim()
-        if (!trimmed) return
+    const openSession = (target: SessionTarget) => {
         if (onOpenSession) {
-            onOpenSession(trimmed)
+            onOpenSession(target)
             return
         }
-        navigate({ to: '/attach/$name', params: { name: trimmed } })
+        navigateToTarget(navigate, target)
     }
 
-    const liveNames = data ? new Set(data.sessions.map((s) => s.name)) : null
-    const visibleOpenedSessions = liveNames
-        ? sessions.filter((s) => s.hostId === currentHostId && liveNames.has(s.name))
-        : sessions.filter((s) => s.hostId === currentHostId)
-    const openedNames = new Set(visibleOpenedSessions.map((s) => s.name))
-    const otherSessions = data?.sessions.filter((s) => !openedNames.has(s.name)) ?? []
+    const liveKeys = data ? new Set(data.sessions.map(targetSessionKey)) : null
+    const visibleOpenedSessions = liveKeys ? sessions.filter((s) => liveKeys.has(openSessionKey(s))) : sessions
+    const openedKeys = new Set(visibleOpenedSessions.map(openSessionKey))
+    const otherSessions = data?.sessions.filter((s) => !openedKeys.has(targetSessionKey(s))) ?? []
+    const currentHostName = data?.hosts.find((host) => host.id === currentHostId)?.name ?? hostLabel(currentHostId)
 
     if (hidden) {
         return (
@@ -65,7 +63,7 @@ export function OpenSessionsSidebar({
     }
 
     return (
-        <aside className="hidden shrink-0 overflow-y-auto border-neutral-800 bg-neutral-950/80 p-2 md:block md:h-full md:w-56 md:border-r">
+        <aside className="hidden shrink-0 overflow-y-auto border-neutral-800 bg-neutral-950/80 p-2 md:block md:h-full md:w-60 md:border-r">
             <div className="mb-2 flex items-center justify-between gap-2 px-1">
                 <h2 className="text-xs font-medium uppercase tracking-wide text-neutral-500">Opened</h2>
                 <div className="flex items-center gap-2">
@@ -80,6 +78,7 @@ export function OpenSessionsSidebar({
                     </button>
                 </div>
             </div>
+            <p className="mb-1 px-1 text-[10px] text-neutral-600">New on {currentHostName}</p>
             <NewSessionForm creating={creating} createError={createError} onCreate={createAndOpenSession} />
             {createError && <p className="mb-2 px-1 text-xs text-red-400">{createError}</p>}
             {visibleOpenedSessions.length === 0 ? (
@@ -98,11 +97,12 @@ export function OpenSessionsSidebar({
                                 }`}
                             >
                                 <button
-                                    className="min-w-0 flex-1 truncate px-2 py-2 text-left font-mono text-xs text-neutral-100"
+                                    className="min-w-0 flex-1 px-2 py-2 text-left text-xs text-neutral-100"
                                     aria-current={active ? 'page' : undefined}
-                                    onClick={() => openSession(s.name)}
+                                    onClick={() => openSession(openSessionTarget(s))}
                                 >
-                                    {s.name}
+                                    <span className="block truncate font-mono">{s.name}</span>
+                                    {s.hostId !== LOCAL_HOST_ID && <span className="block truncate text-[10px] text-neutral-500">{s.hostName}</span>}
                                 </button>
                                 <button
                                     type="button"
@@ -118,7 +118,7 @@ export function OpenSessionsSidebar({
                 </nav>
             )}
             <div className="mt-3 mb-2 flex items-center justify-between gap-2 px-1">
-                <h2 className="text-xs font-medium uppercase tracking-wide text-neutral-500">Local sessions</h2>
+                <h2 className="text-xs font-medium uppercase tracking-wide text-neutral-500">All sessions</h2>
                 <span className="text-[10px] text-neutral-600">{data?.sessions.length ?? 0}</span>
             </div>
             {isLoading ? (
@@ -128,17 +128,19 @@ export function OpenSessionsSidebar({
             ) : otherSessions.length === 0 ? (
                 <p className="px-1 text-xs text-neutral-600">No more sessions.</p>
             ) : (
-                <nav className="flex flex-col gap-2">
-                    {otherSessions.map((s) => (
-                        <button
-                            key={`${s.hostId}:${s.name}`}
-                            className="min-w-0 truncate rounded-md border border-neutral-800 bg-neutral-900/60 px-2 py-2 text-left font-mono text-xs text-neutral-100 hover:bg-neutral-900"
-                            onClick={() => openSession(s.name)}
-                        >
-                            {s.name}
-                        </button>
-                    ))}
-                </nav>
+                groupedTargetSessions(otherSessions).map((group) => (
+                    <SessionGroup key={group.hostId} title={group.hostName} count={group.sessions.length}>
+                        {group.sessions.map((s) => (
+                            <button
+                                key={`${s.hostId}:${s.name}`}
+                                className="min-w-0 truncate rounded-md border border-neutral-800 bg-neutral-900/60 px-2 py-2 text-left font-mono text-xs text-neutral-100 hover:bg-neutral-900"
+                                onClick={() => openSession(targetFromSession(s))}
+                            >
+                                {s.name}
+                            </button>
+                        ))}
+                    </SessionGroup>
+                ))
             )}
         </aside>
     )
@@ -151,18 +153,19 @@ export function MobileSessionSelect({
 }: {
     currentName: string
     currentHostId?: string
-    onOpenSession?: (name: string) => void
+    onOpenSession?: (target: SessionTarget) => void
 }) {
     const navigate = useNavigate()
     const [sessions, setSessions] = useState<OpenSession[]>(() => listOpenSessions())
     const [menuOpen, setMenuOpen] = useState(false)
     const { createAndOpenSession, creating, createError } = useCreateAndOpenSession({
+        hostId: currentHostId,
         onCreated: () => setMenuOpen(false),
         onOpenSession
     })
     const { data, error, isLoading } = useQuery({
-        queryKey: ['sessions', LOCAL_HOST_ID],
-        queryFn: () => api.listHostSessions(LOCAL_HOST_ID),
+        queryKey: ['hostSessions'],
+        queryFn: listHostSessionsData,
         refetchInterval: 5000
     })
 
@@ -170,25 +173,24 @@ export function MobileSessionSelect({
         return subscribeOpenSessions(() => setSessions(listOpenSessions()))
     }, [])
 
-    const liveNames = data ? new Set(data.sessions.map((s) => s.name)) : null
-    const visibleOpenedSessions = liveNames
-        ? sessions.filter((s) => s.hostId === currentHostId && liveNames.has(s.name))
-        : sessions.filter((s) => s.hostId === currentHostId)
-    const openedNames = new Set(visibleOpenedSessions.map((s) => s.name))
-    const otherSessions = data?.sessions.filter((s) => !openedNames.has(s.name)) ?? []
-    const knownNames = new Set([...visibleOpenedSessions.map((s) => s.name), ...otherSessions.map((s) => s.name)])
-    const showCurrentFallback = !knownNames.has(currentName)
+    const liveKeys = data ? new Set(data.sessions.map(targetSessionKey)) : null
+    const visibleOpenedSessions = liveKeys ? sessions.filter((s) => liveKeys.has(openSessionKey(s))) : sessions
+    const openedKeys = new Set(visibleOpenedSessions.map(openSessionKey))
+    const otherSessions = data?.sessions.filter((s) => !openedKeys.has(targetSessionKey(s))) ?? []
+    const currentKey = targetKey({ hostId: currentHostId, sessionName: currentName })
+    const knownKeys = new Set([...visibleOpenedSessions.map(openSessionKey), ...otherSessions.map(targetSessionKey)])
+    const showCurrentFallback = !knownKeys.has(currentKey)
     const hasAnySession = showCurrentFallback || visibleOpenedSessions.length > 0 || otherSessions.length > 0
+    const currentHostName = data?.hosts.find((host) => host.id === currentHostId)?.name ?? hostLabel(currentHostId)
 
-    const attachSession = (name: string) => {
-        if (!name) return
+    const attachSession = (target: SessionTarget) => {
         setMenuOpen(false)
         if (onOpenSession) {
-            onOpenSession(name)
+            onOpenSession(target)
             return
         }
-        if (name !== currentName) {
-            navigate({ to: '/attach/$name', params: { name } })
+        if (!sameTarget(target, { hostId: currentHostId, sessionName: currentName })) {
+            navigateToTarget(navigate, target)
         }
     }
 
@@ -201,7 +203,7 @@ export function MobileSessionSelect({
                 disabled={isLoading || Boolean(error)}
                 onClick={() => setMenuOpen((open) => !open)}
             >
-                {currentName} ▾
+                {currentHostId === LOCAL_HOST_ID ? currentName : `${currentHostName}/${currentName}`} ▾
             </button>
             {menuOpen && (
                 <div className="fixed inset-0 z-50 bg-black/50 p-2 pt-14" onClick={() => setMenuOpen(false)}>
@@ -220,10 +222,18 @@ export function MobileSessionSelect({
                             </button>
                         </div>
 
+                        <p className="mb-1 px-1 text-[10px] text-neutral-600">New on {currentHostName}</p>
                         <NewSessionForm creating={creating} createError={createError} onCreate={createAndOpenSession} mobile />
                         {createError && <p className="mb-2 px-1 text-xs text-red-400">{createError}</p>}
 
-                        {showCurrentFallback && <SessionMenuButton name={currentName} active onClick={() => attachSession(currentName)} />}
+                        {showCurrentFallback && (
+                            <SessionMenuButton
+                                name={currentName}
+                                hostName={currentHostId === LOCAL_HOST_ID ? undefined : currentHostName}
+                                active
+                                onClick={() => attachSession({ hostId: currentHostId, sessionName: currentName })}
+                            />
+                        )}
 
                         {visibleOpenedSessions.length > 0 && (
                             <>
@@ -231,7 +241,7 @@ export function MobileSessionSelect({
                                 <nav className="flex flex-col gap-1">
                                     {visibleOpenedSessions.map((s) => (
                                         <div
-                                            key={`opened-mobile-${s.name}`}
+                                            key={`opened-mobile-${s.hostId}-${s.name}`}
                                             className={`flex min-w-0 items-center gap-1 rounded-md border ${
                                                 s.name === currentName && s.hostId === currentHostId
                                                     ? 'border-neutral-500 bg-neutral-800'
@@ -240,11 +250,12 @@ export function MobileSessionSelect({
                                         >
                                             <button
                                                 type="button"
-                                                className="min-w-0 flex-1 truncate px-2 py-2 text-left font-mono text-xs text-neutral-100"
+                                                className="min-w-0 flex-1 px-2 py-2 text-left text-xs text-neutral-100"
                                                 aria-current={s.name === currentName && s.hostId === currentHostId ? 'page' : undefined}
-                                                onClick={() => attachSession(s.name)}
+                                                onClick={() => attachSession(openSessionTarget(s))}
                                             >
-                                                {s.name}
+                                                <span className="block truncate font-mono">{s.name}</span>
+                                                {s.hostId !== LOCAL_HOST_ID && <span className="block truncate text-[10px] text-neutral-500">{s.hostName}</span>}
                                             </button>
                                             <button
                                                 type="button"
@@ -260,7 +271,7 @@ export function MobileSessionSelect({
                             </>
                         )}
 
-                        <div className="mt-3 mb-1 px-1 text-[10px] font-medium uppercase tracking-wide text-neutral-600">Local sessions</div>
+                        <div className="mt-3 mb-1 px-1 text-[10px] font-medium uppercase tracking-wide text-neutral-600">All sessions</div>
                         {error ? (
                             <p className="px-1 text-xs text-red-400">Failed to load sessions.</p>
                         ) : !hasAnySession ? (
@@ -268,16 +279,18 @@ export function MobileSessionSelect({
                         ) : otherSessions.length === 0 ? (
                             <p className="px-1 text-xs text-neutral-600">No more sessions.</p>
                         ) : (
-                            <nav className="flex flex-col gap-1">
-                                {otherSessions.map((s) => (
-                                    <SessionMenuButton
-                                        key={`all-mobile-${s.name}`}
-                                        name={s.name}
-                                        active={s.name === currentName}
-                                        onClick={() => attachSession(s.name)}
-                                    />
-                                ))}
-                            </nav>
+                            groupedTargetSessions(otherSessions).map((group) => (
+                                <SessionGroup key={`mobile-${group.hostId}`} title={group.hostName} count={group.sessions.length} mobile>
+                                    {group.sessions.map((s) => (
+                                        <SessionMenuButton
+                                            key={`all-mobile-${s.hostId}-${s.name}`}
+                                            name={s.name}
+                                            active={s.name === currentName && s.hostId === currentHostId}
+                                            onClick={() => attachSession(targetFromSession(s))}
+                                        />
+                                    ))}
+                                </SessionGroup>
+                            ))
                         )}
                     </div>
                 </div>
@@ -286,17 +299,30 @@ export function MobileSessionSelect({
     )
 }
 
-function SessionMenuButton({ name, active, onClick }: { name: string; active?: boolean; onClick: () => void }) {
+function SessionGroup({ title, count, mobile, children }: { title: string; count: number; mobile?: boolean; children: ReactNode }) {
+    return (
+        <section className="mb-3 last:mb-0">
+            <div className="mb-1 flex items-center justify-between gap-2 px-1">
+                <h3 className="truncate text-[10px] font-medium uppercase tracking-wide text-neutral-600">{title}</h3>
+                <span className="text-[10px] text-neutral-700">{count}</span>
+            </div>
+            <nav className={`flex flex-col ${mobile ? 'gap-1' : 'gap-2'}`}>{children}</nav>
+        </section>
+    )
+}
+
+function SessionMenuButton({ name, hostName, active, onClick }: { name: string; hostName?: string; active?: boolean; onClick: () => void }) {
     return (
         <button
             type="button"
-            className={`truncate rounded-md border px-2 py-2 text-left font-mono text-xs text-neutral-100 ${
+            className={`truncate rounded-md border px-2 py-2 text-left text-xs text-neutral-100 ${
                 active ? 'border-neutral-500 bg-neutral-800' : 'border-neutral-800 bg-neutral-900/60 active:bg-neutral-800'
             }`}
             aria-current={active ? 'page' : undefined}
             onClick={onClick}
         >
-            {name}
+            <span className="block truncate font-mono">{name}</span>
+            {hostName && <span className="block truncate text-[10px] text-neutral-500">{hostName}</span>}
         </button>
     )
 }
@@ -347,7 +373,7 @@ function NewSessionForm({
     )
 }
 
-function useCreateAndOpenSession(options: { onCreated?: () => void; onOpenSession?: (name: string) => void } = {}) {
+function useCreateAndOpenSession(options: { hostId: string; onCreated?: () => void; onOpenSession?: (target: SessionTarget) => void }) {
     const navigate = useNavigate()
     const queryClient = useQueryClient()
     const [creating, setCreating] = useState(false)
@@ -358,18 +384,16 @@ function useCreateAndOpenSession(options: { onCreated?: () => void; onOpenSessio
         setCreating(true)
         setCreateError(null)
         try {
-            const name = await createSessionWithOptionalName(inputName, (name) => api.createHostSession(LOCAL_HOST_ID, name))
-            await Promise.all([
-                queryClient.invalidateQueries({ queryKey: ['sessions'] }),
-                queryClient.invalidateQueries({ queryKey: ['sessions', LOCAL_HOST_ID] }),
-                queryClient.invalidateQueries({ queryKey: ['hosts'] })
-            ])
+            const hostId = options.hostId || LOCAL_HOST_ID
+            const name = await createSessionWithOptionalName(inputName, (name) => api.createHostSession(hostId, name))
+            await invalidateSessionQueries(queryClient, hostId)
             options.onCreated?.()
+            const target = { hostId, sessionName: name }
             if (options.onOpenSession) {
-                options.onOpenSession(name)
+                options.onOpenSession(target)
                 return true
             }
-            navigate({ to: '/attach/$name', params: { name } })
+            navigateToTarget(navigate, target)
             return true
         } catch {
             setCreateError('Failed to create session.')
@@ -396,4 +420,56 @@ export function saveSidebarHidden(hidden: boolean): void {
     } catch {
         /* ignore */
     }
+}
+
+function targetKey(target: SessionTarget): string {
+    return `${target.hostId}\n${target.sessionName}`
+}
+
+function targetSessionKey(session: TargetSession): string {
+    return targetKey(targetFromSession(session))
+}
+
+function openSessionKey(session: OpenSession): string {
+    return targetKey(openSessionTarget(session))
+}
+
+function targetFromSession(session: TargetSession): SessionTarget {
+    return { hostId: session.hostId, sessionName: session.name }
+}
+
+function openSessionTarget(session: OpenSession): SessionTarget {
+    return { hostId: session.hostId, sessionName: session.name }
+}
+
+function sameTarget(a: SessionTarget, b: SessionTarget): boolean {
+    return a.hostId === b.hostId && a.sessionName === b.sessionName
+}
+
+function groupedTargetSessions(sessions: TargetSession[]): Array<{ hostId: string; hostName: string; sessions: TargetSession[] }> {
+    const groups = new Map<string, { hostId: string; hostName: string; sessions: TargetSession[] }>()
+    for (const session of sessions) {
+        const existing = groups.get(session.hostId)
+        if (existing) existing.sessions.push(session)
+        else groups.set(session.hostId, { hostId: session.hostId, hostName: session.hostName, sessions: [session] })
+    }
+    return [...groups.values()]
+}
+
+function hostLabel(hostId: string): string {
+    return hostId === LOCAL_HOST_ID ? 'Local' : hostId
+}
+
+async function invalidateSessionQueries(queryClient: ReturnType<typeof useQueryClient>, hostId: string): Promise<void> {
+    await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['sessions'] }),
+        queryClient.invalidateQueries({ queryKey: ['hostSessions'] }),
+        queryClient.invalidateQueries({ queryKey: ['sessions', hostId] }),
+        queryClient.invalidateQueries({ queryKey: ['hosts'] })
+    ])
+}
+
+function navigateToTarget(navigate: ReturnType<typeof useNavigate>, target: SessionTarget): void {
+    if (target.hostId === LOCAL_HOST_ID) navigate({ to: '/attach/$name', params: { name: target.sessionName } })
+    else navigate({ to: '/attach/$hostId/$name', params: { hostId: target.hostId, name: target.sessionName } })
 }
