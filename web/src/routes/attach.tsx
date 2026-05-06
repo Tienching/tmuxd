@@ -20,7 +20,7 @@ import { api } from '../api/client'
 import { listHostSessionsData } from '../hosts/sessionData'
 import { getToken } from '../auth/tokenStore'
 import { createSessionWithOptionalName } from '../session/createSession'
-import { listOpenSessions, markOpenSession, subscribeOpenSessions, type OpenSession } from '../session/openSessions'
+import { listOpenSessions, markOpenSession, removeOpenSession, subscribeOpenSessions, type OpenSession } from '../session/openSessions'
 import {
     closeWorkspacePane,
     createWorkspaceId,
@@ -820,9 +820,11 @@ function SplitSessionChooser({
     onSelect: (target: SessionTarget) => void
     onCreate: (inputName: string, hostId: string) => void
 }) {
+    const queryClient = useQueryClient()
     const [openedSessions, setOpenedSessions] = useState<OpenSession[]>(() => listOpenSessions())
     const [newName, setNewName] = useState('')
     const [newHostId, setNewHostId] = useState(LOCAL_HOST_ID)
+    const [pendingKills, setPendingKills] = useState<Set<string>>(() => new Set())
     const { data, error: listError, isLoading } = useQuery({
         queryKey: ['hostSessions'],
         queryFn: listHostSessionsData,
@@ -846,6 +848,7 @@ function SplitSessionChooser({
     const openedGroups = groupedOpenSessions(visibleOpenedSessions)
     const openedKeys = new Set(visibleOpenedSessions.map(openSessionKey))
     const otherSessions = data?.sessions.filter((session) => !openedKeys.has(targetSessionKey(session))) ?? []
+    const killableHostIds = getKillableHostIds(data?.hosts)
     const currentTarget = { hostId: currentHostId, sessionName: currentSessionName }
     const currentKey = targetKey(currentTarget)
     const knownKeys = new Set([...visibleOpenedSessions.map(openSessionKey), ...otherSessions.map(targetSessionKey)])
@@ -856,6 +859,30 @@ function SplitSessionChooser({
     const submitNewSession = (event: FormEvent) => {
         event.preventDefault()
         onCreate(newName, newHostId)
+    }
+
+    async function confirmKillSession(session: TargetSession) {
+        const target = { hostId: session.hostId, sessionName: session.name }
+        const key = targetSessionKey(session)
+        if (pendingKills.has(key)) return
+        const ok = window.confirm(
+            `Kill tmux session "${session.name}" on ${session.hostName}? Any running processes inside it will be terminated.`
+        )
+        if (!ok) return
+        setPendingKills((current) => new Set(current).add(key))
+        try {
+            await api.killTargetSession(target)
+            removeOpenSession(target)
+            await invalidateSessionQueries(queryClient, target.hostId)
+        } catch {
+            window.alert('Failed to kill session.')
+        } finally {
+            setPendingKills((current) => {
+                const next = new Set(current)
+                next.delete(key)
+                return next
+            })
+        }
     }
 
     return (
@@ -962,6 +989,8 @@ function SplitSessionChooser({
                                         active={session.name === currentSessionName && session.hostId === currentHostId}
                                         disabled={creating}
                                         onClick={() => onSelect({ hostId: session.hostId, sessionName: session.name })}
+                                        onKill={killableHostIds.has(session.hostId) ? () => void confirmKillSession(session) : undefined}
+                                        killing={pendingKills.has(targetSessionKey(session))}
                                     />
                                 ))}
                             </SessionChoiceSection>
@@ -987,29 +1016,47 @@ function SplitSessionButton({
     hostName,
     active,
     disabled,
-    onClick
+    onClick,
+    onKill,
+    killing = false
 }: {
     name: string
     hostName?: string
     active?: boolean
     disabled?: boolean
     onClick: () => void
+    onKill?: () => void
+    killing?: boolean
 }) {
     return (
-        <button
-            type="button"
-            className={`flex min-w-0 items-center justify-between gap-2 rounded-md border px-2 py-2 text-left text-xs text-neutral-100 disabled:opacity-50 ${
+        <div
+            className={`flex min-w-0 items-center justify-between gap-2 rounded-md border text-xs text-neutral-100 ${
                 active ? 'border-neutral-500 bg-neutral-800' : 'border-neutral-800 bg-neutral-900/60 hover:bg-neutral-900'
-            }`}
-            disabled={disabled}
-            onClick={onClick}
+            } ${disabled ? 'opacity-50' : ''}`}
         >
-            <span className="min-w-0">
+            <button
+                type="button"
+                className="min-w-0 flex-1 px-2 py-2 text-left disabled:cursor-not-allowed"
+                disabled={disabled}
+                onClick={onClick}
+            >
                 <span className="block truncate font-mono">{name}</span>
                 {hostName && <span className="block truncate text-[10px] text-neutral-500">{hostName}</span>}
-            </span>
+            </button>
             {active && <span className="shrink-0 text-[10px] text-neutral-500">current</span>}
-        </button>
+            {onKill && (
+                <button
+                    type="button"
+                    className="px-2 py-2 text-xs text-red-400 hover:bg-neutral-800 disabled:opacity-50"
+                    aria-label={`Kill ${name}`}
+                    title={`Kill ${name}`}
+                    disabled={disabled || killing}
+                    onClick={onKill}
+                >
+                    {killing ? '…' : '×'}
+                </button>
+            )}
+        </div>
     )
 }
 
@@ -1147,6 +1194,10 @@ function getCreatableHosts(hosts: HostInfo[] | undefined): HostOption[] {
     if (onlineHosts.length === 0) return [{ id: LOCAL_HOST_ID, name: 'Local' }]
     const local = onlineHosts.find((host) => host.id === LOCAL_HOST_ID)
     return local ? [local, ...onlineHosts.filter((host) => host.id !== LOCAL_HOST_ID)] : onlineHosts
+}
+
+function getKillableHostIds(hosts: HostInfo[] | undefined): Set<string> {
+    return new Set((hosts ?? []).filter((host) => host.status === 'online' && host.capabilities.includes('kill')).map((host) => host.id))
 }
 
 function targetSessionKey(session: TargetSession): string {
