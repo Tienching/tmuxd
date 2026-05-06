@@ -1,39 +1,40 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
+import { LOCAL_HOST_ID } from '@tmuxd/shared'
 import {
     closeWorkspacePane,
     createWorkspacePane,
     findWorkspacePane,
     listWorkspacePanes,
     parseWorkspaceLayout,
-    setWorkspacePaneSession,
+    setWorkspacePaneTarget,
     splitWorkspacePane,
     updateWorkspaceSplitRatio,
     type WorkspaceNode
 } from './layout'
 
 describe('workspace layout', () => {
-    it('splits a pane and lists both sessions', () => {
+    it('splits a pane and lists both targets', () => {
         const root = createWorkspacePane('main', 'pane-a')
-        const split = splitWorkspacePane(root, 'pane-a', 'row', 'web-1', 'pane-b', 'split-a')
+        const split = splitWorkspacePane(root, 'pane-a', 'row', { hostId: 'remote-a', sessionName: 'web-1' }, 'pane-b', 'split-a')
 
         assert.deepEqual(
-            listWorkspacePanes(split).map((pane) => [pane.id, pane.sessionName]),
+            listWorkspacePanes(split).map((pane) => [pane.id, pane.target.hostId, pane.target.sessionName]),
             [
-                ['pane-a', 'main'],
-                ['pane-b', 'web-1']
+                ['pane-a', LOCAL_HOST_ID, 'main'],
+                ['pane-b', 'remote-a', 'web-1']
             ]
         )
         assert.equal(split.type, 'split')
         if (split.type === 'split') assert.equal(split.direction, 'row')
     })
 
-    it('replaces only the selected pane session', () => {
+    it('replaces only the selected pane target', () => {
         const root = splitWorkspacePane(createWorkspacePane('main', 'pane-a'), 'pane-a', 'column', 'side', 'pane-b', 'split-a')
-        const next = setWorkspacePaneSession(root, 'pane-b', 'logs')
+        const next = setWorkspacePaneTarget(root, 'pane-b', { hostId: 'remote-a', sessionName: 'logs' })
 
-        assert.equal(findWorkspacePane(next, 'pane-a')?.sessionName, 'main')
-        assert.equal(findWorkspacePane(next, 'pane-b')?.sessionName, 'logs')
+        assert.deepEqual(findWorkspacePane(next, 'pane-a')?.target, { hostId: LOCAL_HOST_ID, sessionName: 'main' })
+        assert.deepEqual(findWorkspacePane(next, 'pane-b')?.target, { hostId: 'remote-a', sessionName: 'logs' })
     })
 
     it('closes a pane and promotes its sibling', () => {
@@ -54,16 +55,24 @@ describe('workspace layout', () => {
         if (large.type === 'split') assert.equal(large.ratio, 0.85)
     })
 
-    it('parses persisted layouts and drops invalid branches', () => {
+    it('parses persisted target layouts and drops invalid branches', () => {
         const parsed = parseWorkspaceLayout({
             type: 'split',
             id: 'split-a',
             direction: 'row',
             ratio: 2,
-            first: { type: 'pane', id: 'pane-a', sessionName: 'main' },
+            first: { type: 'pane', id: 'pane-a', target: { hostId: 'remote-a', sessionName: 'main' } },
             second: { type: 'pane', id: '', sessionName: '' }
         })
 
-        assert.deepEqual(listWorkspacePanes(parsed as WorkspaceNode).map((pane) => pane.sessionName), ['main'])
+        assert.deepEqual(listWorkspacePanes(parsed as WorkspaceNode).map((pane) => pane.target), [{ hostId: 'remote-a', sessionName: 'main' }])
+    })
+
+    it('migrates old sessionName-only panes to local targets', () => {
+        const parsed = parseWorkspaceLayout({ type: 'pane', id: 'pane-a', sessionName: 'main' })
+
+        assert.deepEqual(listWorkspacePanes(parsed as WorkspaceNode).map((pane) => pane.target), [
+            { hostId: LOCAL_HOST_ID, sessionName: 'main' }
+        ])
     })
 })

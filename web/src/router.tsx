@@ -10,7 +10,7 @@ import {
 import { AUTH_REQUIRED_EVENT, getToken } from './auth/tokenStore'
 import { LoginPage } from './routes/login'
 import { SessionsPage } from './routes/sessions'
-import { AttachPage } from './routes/attach'
+import { AttachHostPage, AttachPage } from './routes/attach'
 
 const rootRoute = createRootRoute({
     component: RootShell
@@ -61,7 +61,18 @@ const attachRoute = createRoute({
     component: AttachPage
 })
 
-const routeTree = rootRoute.addChildren([loginRoute, sessionsRoute, attachRoute])
+const attachHostRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: '/attach/$hostId/$name',
+    beforeLoad: () => {
+        if (!getToken()) {
+            throw redirect({ to: '/login' })
+        }
+    },
+    component: AttachHostPage
+})
+
+const routeTree = rootRoute.addChildren([loginRoute, sessionsRoute, attachRoute, attachHostRoute])
 
 export const router = createRouter({ routeTree })
 

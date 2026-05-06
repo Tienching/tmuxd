@@ -13,6 +13,12 @@ export const sessionNameSchema = z
     .max(64)
     .regex(/^[A-Za-z0-9._-]+$/, 'Invalid session name')
 
+export const hostIdSchema = z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[A-Za-z0-9._-]+$/, 'Invalid host id')
+
 export const loginSchema = z.object({
     password: z.string().min(1).max(512)
 })
@@ -20,6 +26,18 @@ export const loginSchema = z.object({
 export const createSessionSchema = z.object({
     name: sessionNameSchema
 })
+
+export const sessionTargetSchema = z.object({
+    hostId: hostIdSchema,
+    sessionName: sessionNameSchema
+})
+
+export const wsTicketRequestSchema = z
+    .object({
+        hostId: hostIdSchema.optional(),
+        sessionName: sessionNameSchema.optional()
+    })
+    .optional()
 
 export const clientWsMessageSchema = z.discriminatedUnion('type', [
     z.object({ type: z.literal('input'), payload: base64Schema }),

@@ -1,4 +1,4 @@
-import type { AuthResponse, TmuxSession } from '@tmuxd/shared'
+import { LOCAL_HOST_ID, type AuthResponse, type HostInfo, type SessionTarget, type TargetSession, type TmuxSession } from '@tmuxd/shared'
 import { getToken, notifyAuthRequired } from '../auth/tokenStore'
 
 interface CaptureResponse {
@@ -45,11 +45,32 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const api = {
     login: (password: string) =>
         request<AuthResponse>('/api/auth', { method: 'POST', body: JSON.stringify({ password }) }),
+    listHosts: () => request<{ hosts: HostInfo[] }>('/api/hosts'),
     listSessions: () => request<{ sessions: TmuxSession[] }>('/api/sessions'),
+    listHostSessions: (hostId = LOCAL_HOST_ID) =>
+        request<{ sessions: TargetSession[] }>(`/api/hosts/${encodeURIComponent(hostId)}/sessions`),
     createSession: (name: string) =>
         request<{ ok: true }>('/api/sessions', { method: 'POST', body: JSON.stringify({ name }) }),
+    createHostSession: (hostId: string, name: string) =>
+        request<{ ok: true }>(`/api/hosts/${encodeURIComponent(hostId)}/sessions`, { method: 'POST', body: JSON.stringify({ name }) }),
     captureSession: (name: string) => request<CaptureResponse>(`/api/sessions/${encodeURIComponent(name)}/capture`),
-    createWsTicket: () => request<{ ticket: string; expiresAt: number }>('/api/ws-ticket', { method: 'POST' }),
+    captureTargetSession: (target: SessionTarget) =>
+        target.hostId === LOCAL_HOST_ID
+            ? request<CaptureResponse>(`/api/sessions/${encodeURIComponent(target.sessionName)}/capture`)
+            : request<CaptureResponse>(
+                  `/api/hosts/${encodeURIComponent(target.hostId)}/sessions/${encodeURIComponent(target.sessionName)}/capture`
+              ),
+    createWsTicket: (target?: Partial<SessionTarget>) =>
+        request<{ ticket: string; expiresAt: number }>('/api/ws-ticket', {
+            method: 'POST',
+            body: JSON.stringify(target ?? {})
+        }),
     killSession: (name: string) =>
-        request<null>(`/api/sessions/${encodeURIComponent(name)}`, { method: 'DELETE' })
+        request<null>(`/api/sessions/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+    killTargetSession: (target: SessionTarget) =>
+        target.hostId === LOCAL_HOST_ID
+            ? request<null>(`/api/sessions/${encodeURIComponent(target.sessionName)}`, { method: 'DELETE' })
+            : request<null>(`/api/hosts/${encodeURIComponent(target.hostId)}/sessions/${encodeURIComponent(target.sessionName)}`, {
+                  method: 'DELETE'
+              })
 }

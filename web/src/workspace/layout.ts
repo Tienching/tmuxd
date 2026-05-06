@@ -1,9 +1,11 @@
+import { LOCAL_HOST_ID, type SessionTarget } from '@tmuxd/shared'
+
 export type WorkspaceDirection = 'row' | 'column'
 
 export interface WorkspacePane {
     type: 'pane'
     id: string
-    sessionName: string
+    target: SessionTarget
 }
 
 export interface WorkspaceSplit {
@@ -28,8 +30,24 @@ export function createWorkspaceId(prefix: 'pane' | 'split' = 'pane'): string {
     return `${prefix}-${random}`
 }
 
-export function createWorkspacePane(sessionName: string, id = createWorkspaceId('pane')): WorkspacePane {
-    return { type: 'pane', id, sessionName }
+export function createWorkspacePane(target: string | SessionTarget, id = createWorkspaceId('pane')): WorkspacePane {
+    return { type: 'pane', id, target: normalizeTarget(target) }
+}
+
+export function getWorkspacePaneSessionName(pane: WorkspacePane): string {
+    return pane.target.sessionName
+}
+
+export function getWorkspacePaneHostId(pane: WorkspacePane): string {
+    return pane.target.hostId
+}
+
+export function formatWorkspaceTarget(target: SessionTarget): string {
+    return target.hostId === LOCAL_HOST_ID ? target.sessionName : `${target.hostId}/${target.sessionName}`
+}
+
+export function sameWorkspaceTarget(a: SessionTarget, b: SessionTarget): boolean {
+    return a.hostId === b.hostId && a.sessionName === b.sessionName
 }
 
 export function listWorkspacePanes(node: WorkspaceNode): WorkspacePane[] {
@@ -46,7 +64,7 @@ export function splitWorkspacePane(
     node: WorkspaceNode,
     paneId: string,
     direction: WorkspaceDirection,
-    newSessionName: string,
+    newTarget: string | SessionTarget,
     newPaneId = createWorkspaceId('pane'),
     splitId = createWorkspaceId('split')
 ): WorkspaceNode {
@@ -58,27 +76,31 @@ export function splitWorkspacePane(
             direction,
             ratio: 0.5,
             first: node,
-            second: createWorkspacePane(newSessionName, newPaneId)
+            second: createWorkspacePane(newTarget, newPaneId)
         }
     }
 
-    const first = splitWorkspacePane(node.first, paneId, direction, newSessionName, newPaneId, splitId)
+    const first = splitWorkspacePane(node.first, paneId, direction, newTarget, newPaneId, splitId)
     if (first !== node.first) return { ...node, first }
 
-    const second = splitWorkspacePane(node.second, paneId, direction, newSessionName, newPaneId, splitId)
+    const second = splitWorkspacePane(node.second, paneId, direction, newTarget, newPaneId, splitId)
     if (second !== node.second) return { ...node, second }
 
     return node
 }
 
-export function setWorkspacePaneSession(node: WorkspaceNode, paneId: string, sessionName: string): WorkspaceNode {
+export function setWorkspacePaneTarget(node: WorkspaceNode, paneId: string, target: string | SessionTarget): WorkspaceNode {
     if (node.type === 'pane') {
-        return node.id === paneId ? { ...node, sessionName } : node
+        return node.id === paneId ? { ...node, target: normalizeTarget(target) } : node
     }
 
-    const first = setWorkspacePaneSession(node.first, paneId, sessionName)
-    const second = setWorkspacePaneSession(node.second, paneId, sessionName)
+    const first = setWorkspacePaneTarget(node.first, paneId, target)
+    const second = setWorkspacePaneTarget(node.second, paneId, target)
     return first === node.first && second === node.second ? node : { ...node, first, second }
+}
+
+export function setWorkspacePaneSession(node: WorkspaceNode, paneId: string, sessionName: string): WorkspaceNode {
+    return setWorkspacePaneTarget(node, paneId, { hostId: LOCAL_HOST_ID, sessionName })
 }
 
 export function closeWorkspacePane(node: WorkspaceNode, paneId: string): WorkspaceNode | null {
@@ -114,10 +136,9 @@ function parseNode(value: unknown, depth: number): WorkspaceNode | null {
     if (depth > 8 || !isRecord(value)) return null
 
     if (value.type === 'pane') {
-        if (typeof value.id !== 'string' || typeof value.sessionName !== 'string') return null
-        const sessionName = value.sessionName.trim()
-        if (!value.id || !sessionName) return null
-        return createWorkspacePane(sessionName, value.id)
+        if (typeof value.id !== 'string' || !value.id) return null
+        const target = parseTarget(value)
+        return target ? createWorkspacePane(target, value.id) : null
     }
 
     if (value.type === 'split') {
@@ -139,6 +160,25 @@ function parseNode(value: unknown, depth: number): WorkspaceNode | null {
     }
 
     return null
+}
+
+function parseTarget(value: Record<string, unknown>): SessionTarget | null {
+    if (isRecord(value.target)) return parseTargetRecord(value.target)
+    if (typeof value.sessionName === 'string') return normalizeTarget(value.sessionName)
+    return null
+}
+
+function parseTargetRecord(value: Record<string, unknown>): SessionTarget | null {
+    if (typeof value.hostId !== 'string' || typeof value.sessionName !== 'string') return null
+    return normalizeTarget({ hostId: value.hostId, sessionName: value.sessionName })
+}
+
+function normalizeTarget(target: string | SessionTarget): SessionTarget {
+    if (typeof target === 'string') {
+        const sessionName = target.trim()
+        return { hostId: LOCAL_HOST_ID, sessionName }
+    }
+    return { hostId: target.hostId.trim() || LOCAL_HOST_ID, sessionName: target.sessionName.trim() }
 }
 
 function clampRatio(ratio: number): number {

@@ -4,16 +4,19 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import { listOpenSessions, removeOpenSession, subscribeOpenSessions, type OpenSession } from '../session/openSessions'
 import { createSessionWithOptionalName } from '../session/createSession'
+import { LOCAL_HOST_ID } from '@tmuxd/shared'
 
 const SIDEBAR_HIDDEN_KEY = 'tmuxd.sidebarHidden'
 
 export function OpenSessionsSidebar({
     currentName,
+    currentHostId = LOCAL_HOST_ID,
     hidden,
     onToggleHidden,
     onOpenSession
 }: {
     currentName: string
+    currentHostId?: string
     hidden: boolean
     onToggleHidden: () => void
     onOpenSession?: (name: string) => void
@@ -22,8 +25,8 @@ export function OpenSessionsSidebar({
     const { createAndOpenSession, creating, createError } = useCreateAndOpenSession({ onOpenSession })
     const [sessions, setSessions] = useState<OpenSession[]>(() => listOpenSessions())
     const { data, error, isLoading } = useQuery({
-        queryKey: ['sessions'],
-        queryFn: () => api.listSessions(),
+        queryKey: ['sessions', LOCAL_HOST_ID],
+        queryFn: () => api.listHostSessions(LOCAL_HOST_ID),
         refetchInterval: 5000
     })
 
@@ -42,7 +45,9 @@ export function OpenSessionsSidebar({
     }
 
     const liveNames = data ? new Set(data.sessions.map((s) => s.name)) : null
-    const visibleOpenedSessions = liveNames ? sessions.filter((s) => liveNames.has(s.name)) : sessions
+    const visibleOpenedSessions = liveNames
+        ? sessions.filter((s) => s.hostId === currentHostId && liveNames.has(s.name))
+        : sessions.filter((s) => s.hostId === currentHostId)
     const openedNames = new Set(visibleOpenedSessions.map((s) => s.name))
     const otherSessions = data?.sessions.filter((s) => !openedNames.has(s.name)) ?? []
 
@@ -82,10 +87,10 @@ export function OpenSessionsSidebar({
             ) : (
                 <nav className="flex flex-col gap-2">
                     {visibleOpenedSessions.map((s) => {
-                        const active = s.name === currentName
+                        const active = s.name === currentName && s.hostId === currentHostId
                         return (
                             <div
-                                key={s.name}
+                                key={`${s.hostId}:${s.name}`}
                                 className={`flex min-w-0 items-center gap-1 rounded-md border ${
                                     active
                                         ? 'border-neutral-500 bg-neutral-800'
@@ -103,7 +108,7 @@ export function OpenSessionsSidebar({
                                     type="button"
                                     className="px-2 py-2 text-xs text-neutral-500 hover:text-neutral-100"
                                     aria-label={`Remove ${s.name} from opened sessions`}
-                                    onClick={() => removeOpenSession(s.name)}
+                                    onClick={() => removeOpenSession({ hostId: s.hostId, sessionName: s.name })}
                                 >
                                     ×
                                 </button>
@@ -113,7 +118,7 @@ export function OpenSessionsSidebar({
                 </nav>
             )}
             <div className="mt-3 mb-2 flex items-center justify-between gap-2 px-1">
-                <h2 className="text-xs font-medium uppercase tracking-wide text-neutral-500">All sessions</h2>
+                <h2 className="text-xs font-medium uppercase tracking-wide text-neutral-500">Local sessions</h2>
                 <span className="text-[10px] text-neutral-600">{data?.sessions.length ?? 0}</span>
             </div>
             {isLoading ? (
@@ -126,7 +131,7 @@ export function OpenSessionsSidebar({
                 <nav className="flex flex-col gap-2">
                     {otherSessions.map((s) => (
                         <button
-                            key={s.name}
+                            key={`${s.hostId}:${s.name}`}
                             className="min-w-0 truncate rounded-md border border-neutral-800 bg-neutral-900/60 px-2 py-2 text-left font-mono text-xs text-neutral-100 hover:bg-neutral-900"
                             onClick={() => openSession(s.name)}
                         >
@@ -139,7 +144,15 @@ export function OpenSessionsSidebar({
     )
 }
 
-export function MobileSessionSelect({ currentName, onOpenSession }: { currentName: string; onOpenSession?: (name: string) => void }) {
+export function MobileSessionSelect({
+    currentName,
+    currentHostId = LOCAL_HOST_ID,
+    onOpenSession
+}: {
+    currentName: string
+    currentHostId?: string
+    onOpenSession?: (name: string) => void
+}) {
     const navigate = useNavigate()
     const [sessions, setSessions] = useState<OpenSession[]>(() => listOpenSessions())
     const [menuOpen, setMenuOpen] = useState(false)
@@ -148,8 +161,8 @@ export function MobileSessionSelect({ currentName, onOpenSession }: { currentNam
         onOpenSession
     })
     const { data, error, isLoading } = useQuery({
-        queryKey: ['sessions'],
-        queryFn: () => api.listSessions(),
+        queryKey: ['sessions', LOCAL_HOST_ID],
+        queryFn: () => api.listHostSessions(LOCAL_HOST_ID),
         refetchInterval: 5000
     })
 
@@ -158,7 +171,9 @@ export function MobileSessionSelect({ currentName, onOpenSession }: { currentNam
     }, [])
 
     const liveNames = data ? new Set(data.sessions.map((s) => s.name)) : null
-    const visibleOpenedSessions = liveNames ? sessions.filter((s) => liveNames.has(s.name)) : sessions
+    const visibleOpenedSessions = liveNames
+        ? sessions.filter((s) => s.hostId === currentHostId && liveNames.has(s.name))
+        : sessions.filter((s) => s.hostId === currentHostId)
     const openedNames = new Set(visibleOpenedSessions.map((s) => s.name))
     const otherSessions = data?.sessions.filter((s) => !openedNames.has(s.name)) ?? []
     const knownNames = new Set([...visibleOpenedSessions.map((s) => s.name), ...otherSessions.map((s) => s.name)])
@@ -218,13 +233,15 @@ export function MobileSessionSelect({ currentName, onOpenSession }: { currentNam
                                         <div
                                             key={`opened-mobile-${s.name}`}
                                             className={`flex min-w-0 items-center gap-1 rounded-md border ${
-                                                s.name === currentName ? 'border-neutral-500 bg-neutral-800' : 'border-neutral-800 bg-neutral-900/60'
+                                                s.name === currentName && s.hostId === currentHostId
+                                                    ? 'border-neutral-500 bg-neutral-800'
+                                                    : 'border-neutral-800 bg-neutral-900/60'
                                             }`}
                                         >
                                             <button
                                                 type="button"
                                                 className="min-w-0 flex-1 truncate px-2 py-2 text-left font-mono text-xs text-neutral-100"
-                                                aria-current={s.name === currentName ? 'page' : undefined}
+                                                aria-current={s.name === currentName && s.hostId === currentHostId ? 'page' : undefined}
                                                 onClick={() => attachSession(s.name)}
                                             >
                                                 {s.name}
@@ -233,7 +250,7 @@ export function MobileSessionSelect({ currentName, onOpenSession }: { currentNam
                                                 type="button"
                                                 className="px-3 py-2 text-xs text-neutral-500 active:bg-neutral-800 active:text-neutral-100"
                                                 aria-label={`Remove ${s.name} from opened sessions`}
-                                                onClick={() => removeOpenSession(s.name)}
+                                                onClick={() => removeOpenSession({ hostId: s.hostId, sessionName: s.name })}
                                             >
                                                 ×
                                             </button>
@@ -243,7 +260,7 @@ export function MobileSessionSelect({ currentName, onOpenSession }: { currentNam
                             </>
                         )}
 
-                        <div className="mt-3 mb-1 px-1 text-[10px] font-medium uppercase tracking-wide text-neutral-600">All sessions</div>
+                        <div className="mt-3 mb-1 px-1 text-[10px] font-medium uppercase tracking-wide text-neutral-600">Local sessions</div>
                         {error ? (
                             <p className="px-1 text-xs text-red-400">Failed to load sessions.</p>
                         ) : !hasAnySession ? (
@@ -341,8 +358,12 @@ function useCreateAndOpenSession(options: { onCreated?: () => void; onOpenSessio
         setCreating(true)
         setCreateError(null)
         try {
-            const name = await createSessionWithOptionalName(inputName)
-            await queryClient.invalidateQueries({ queryKey: ['sessions'] })
+            const name = await createSessionWithOptionalName(inputName, (name) => api.createHostSession(LOCAL_HOST_ID, name))
+            await Promise.all([
+                queryClient.invalidateQueries({ queryKey: ['sessions'] }),
+                queryClient.invalidateQueries({ queryKey: ['sessions', LOCAL_HOST_ID] }),
+                queryClient.invalidateQueries({ queryKey: ['hosts'] })
+            ])
             options.onCreated?.()
             if (options.onOpenSession) {
                 options.onOpenSession(name)

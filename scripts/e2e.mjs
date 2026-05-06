@@ -192,6 +192,11 @@ async function main() {
         return r.status === 200 && Array.isArray(r.body?.sessions)
     })
 
+    await check('hosts: list includes local host', async () => {
+        const r = await http('/api/hosts', { headers: { authorization: `Bearer ${token}` } })
+        return r.status === 200 && r.body?.hosts?.some((h) => h.id === 'local' && h.status === 'online')
+    })
+
     const TEST_SESSION = 'tmuxd-e2e'
     await killIfPresent(TEST_SESSION)
 
@@ -240,6 +245,17 @@ async function main() {
         const r = await http('/api/sessions', { headers: { authorization: `Bearer ${token}` } })
         if (r.status !== 200) return false
         return r.body.sessions.some((s) => s.name === TEST_SESSION)
+    })
+
+    await check('hosts: local sessions include host metadata', async () => {
+        const r = await http('/api/hosts/local/sessions', { headers: { authorization: `Bearer ${token}` } })
+        if (r.status !== 200) return false
+        return r.body.sessions.some((s) => s.name === TEST_SESSION && s.hostId === 'local' && s.hostName === 'Local')
+    })
+
+    await check('hosts: unknown host sessions → 404', async () => {
+        const r = await http('/api/hosts/missing/sessions', { headers: { authorization: `Bearer ${token}` } })
+        return r.status === 404 && r.body?.error === 'host_not_found'
     })
 
     // ---- WEBSOCKET ----
@@ -309,6 +325,13 @@ async function main() {
         )
     })
 
+    await check('hosts: local capture returns pane scrollback', async () => {
+        const r = await http(`/api/hosts/local/sessions/${encodeURIComponent(TEST_SESSION)}/capture`, {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        return r.status === 200 && typeof r.body?.text === 'string' && r.body.text.includes('tmuxd-roundtrip-ok')
+    })
+
     await check('ws: resize frame accepted', async () => {
         ws.send(JSON.stringify({ type: 'resize', cols: 120, rows: 40 }))
         // No explicit ack; a successful resize means the server didn't close us.
@@ -345,6 +368,14 @@ async function main() {
         ws.close(1000, 'test')
         const code = await closed
         return code === 1000 || code === 1006 // some ws versions surface 1006 on local close
+    })
+
+    await check('ws: host-aware local path opens + ready hostId', async () => {
+        const url = `ws://${HOST}:${PORT}/ws/local/${TEST_SESSION}?token=${encodeURIComponent(token)}&cols=80&rows=24`
+        const handle = await wsConnect(url)
+        const ready = await waitForFrame(handle.frames, (f) => f.type === 'ready', 3000)
+        handle.ws.close(1000, 'test')
+        return ready.session === TEST_SESSION && ready.hostId === 'local'
     })
 
     // ---- KILL ----

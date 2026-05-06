@@ -2,9 +2,10 @@ import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocketServer, WebSocket } from 'ws'
 import { verifyJwt } from './auth.js'
+import { isLocalHost } from './hosts.js'
 import { attachTmuxPty, type PtyBridge } from './ptyManager.js'
 import { consumeWsTicket } from './wsTickets.js'
-import { clientWsMessageSchema, type ServerWsMessage } from '@tmuxd/shared'
+import { clientWsMessageSchema, LOCAL_HOST_ID, type ServerWsMessage } from '@tmuxd/shared'
 
 export interface WsDeps {
     jwtSecret: Uint8Array
@@ -21,7 +22,8 @@ export function createWsServer(_deps: WsDeps): WebSocketServer {
     const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD })
     const sessionCounts = new Map<string, number>()
 
-    wss.on('connection', (ws: WebSocket, _request: IncomingMessage, context: { session: string; cols: number; rows: number }) => {
+    wss.on('connection', (ws: WebSocket, _request: IncomingMessage, context: { hostId: string; session: string; cols: number; rows: number }) => {
+        const sessionKey = `${context.hostId}/${context.session}`
         let bridge: PtyBridge | null = null
         let paused = false
         let cleaned = false
@@ -48,21 +50,21 @@ export function createWsServer(_deps: WsDeps): WebSocketServer {
             bridge?.dispose()
             bridge = null
             if (counted) {
-                const next = Math.max(0, (sessionCounts.get(context.session) ?? 1) - 1)
-                if (next) sessionCounts.set(context.session, next)
-                else sessionCounts.delete(context.session)
+                const next = Math.max(0, (sessionCounts.get(sessionKey) ?? 1) - 1)
+                if (next) sessionCounts.set(sessionKey, next)
+                else sessionCounts.delete(sessionKey)
             }
         }
         ws.on('close', cleanup)
         ws.on('error', cleanup)
 
-        if (wss.clients.size > MAX_WS_CLIENTS || (sessionCounts.get(context.session) ?? 0) >= MAX_WS_CLIENTS_PER_SESSION) {
+        if (wss.clients.size > MAX_WS_CLIENTS || (sessionCounts.get(sessionKey) ?? 0) >= MAX_WS_CLIENTS_PER_SESSION) {
             sendJson(ws, { type: 'error', message: 'too_many_connections' })
             ws.close(1013, 'too_many_connections')
             return
         }
 
-        sessionCounts.set(context.session, (sessionCounts.get(context.session) ?? 0) + 1)
+        sessionCounts.set(sessionKey, (sessionCounts.get(sessionKey) ?? 0) + 1)
         counted = true
 
         try {
@@ -86,6 +88,7 @@ export function createWsServer(_deps: WsDeps): WebSocketServer {
 
         sendJson(ws, {
             type: 'ready',
+            hostId: context.hostId,
             session: bridge.session,
             cols: bridge.cols,
             rows: bridge.rows
@@ -199,9 +202,14 @@ export async function tryHandleUpgrade(
 ): Promise<boolean> {
     const urlStr = request.url || ''
     const url = new URL(urlStr, 'http://localhost')
-    const m = /^\/ws\/([^/?]+)$/.exec(url.pathname)
-    if (!m) return false
-    const session = decodeURIComponent(m[1])
+    const target = parseWsTarget(url.pathname)
+    if (!target) return false
+    const { hostId, session } = target
+    if (!isLocalHost(hostId)) {
+        socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n')
+        socket.destroy()
+        return true
+    }
     const token = url.searchParams.get('token') || ''
     const ticket = url.searchParams.get('ticket') || ''
     const cols = Number.parseInt(url.searchParams.get('cols') || '80', 10)
@@ -229,9 +237,24 @@ export async function tryHandleUpgrade(
     }
 
     wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit('connection', ws, request, { session, cols, rows })
+        wss.emit('connection', ws, request, { hostId, session, cols, rows })
     })
     return true
+}
+
+function parseWsTarget(pathname: string): { hostId: string; session: string } | null {
+    const local = /^\/ws\/([^/?]+)$/.exec(pathname)
+    if (local) return { hostId: LOCAL_HOST_ID, session: decodeURIComponent(local[1]) }
+
+    const hostAware = /^\/ws\/([^/?]+)\/([^/?]+)$/.exec(pathname)
+    if (hostAware) {
+        return {
+            hostId: decodeURIComponent(hostAware[1]),
+            session: decodeURIComponent(hostAware[2])
+        }
+    }
+
+    return null
 }
 
 function isSameHostOrigin(origin: string, host: string | undefined): boolean {

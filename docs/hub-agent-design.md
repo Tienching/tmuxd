@@ -1,6 +1,6 @@
 # tmuxd Hub / Agent Design
 
-Status: draft v1
+Status: draft v1, Phase 1 implemented
 
 Branch: `feature/hub-agent-design`
 
@@ -501,10 +501,19 @@ Names can change. IDs should not. The UI can show `desktop`, but stored layouts 
 
 ## Recommended next step
 
-Start with Phase 1 on this branch or a follow-up implementation branch:
+Phase 1 is now implemented on this branch:
+
+- `local` host metadata is exposed through `GET /api/hosts`.
+- Host-aware local session APIs are available under `/api/hosts/local/sessions`.
+- Host-aware browser attach is available at `/ws/local/:sessionName`.
+- Workspace panes now persist `{ hostId, sessionName }` targets and migrate old `sessionName`-only layouts.
+- Browser-local opened sessions now store host metadata.
+- The existing `/api/sessions`, `/ws/:sessionName`, and `/attach/:sessionName` paths remain compatible.
+
+The next implementation step is Phase 2:
 
 ```text
-host-aware local model first, no remote networking yet
+target registry on the server, still no remote networking yet
 ```
 
-That gives us the data model and UI foundation without taking on the agent protocol too early. It is the smallest step that still points directly at the full multi-machine product.
+That will put local tmux behind the same interface remote agents will use later.

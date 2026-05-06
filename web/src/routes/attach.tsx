@@ -24,9 +24,12 @@ import {
     closeWorkspacePane,
     createWorkspaceId,
     createWorkspacePane,
+    formatWorkspaceTarget,
+    findWorkspacePane,
     listWorkspacePanes,
     parseWorkspaceLayout,
-    setWorkspacePaneSession,
+    sameWorkspaceTarget,
+    setWorkspacePaneTarget,
     splitWorkspacePane,
     updateWorkspaceSplitRatio,
     type WorkspaceDirection,
@@ -34,7 +37,7 @@ import {
     type WorkspacePane,
     type WorkspaceSplit
 } from '../workspace/layout'
-import type { ClientWsMessage, ServerWsMessage } from '@tmuxd/shared'
+import { LOCAL_HOST_ID, type ClientWsMessage, type ServerWsMessage, type SessionTarget } from '@tmuxd/shared'
 
 type Status = 'connecting' | 'open' | 'closed' | 'error'
 
@@ -57,15 +60,24 @@ const MAX_WORKSPACE_PANES = 6
 
 export function AttachPage() {
     const { name } = useParams({ from: '/attach/$name' })
+    return <AttachTargetPage initialTarget={{ hostId: LOCAL_HOST_ID, sessionName: name }} />
+}
+
+export function AttachHostPage() {
+    const { hostId, name } = useParams({ from: '/attach/$hostId/$name' })
+    return <AttachTargetPage initialTarget={{ hostId, sessionName: name }} />
+}
+
+function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
     const navigate = useNavigate()
     const queryClient = useQueryClient()
     const initialWorkspaceRef = useRef<WorkspaceNode | null>(null)
-    if (initialWorkspaceRef.current === null) initialWorkspaceRef.current = loadInitialWorkspace(name)
+    if (initialWorkspaceRef.current === null) initialWorkspaceRef.current = loadInitialWorkspace(initialTarget)
 
     const [workspace, setWorkspace] = useState<WorkspaceNode>(() => initialWorkspaceRef.current as WorkspaceNode)
     const [activePaneId, setActivePaneId] = useState(() => {
         const panes = listWorkspacePanes(initialWorkspaceRef.current as WorkspaceNode)
-        return panes.find((pane) => pane.sessionName === name)?.id ?? panes[0]?.id ?? ''
+        return panes.find((pane) => sameWorkspaceTarget(pane.target, initialTarget))?.id ?? panes[0]?.id ?? ''
     })
     const [paneStatuses, setPaneStatuses] = useState<Record<string, PaneStatus>>({})
     const [sidebarHidden, setSidebarHidden] = useState(() => getInitialSidebarHidden())
@@ -83,24 +95,26 @@ export function AttachPage() {
 
     const panes = listWorkspacePanes(workspace)
     const activePane = panes.find((pane) => pane.id === activePaneId) ?? panes[0] ?? null
-    const activeSessionName = activePane?.sessionName ?? name
+    const activeTarget = activePane?.target ?? initialTarget
+    const activeSessionName = activeTarget.sessionName
+    const activeTargetTitle = formatWorkspaceTarget(activeTarget)
     const activePaneStatus = (activePane && paneStatuses[activePane.id]) ?? { status: 'connecting' as Status, statusMsg: null }
     const paneIdsKey = panes.map((pane) => pane.id).join('\n')
-    const paneSessionKey = panes.map((pane) => pane.sessionName).join('\n')
+    const paneTargetsKey = panes.map((pane) => targetKey(pane.target)).join('\n')
 
     useEffect(() => {
         setWorkspace((current) => {
-            const matchingPane = listWorkspacePanes(current).find((pane) => pane.sessionName === name)
+            const matchingPane = listWorkspacePanes(current).find((pane) => sameWorkspaceTarget(pane.target, initialTarget))
             if (matchingPane) {
                 setActivePaneId(matchingPane.id)
                 return current
             }
 
-            const next = createWorkspacePane(name)
+            const next = createWorkspacePane(initialTarget)
             setActivePaneId(next.id)
             return next
         })
-    }, [name])
+    }, [initialTarget.hostId, initialTarget.sessionName])
 
     useEffect(() => {
         const currentPanes = listWorkspacePanes(workspace)
@@ -114,8 +128,8 @@ export function AttachPage() {
     }, [workspace])
 
     useEffect(() => {
-        for (const pane of panes) markOpenSession(pane.sessionName)
-    }, [paneSessionKey])
+        for (const pane of panes) markOpenSession(pane.target, hostLabel(pane.target.hostId))
+    }, [paneTargetsKey])
 
     useEffect(() => {
         const livePaneIds = new Set(paneIdsKey ? paneIdsKey.split('\n') : [])
@@ -141,7 +155,7 @@ export function AttachPage() {
     }
 
     async function openCopySheet() {
-        const sessionName = activeSessionName
+        const target = activeTarget
         const requestId = copyRequestRef.current + 1
         copyRequestRef.current = requestId
         setCopyText(null)
@@ -149,7 +163,7 @@ export function AttachPage() {
         setCopyError(null)
         setCopyLoading(true)
         try {
-            const res = await api.captureSession(sessionName)
+            const res = await api.captureTargetSession(target)
             if (copyRequestRef.current !== requestId) return
             setCopyText(res.text)
             setCopyScrollPosition(res.text ? res.scrollPosition : 0)
@@ -174,18 +188,17 @@ export function AttachPage() {
         setSplitRequest({ paneId, direction })
     }
 
-    function attachSessionToSplit(sessionName: string) {
+    function attachSessionToSplit(target: SessionTarget) {
         const request = splitRequest
-        const trimmed = sessionName.trim()
-        if (!request || !trimmed) return
-        addSessionToSplit(request, trimmed)
+        if (!request) return
+        addSessionToSplit(request, target)
     }
 
-    function addSessionToSplit(request: SplitRequest, sessionName: string) {
+    function addSessionToSplit(request: SplitRequest, target: SessionTarget) {
         const newPaneId = createWorkspaceId('pane')
-        setWorkspace((current) => splitWorkspacePane(current, request.paneId, request.direction, sessionName, newPaneId))
+        setWorkspace((current) => splitWorkspacePane(current, request.paneId, request.direction, target, newPaneId))
         setActivePaneId(newPaneId)
-        markOpenSession(sessionName)
+        markOpenSession(target, hostLabel(target.hostId))
         setSplitRequest(null)
         setSplitError(null)
     }
@@ -197,9 +210,10 @@ export function AttachPage() {
         setSplittingPaneId(request.paneId)
         setSplitError(null)
         try {
-            const newSessionName = await createSessionWithOptionalName(inputName)
-            addSessionToSplit(request, newSessionName)
-            await queryClient.invalidateQueries({ queryKey: ['sessions'] })
+            const hostId = findWorkspacePane(workspace, request.paneId)?.target.hostId ?? LOCAL_HOST_ID
+            const newSessionName = await createSessionWithOptionalName(inputName, (name) => api.createHostSession(hostId, name))
+            addSessionToSplit(request, { hostId, sessionName: newSessionName })
+            await invalidateSessionQueries(queryClient, hostId)
         } catch {
             setSplitError('Failed to create session.')
         } finally {
@@ -221,9 +235,10 @@ export function AttachPage() {
         const trimmed = sessionName.trim()
         const paneId = activePane?.id
         if (!trimmed || !paneId) return
-        setWorkspace((current) => setWorkspacePaneSession(current, paneId, trimmed))
+        const target = { hostId: LOCAL_HOST_ID, sessionName: trimmed }
+        setWorkspace((current) => setWorkspacePaneTarget(current, paneId, target))
         setActivePaneId(paneId)
-        markOpenSession(trimmed)
+        markOpenSession(target)
         navigate({ to: '/attach/$name', params: { name: trimmed } })
     }
 
@@ -246,7 +261,7 @@ export function AttachPage() {
                         ← Back
                     </button>
                     <div className="min-w-0 justify-self-center">
-                        <MobileSessionSelect currentName={activeSessionName} onOpenSession={attachSessionToActive} />
+                        <MobileSessionSelect currentName={activeSessionName} currentHostId={activeTarget.hostId} onOpenSession={attachSessionToActive} />
                     </div>
                     <div className="flex items-center justify-end gap-1 text-xs">
                         <StatusDot status={activePaneStatus.status} />
@@ -263,7 +278,7 @@ export function AttachPage() {
                         </button>
                     </div>
                     <span className="max-w-[50vw] truncate font-mono">
-                        {panes.length > 1 ? `Workspace · ${activeSessionName}` : activeSessionName}
+                        {panes.length > 1 ? `Workspace · ${activeTargetTitle}` : activeTargetTitle}
                     </span>
                     <div className="flex min-w-0 items-center justify-end gap-2 justify-self-end text-xs">
                         {panes.length > 1 && <span className="text-neutral-500">{panes.length} panes</span>}
@@ -276,6 +291,7 @@ export function AttachPage() {
             <div className="flex min-h-0 flex-1 flex-col md:flex-row">
                 <OpenSessionsSidebar
                     currentName={activeSessionName}
+                    currentHostId={activeTarget.hostId}
                     hidden={sidebarHidden}
                     onOpenSession={attachSessionToActive}
                     onToggleHidden={() => {
@@ -331,6 +347,7 @@ export function AttachPage() {
                 <SplitSessionChooser
                     direction={splitRequest.direction}
                     currentSessionName={findWorkspacePaneSession(workspace, splitRequest.paneId) ?? activeSessionName}
+                    currentHostId={findWorkspacePane(workspace, splitRequest.paneId)?.target.hostId ?? activeTarget.hostId}
                     creating={splittingPaneId === splitRequest.paneId}
                     error={splitError}
                     onClose={() => {
@@ -372,7 +389,7 @@ function WorkspaceNodeView({
     if (node.type === 'pane') {
         return (
             <WorkspaceTerminalPane
-                key={`${node.id}:${node.sessionName}`}
+                key={`${node.id}:${targetKey(node.target)}`}
                 ref={(handle) => registerPaneHandle(node.id, handle)}
                 pane={node}
                 active={node.id === activePaneId}
@@ -608,7 +625,7 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
         setPaneStatus('connecting')
         let ticket: string
         try {
-            ticket = (await api.createWsTicket()).ticket
+            ticket = (await api.createWsTicket(pane.target)).ticket
         } catch (err) {
             if (!reconnectRef.current.aborted) {
                 setPaneStatus('error', err instanceof Error ? err.message : 'failed to create websocket ticket')
@@ -618,7 +635,9 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
         if (reconnectRef.current.aborted) return
 
         const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-        const url = new URL(`${proto}//${window.location.host}/ws/${encodeURIComponent(pane.sessionName)}`)
+        const url = new URL(
+            `${proto}//${window.location.host}/ws/${encodeURIComponent(pane.target.hostId)}/${encodeURIComponent(pane.target.sessionName)}`
+        )
         url.searchParams.set('ticket', ticket)
         url.searchParams.set('cols', String(dimsRef.current.cols || term.cols))
         url.searchParams.set('rows', String(dimsRef.current.rows || term.rows))
@@ -709,7 +728,7 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
             <div className="hidden min-h-8 items-center justify-between gap-2 border-b border-neutral-800 bg-neutral-900/80 px-2 text-xs md:flex">
                 <div className="flex min-w-0 items-center gap-2">
                     <StatusDot status={status} />
-                    <span className="truncate font-mono text-neutral-100">{pane.sessionName}</span>
+                    <span className="truncate font-mono text-neutral-100">{formatWorkspaceTarget(pane.target)}</span>
                     {statusMsg && <span className="truncate text-red-400">· {statusMsg}</span>}
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
@@ -755,7 +774,7 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
             </div>
             <div className="min-h-0 flex-1">
                 <TerminalView
-                    key={pane.sessionName}
+                    key={targetKey(pane.target)}
                     className="overflow-hidden"
                     onMount={(term) => {
                         try {
@@ -781,6 +800,7 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
 
 function SplitSessionChooser({
     direction,
+    currentHostId,
     currentSessionName,
     creating,
     error,
@@ -789,18 +809,19 @@ function SplitSessionChooser({
     onCreate
 }: {
     direction: WorkspaceDirection
+    currentHostId: string
     currentSessionName: string
     creating: boolean
     error: string | null
     onClose: () => void
-    onSelect: (sessionName: string) => void
+    onSelect: (target: SessionTarget) => void
     onCreate: (inputName: string) => void
 }) {
     const [openedSessions, setOpenedSessions] = useState<OpenSession[]>(() => listOpenSessions())
     const [newName, setNewName] = useState('')
     const { data, error: listError, isLoading } = useQuery({
-        queryKey: ['sessions'],
-        queryFn: () => api.listSessions(),
+        queryKey: ['sessions', currentHostId],
+        queryFn: () => api.listHostSessions(currentHostId),
         refetchInterval: 5000
     })
 
@@ -809,7 +830,9 @@ function SplitSessionChooser({
     }, [])
 
     const liveNames = data ? new Set(data.sessions.map((session) => session.name)) : null
-    const visibleOpenedSessions = liveNames ? openedSessions.filter((session) => liveNames.has(session.name)) : openedSessions
+    const visibleOpenedSessions = liveNames
+        ? openedSessions.filter((session) => session.hostId === currentHostId && liveNames.has(session.name))
+        : openedSessions.filter((session) => session.hostId === currentHostId)
     const openedNames = new Set(visibleOpenedSessions.map((session) => session.name))
     const otherSessions = data?.sessions.filter((session) => !openedNames.has(session.name)) ?? []
     const knownNames = new Set([...visibleOpenedSessions.map((session) => session.name), ...otherSessions.map((session) => session.name)])
@@ -865,7 +888,12 @@ function SplitSessionChooser({
 
                     {showCurrentFallback && (
                         <div className="mb-3">
-                            <SplitSessionButton name={currentSessionName} active disabled={creating} onClick={() => onSelect(currentSessionName)} />
+                            <SplitSessionButton
+                                name={currentSessionName}
+                                active
+                                disabled={creating}
+                                onClick={() => onSelect({ hostId: currentHostId, sessionName: currentSessionName })}
+                            />
                         </div>
                     )}
 
@@ -877,13 +905,13 @@ function SplitSessionChooser({
                                     name={session.name}
                                     active={session.name === currentSessionName}
                                     disabled={creating}
-                                    onClick={() => onSelect(session.name)}
+                                    onClick={() => onSelect({ hostId: session.hostId, sessionName: session.name })}
                                 />
                             ))}
                         </SessionChoiceSection>
                     )}
 
-                    <SessionChoiceSection title="All sessions">
+                    <SessionChoiceSection title={`${hostLabel(currentHostId)} sessions`}>
                         {isLoading ? (
                             <p className="px-1 text-xs text-neutral-600">Loading sessions…</p>
                         ) : listError ? (
@@ -897,7 +925,7 @@ function SplitSessionChooser({
                                     name={session.name}
                                     active={session.name === currentSessionName}
                                     disabled={creating}
-                                    onClick={() => onSelect(session.name)}
+                                    onClick={() => onSelect({ hostId: session.hostId, sessionName: session.name })}
                                 />
                             ))
                         )}
@@ -1044,24 +1072,40 @@ function StatusDot({ status }: { status: Status }) {
     return <span className={`inline-block h-2 w-2 rounded-full ${color}`} />
 }
 
-function loadInitialWorkspace(sessionName: string): WorkspaceNode {
+function loadInitialWorkspace(target: SessionTarget): WorkspaceNode {
     try {
         const raw = localStorage.getItem(WORKSPACE_STORAGE_KEY)
         if (raw) {
             const parsed = parseWorkspaceLayout(JSON.parse(raw))
-            if (parsed && listWorkspacePanes(parsed).some((pane) => pane.sessionName === sessionName)) {
+            if (parsed && listWorkspacePanes(parsed).some((pane) => sameWorkspaceTarget(pane.target, target))) {
                 return parsed
             }
         }
     } catch {
         /* storage may be unavailable */
     }
-    return createWorkspacePane(sessionName)
+    return createWorkspacePane(target)
 }
 
 function findWorkspacePaneSession(workspace: WorkspaceNode, paneId: string): string | null {
-    if (workspace.type === 'pane') return workspace.id === paneId ? workspace.sessionName : null
+    if (workspace.type === 'pane') return workspace.id === paneId ? workspace.target.sessionName : null
     return findWorkspacePaneSession(workspace.first, paneId) ?? findWorkspacePaneSession(workspace.second, paneId)
+}
+
+function targetKey(target: SessionTarget): string {
+    return `${target.hostId}\n${target.sessionName}`
+}
+
+function hostLabel(hostId: string): string {
+    return hostId === LOCAL_HOST_ID ? 'Local' : hostId
+}
+
+async function invalidateSessionQueries(queryClient: ReturnType<typeof useQueryClient>, hostId: string): Promise<void> {
+    await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['sessions'] }),
+        queryClient.invalidateQueries({ queryKey: ['sessions', hostId] }),
+        queryClient.invalidateQueries({ queryKey: ['hosts'] })
+    ])
 }
 
 function saveWorkspace(workspace: WorkspaceNode): void {
