@@ -822,7 +822,7 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
                             onSplit('row')
                         }}
                     >
-                        {splitting ? '…' : '▣'}
+                        {splitting ? '…' : '→'}
                     </button>
                     <button
                         type="button"
@@ -836,7 +836,7 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
                             onSplit('column')
                         }}
                     >
-                        ▤
+                        ↓
                     </button>
                     <button
                         type="button"
