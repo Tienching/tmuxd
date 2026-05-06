@@ -569,6 +569,7 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
     }
 
     function sendInput(input: string) {
+        if (input === '\u0003') return
         const ws = wsRef.current
         if (ws && ws.readyState === ws.OPEN) {
             sendWs(ws, { type: 'input', payload: encodeTerminalInputPayload(input) })

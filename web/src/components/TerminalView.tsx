@@ -56,7 +56,7 @@ export function TerminalView(props: {
         terminal.loadAddon(canvas)
         terminal.open(container)
         terminal.attachCustomKeyEventHandler((event) => {
-            if (isCopyShortcut(event) && (event.metaKey || terminal.hasSelection())) return false
+            if (isCopyShortcut(event)) return false
             if (isPasteShortcut(event)) return false
             return true
         })
