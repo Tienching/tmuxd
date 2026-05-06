@@ -56,8 +56,13 @@ export function TerminalView(props: {
         terminal.loadAddon(canvas)
         terminal.open(container)
         terminal.attachCustomKeyEventHandler((event) => {
+            if (isCopyShortcut(event) && (event.metaKey || terminal.hasSelection())) return false
             if (isPasteShortcut(event)) return false
             return true
+        })
+        container.addEventListener('pointerdown', (event) => primeContextMenuPasteTarget(terminal, container, event), {
+            capture: true,
+            signal: abort.signal
         })
         const touchWheel = installMobileTouchWheelBridge(terminal)
 
@@ -101,4 +106,23 @@ export function TerminalView(props: {
 function isPasteShortcut(event: KeyboardEvent): boolean {
     if (!(event.ctrlKey || event.metaKey) || event.altKey) return false
     return event.key.toLowerCase() === 'v' || event.code === 'KeyV'
+}
+
+function isCopyShortcut(event: KeyboardEvent): boolean {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey) return false
+    return event.key.toLowerCase() === 'c' || event.code === 'KeyC'
+}
+
+function primeContextMenuPasteTarget(terminal: Terminal, container: HTMLElement, event: PointerEvent): void {
+    if (event.button !== 2) return
+    const textarea = terminal.textarea
+    if (!textarea) return
+    const screen = terminal.element?.querySelector<HTMLElement>('.xterm-screen') ?? container
+    const rect = screen.getBoundingClientRect()
+    textarea.style.width = '20px'
+    textarea.style.height = '20px'
+    textarea.style.left = `${event.clientX - rect.left - 10}px`
+    textarea.style.top = `${event.clientY - rect.top - 10}px`
+    textarea.style.zIndex = '1000'
+    textarea.focus()
 }
