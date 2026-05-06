@@ -166,8 +166,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
 
         setPaneStatusMsg(pane.id, 'Saving image…')
         try {
-            const upload = await api.uploadClipboardImage(file)
-            paneHandlesRef.current[pane.id]?.sendInput(`${shellQuote(upload.path)} `)
+            await api.uploadClipboardImageToSession(pane.target.sessionName, file)
             setPaneStatusMsg(pane.id, 'Pasted image path.')
             window.setTimeout(() => clearPaneStatusMsg(pane.id, 'Pasted image path.'), 3000)
         } catch {
@@ -641,8 +640,7 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
         }
         setPaneStatusMsg('Saving pasted image…')
         try {
-            const upload = await api.uploadClipboardImage(file)
-            sendInput(`${shellQuote(upload.path)} `)
+            await api.uploadClipboardImageToSession(pane.target.sessionName, file)
             setPaneStatusMsg('Pasted image path.')
             window.setTimeout(() => {
                 if (statusMsgRef.current === 'Pasted image path.') setPaneStatusMsg(null)
@@ -1319,10 +1317,6 @@ async function invalidateSessionQueries(queryClient: ReturnType<typeof useQueryC
 function navigateToTarget(navigate: ReturnType<typeof useNavigate>, target: SessionTarget): void {
     if (target.hostId === LOCAL_HOST_ID) navigate({ to: '/attach/$name', params: { name: target.sessionName } })
     else navigate({ to: '/attach/$hostId/$name', params: { hostId: target.hostId, name: target.sessionName } })
-}
-
-function shellQuote(value: string): string {
-    return `'${value.replace(/'/g, `'\\''`)}'`
 }
 
 function saveWorkspace(workspace: WorkspaceNode): void {

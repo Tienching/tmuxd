@@ -100,6 +100,11 @@ export const api = {
         form.set('file', file, file.name || 'clipboard-image')
         return uploadRequest<ClipboardImageUploadResponse>('/api/uploads/clipboard-image', form)
     },
+    uploadClipboardImageToSession: (name: string, file: File) => {
+        const form = new FormData()
+        form.set('file', file, file.name || 'clipboard-image')
+        return uploadRequest<ClipboardImageUploadResponse>(`/api/sessions/${encodeURIComponent(name)}/uploads/clipboard-image`, form)
+    },
     killSession: (name: string) =>
         request<null>(`/api/sessions/${encodeURIComponent(name)}`, { method: 'DELETE' }),
     killTargetSession: (target: SessionTarget) =>

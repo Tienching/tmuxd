@@ -84,6 +84,11 @@ export async function killSession(name: string): Promise<void> {
     await execFileAsync('tmux', ['kill-session', '-t', safe], { encoding: 'utf8' })
 }
 
+export async function sendTextToSession(name: string, text: string): Promise<void> {
+    const safe = validateSessionName(name)
+    await execFileAsync('tmux', ['send-keys', '-t', safe, '-l', text], { encoding: 'utf8' })
+}
+
 export async function captureSession(name: string): Promise<TmuxCapture> {
     const safe = validateSessionName(name)
     const metadata = await execFileAsync('tmux', ['display-message', '-p', '-t', safe, CAPTURE_METADATA_FORMAT], {

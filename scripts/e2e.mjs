@@ -312,6 +312,22 @@ async function main() {
         return info.size === 4 && r.body.type === 'image/png'
     })
 
+    await check('uploads: session image upload pastes path into tmux', async () => {
+        const form = new FormData()
+        form.set('file', new Blob([Buffer.from([0x89, 0x50, 0x4e, 0x47])], { type: 'image/png' }), 'pane-paste.png')
+        const r = await http(`/api/sessions/${encodeURIComponent(TEST_SESSION)}/uploads/clipboard-image`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${token}` },
+            body: form
+        })
+        if (r.status !== 201 || typeof r.body?.path !== 'string') return false
+        await sleep(200)
+        const capture = await execFileP('tmux', ['capture-pane', '-p', '-t', TEST_SESSION, '-S', '-50'])
+        await execFileP('tmux', ['send-keys', '-t', TEST_SESSION, 'C-u'])
+        await rm(r.body.path, { force: true })
+        return capture.stdout.includes(r.body.path)
+    })
+
     // ---- WEBSOCKET ----
     await check('ws: bad token → 401', async () => {
         try {

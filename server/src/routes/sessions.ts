@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { verifyJwt } from '../auth.js'
 import { createSessionSchema, wsTicketRequestSchema, type TmuxSession } from '@tmuxd/shared'
 import { getLocalHost, isLocalHost } from '../hosts.js'
-import { captureSession, createSession, killSession, listSessions, validateSessionName } from '../tmux.js'
+import { captureSession, createSession, killSession, listSessions, sendTextToSession, validateSessionName } from '../tmux.js'
 import { issueWsTicket } from '../wsTickets.js'
 import { AgentError, type AgentRegistry } from '../agentRegistry.js'
 
@@ -112,23 +112,29 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry?: Agen
     })
 
     app.post('/uploads/clipboard-image', async (c) => {
-        const form = await c.req.raw.formData().catch(() => null)
-        const file = form?.get('file')
-        if (!(file instanceof File)) return c.json({ error: 'missing_file' }, 400)
+        const result = await saveClipboardImage(c)
+        if ('response' in result) return result.response
+        return c.json(result.upload, 201)
+    })
 
-        const ext = CLIPBOARD_IMAGE_EXTENSIONS[file.type]
-        if (!ext) return c.json({ error: 'unsupported_image_type' }, 415)
-        if (file.size <= 0 || file.size > MAX_CLIPBOARD_IMAGE_BYTES) return c.json({ error: 'file_too_large' }, 413)
+    app.post('/sessions/:name/uploads/clipboard-image', async (c) => {
+        const sessionName = c.req.param('name')
+        let safe: string
+        try {
+            safe = validateSessionName(sessionName)
+        } catch {
+            return c.json({ error: 'invalid_session_name' }, 400)
+        }
 
-        const uploadDir = join(homedir(), '.tmuxd', 'uploads')
-        await mkdir(uploadDir, { recursive: true, mode: 0o700 })
+        const result = await saveClipboardImage(c)
+        if ('response' in result) return result.response
 
-        const name = `paste-${timestampForFile()}-${randomUUID().slice(0, 8)}${ext}`
-        const path = join(uploadDir, name)
-        const bytes = Buffer.from(await file.arrayBuffer())
-        await writeFile(path, bytes, { mode: 0o600 })
-
-        return c.json({ path, name, size: bytes.length, type: file.type }, 201)
+        try {
+            await sendTextToSession(safe, `${shellQuote(result.upload.path)} `)
+        } catch (err) {
+            return c.json({ error: 'tmux_error', message: errMsg(err) }, 400)
+        }
+        return c.json(result.upload, 201)
     })
 
     app.get('/hosts/:hostId/sessions/:name/capture', async (c) => {
@@ -244,4 +250,28 @@ function errMsg(err: unknown): string {
 
 function timestampForFile(): string {
     return new Date().toISOString().replace(/\D/g, '').slice(0, 14)
+}
+
+async function saveClipboardImage(c: Context) {
+    const form = await c.req.raw.formData().catch(() => null)
+    const file = form?.get('file')
+    if (!(file instanceof File)) return { response: c.json({ error: 'missing_file' }, 400) }
+
+    const ext = CLIPBOARD_IMAGE_EXTENSIONS[file.type]
+    if (!ext) return { response: c.json({ error: 'unsupported_image_type' }, 415) }
+    if (file.size <= 0 || file.size > MAX_CLIPBOARD_IMAGE_BYTES) return { response: c.json({ error: 'file_too_large' }, 413) }
+
+    const uploadDir = join(homedir(), '.tmuxd', 'uploads')
+    await mkdir(uploadDir, { recursive: true, mode: 0o700 })
+
+    const name = `paste-${timestampForFile()}-${randomUUID().slice(0, 8)}${ext}`
+    const path = join(uploadDir, name)
+    const bytes = Buffer.from(await file.arrayBuffer())
+    await writeFile(path, bytes, { mode: 0o600 })
+
+    return { upload: { path, name, size: bytes.length, type: file.type } }
+}
+
+function shellQuote(value: string): string {
+    return `'${value.replace(/'/g, `'\\''`)}'`
 }
