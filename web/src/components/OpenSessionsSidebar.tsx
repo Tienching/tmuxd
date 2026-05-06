@@ -4,7 +4,13 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { LOCAL_HOST_ID, type HostInfo, type SessionTarget, type TargetSession } from '@tmuxd/shared'
 import { api } from '../api/client'
 import { listHostSessionsData } from '../hosts/sessionData'
-import { listOpenSessions, removeOpenSession, subscribeOpenSessions, type OpenSession } from '../session/openSessions'
+import {
+    listOpenSessions,
+    removeOpenSession,
+    resolveOpenSessionHostNames,
+    subscribeOpenSessions,
+    type OpenSession
+} from '../session/openSessions'
 import { createSessionWithOptionalName } from '../session/createSession'
 
 const SIDEBAR_HIDDEN_KEY = 'tmuxd.sidebarHidden'
@@ -57,7 +63,8 @@ export function OpenSessionsSidebar({
 
     const liveKeys = data ? new Set(data.sessions.map(targetSessionKey)) : null
     const visibleOpenedSessions = liveKeys ? sessions.filter((s) => liveKeys.has(openSessionKey(s))) : sessions
-    const openedGroups = groupedOpenSessions(visibleOpenedSessions)
+    const resolvedOpenedSessions = resolveOpenSessionHostNames(visibleOpenedSessions, data?.sessions, data?.hosts)
+    const openedGroups = groupedOpenSessions(resolvedOpenedSessions)
     const openedKeys = new Set(visibleOpenedSessions.map(openSessionKey))
     const otherSessions = data?.sessions.filter((s) => !openedKeys.has(targetSessionKey(s))) ?? []
     const totalSessionCount = data?.sessions.length ?? 0
@@ -130,7 +137,12 @@ export function OpenSessionsSidebar({
                 <p className="px-1 text-xs text-neutral-600">No opened sessions yet.</p>
             ) : (
                 openedGroups.map((group) => (
-                    <SessionGroup key={`opened-${group.hostId}`} title={group.hostName} count={group.sessions.length}>
+                    <SessionGroup
+                        key={`opened-${group.hostId}`}
+                        title={group.hostName}
+                        count={group.sessions.length}
+                        countLabel={formatSessionCount(group.sessions.length, hostTotals.get(group.hostId) ?? group.sessions.length)}
+                    >
                         {group.sessions.map((s) => {
                             const active = s.name === currentName && s.hostId === currentHostId
                             return (
@@ -237,7 +249,8 @@ export function MobileSessionSelect({
 
     const liveKeys = data ? new Set(data.sessions.map(targetSessionKey)) : null
     const visibleOpenedSessions = liveKeys ? sessions.filter((s) => liveKeys.has(openSessionKey(s))) : sessions
-    const openedGroups = groupedOpenSessions(visibleOpenedSessions)
+    const resolvedOpenedSessions = resolveOpenSessionHostNames(visibleOpenedSessions, data?.sessions, data?.hosts)
+    const openedGroups = groupedOpenSessions(resolvedOpenedSessions)
     const openedKeys = new Set(visibleOpenedSessions.map(openSessionKey))
     const otherSessions = data?.sessions.filter((s) => !openedKeys.has(targetSessionKey(s))) ?? []
     const totalSessionCount = data?.sessions.length ?? 0
@@ -336,7 +349,13 @@ export function MobileSessionSelect({
                             <>
                                 <div className="mt-2 mb-1 px-1 text-[10px] font-medium uppercase tracking-wide text-neutral-600">Opened</div>
                                 {openedGroups.map((group) => (
-                                    <SessionGroup key={`opened-mobile-${group.hostId}`} title={group.hostName} count={group.sessions.length} mobile>
+                                    <SessionGroup
+                                        key={`opened-mobile-${group.hostId}`}
+                                        title={group.hostName}
+                                        count={group.sessions.length}
+                                        countLabel={formatSessionCount(group.sessions.length, hostTotals.get(group.hostId) ?? group.sessions.length)}
+                                        mobile
+                                    >
                                         {group.sessions.map((s) => (
                                             <div
                                                 key={`opened-mobile-${s.hostId}-${s.name}`}

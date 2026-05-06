@@ -1,4 +1,4 @@
-import { LOCAL_HOST_ID, type SessionTarget } from '@tmuxd/shared'
+import { LOCAL_HOST_ID, type HostInfo, type SessionTarget, type TargetSession } from '@tmuxd/shared'
 
 const KEY = 'tmuxd.openSessions'
 const EVENT = 'tmuxd.openSessions.changed'
@@ -41,6 +41,20 @@ export function removeOpenSession(nameOrTarget: string | SessionTarget): void {
     write(listOpenSessions().filter((s) => s.name !== target.sessionName || s.hostId !== target.hostId))
 }
 
+export function resolveOpenSessionHostNames(
+    sessions: OpenSession[],
+    liveSessions: TargetSession[] = [],
+    hosts: HostInfo[] = []
+): OpenSession[] {
+    const hostNames = new Map(hosts.map((host) => [host.id, host.name]))
+    const liveNames = new Map(liveSessions.map((session) => [targetKey({ hostId: session.hostId, sessionName: session.name }), session.hostName]))
+    return sessions.map((session) => {
+        const liveName = liveNames.get(targetKey({ hostId: session.hostId, sessionName: session.name }))
+        const hostName = liveName ?? hostNames.get(session.hostId) ?? session.hostName ?? hostLabel(session.hostId)
+        return hostName === session.hostName ? session : { ...session, hostName }
+    })
+}
+
 export function subscribeOpenSessions(onChange: () => void): () => void {
     const onStorage = (event: StorageEvent) => {
         if (event.key === KEY) onChange()
@@ -77,6 +91,10 @@ function normalizeTarget(nameOrTarget: string | SessionTarget): SessionTarget | 
 
 function hostLabel(hostId: string): string {
     return hostId === LOCAL_HOST_ID ? 'Local' : hostId
+}
+
+function targetKey(target: SessionTarget): string {
+    return `${target.hostId}\n${target.sessionName}`
 }
 
 function write(sessions: OpenSession[]): void {

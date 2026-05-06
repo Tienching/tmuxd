@@ -20,7 +20,14 @@ import { api } from '../api/client'
 import { listHostSessionsData } from '../hosts/sessionData'
 import { getToken } from '../auth/tokenStore'
 import { createSessionWithOptionalName } from '../session/createSession'
-import { listOpenSessions, markOpenSession, removeOpenSession, subscribeOpenSessions, type OpenSession } from '../session/openSessions'
+import {
+    listOpenSessions,
+    markOpenSession,
+    removeOpenSession,
+    resolveOpenSessionHostNames,
+    subscribeOpenSessions,
+    type OpenSession
+} from '../session/openSessions'
 import {
     closeWorkspacePane,
     createWorkspaceId,
@@ -924,7 +931,8 @@ function SplitSessionChooser({
 
     const liveKeys = data ? new Set(data.sessions.map(targetSessionKey)) : null
     const visibleOpenedSessions = liveKeys ? openedSessions.filter((session) => liveKeys.has(openSessionKey(session))) : openedSessions
-    const openedGroups = groupedOpenSessions(visibleOpenedSessions)
+    const resolvedOpenedSessions = resolveOpenSessionHostNames(visibleOpenedSessions, data?.sessions, data?.hosts)
+    const openedGroups = groupedOpenSessions(resolvedOpenedSessions)
     const openedKeys = new Set(visibleOpenedSessions.map(openSessionKey))
     const otherSessions = data?.sessions.filter((session) => !openedKeys.has(targetSessionKey(session))) ?? []
     const killableHostIds = getKillableHostIds(data?.hosts)
