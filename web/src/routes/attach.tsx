@@ -918,20 +918,20 @@ function SplitSessionChooser({
                     )}
 
                     {isLoading ? (
-                        <SessionChoiceSection title="All sessions">
+                        <SessionChoiceSection title="Other sessions">
                             <p className="px-1 text-xs text-neutral-600">Loading sessions…</p>
                         </SessionChoiceSection>
                     ) : listError ? (
-                        <SessionChoiceSection title="All sessions">
+                        <SessionChoiceSection title="Other sessions">
                             <p className="px-1 text-xs text-red-400">Failed to load sessions.</p>
                         </SessionChoiceSection>
                     ) : otherSessions.length === 0 ? (
-                        <SessionChoiceSection title="All sessions">
+                        <SessionChoiceSection title="Other sessions">
                             <p className="px-1 text-xs text-neutral-600">No more sessions.</p>
                         </SessionChoiceSection>
                     ) : (
                         groupedTargetSessions(otherSessions).map((group) => (
-                            <SessionChoiceSection key={`split-group-${group.hostId}`} title={`${group.hostName} sessions`}>
+                            <SessionChoiceSection key={`split-group-${group.hostId}`} title={`${group.hostName} other sessions`}>
                                 {group.sessions.map((session) => (
                                     <SplitSessionButton
                                         key={`all-split-${session.hostId}-${session.name}`}

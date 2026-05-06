@@ -118,8 +118,8 @@ export function OpenSessionsSidebar({
                 </nav>
             )}
             <div className="mt-3 mb-2 flex items-center justify-between gap-2 px-1">
-                <h2 className="text-xs font-medium uppercase tracking-wide text-neutral-500">All sessions</h2>
-                <span className="text-[10px] text-neutral-600">{data?.sessions.length ?? 0}</span>
+                <h2 className="text-xs font-medium uppercase tracking-wide text-neutral-500">Other sessions</h2>
+                <span className="text-[10px] text-neutral-600">{otherSessions.length}</span>
             </div>
             {isLoading ? (
                 <p className="px-1 text-xs text-neutral-600">Loading sessions…</p>
@@ -271,7 +271,7 @@ export function MobileSessionSelect({
                             </>
                         )}
 
-                        <div className="mt-3 mb-1 px-1 text-[10px] font-medium uppercase tracking-wide text-neutral-600">All sessions</div>
+                        <div className="mt-3 mb-1 px-1 text-[10px] font-medium uppercase tracking-wide text-neutral-600">Other sessions</div>
                         {error ? (
                             <p className="px-1 text-xs text-red-400">Failed to load sessions.</p>
                         ) : !hasAnySession ? (
