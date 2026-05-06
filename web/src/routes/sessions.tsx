@@ -29,7 +29,7 @@ export function SessionsPage() {
     const [newName, setNewName] = useState('')
     const [selectedHostId, setSelectedHostId] = useState(LOCAL_HOST_ID)
     const [pendingKills, setPendingKills] = useState<Set<string>>(() => new Set())
-    const onlineHosts = data?.hosts.filter((host) => host.status === 'online') ?? []
+    const onlineHosts = orderLocalFirst(data?.hosts.filter((host) => host.status === 'online' && host.capabilities.includes('create')) ?? [])
 
     useEffect(() => {
         if (onlineHosts.length > 0 && !onlineHosts.some((host) => host.id === selectedHostId)) {
@@ -234,6 +234,11 @@ function SessionRow(props: {
             </div>
         </li>
     )
+}
+
+function orderLocalFirst(hosts: HostInfo[]): HostInfo[] {
+    const local = hosts.find((host) => host.id === LOCAL_HOST_ID)
+    return local ? [local, ...hosts.filter((host) => host.id !== LOCAL_HOST_ID)] : hosts
 }
 
 function groupedTargetSessions(sessions: TargetSession[]): Array<{ host: HostInfo; sessions: TargetSession[] }> {

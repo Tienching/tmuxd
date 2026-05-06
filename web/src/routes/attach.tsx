@@ -38,7 +38,7 @@ import {
     type WorkspacePane,
     type WorkspaceSplit
 } from '../workspace/layout'
-import { LOCAL_HOST_ID, type ClientWsMessage, type ServerWsMessage, type SessionTarget, type TargetSession } from '@tmuxd/shared'
+import { LOCAL_HOST_ID, type ClientWsMessage, type HostInfo, type ServerWsMessage, type SessionTarget, type TargetSession } from '@tmuxd/shared'
 
 type Status = 'connecting' | 'open' | 'closed' | 'error'
 
@@ -58,6 +58,7 @@ interface SplitRequest {
 
 const WORKSPACE_STORAGE_KEY = 'tmuxd.workspace.v1'
 const MAX_WORKSPACE_PANES = 6
+type HostOption = Pick<HostInfo, 'id' | 'name'>
 
 export function AttachPage() {
     const { name } = useParams({ from: '/attach/$name' })
@@ -204,17 +205,17 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
         setSplitError(null)
     }
 
-    async function createSessionForSplit(inputName: string) {
+    async function createSessionForSplit(inputName: string, hostId: string) {
         const request = splitRequest
         if (!request || splittingPaneId) return
 
         setSplittingPaneId(request.paneId)
         setSplitError(null)
         try {
-            const hostId = findWorkspacePane(workspace, request.paneId)?.target.hostId ?? LOCAL_HOST_ID
-            const newSessionName = await createSessionWithOptionalName(inputName, (name) => api.createHostSession(hostId, name))
-            addSessionToSplit(request, { hostId, sessionName: newSessionName })
-            await invalidateSessionQueries(queryClient, hostId)
+            const targetHostId = hostId || LOCAL_HOST_ID
+            const newSessionName = await createSessionWithOptionalName(inputName, (name) => api.createHostSession(targetHostId, name))
+            addSessionToSplit(request, { hostId: targetHostId, sessionName: newSessionName })
+            await invalidateSessionQueries(queryClient, targetHostId)
         } catch {
             setSplitError('Failed to create session.')
         } finally {
@@ -356,7 +357,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
                         if (!splittingPaneId) setSplitRequest(null)
                     }}
                     onSelect={attachSessionToSplit}
-                    onCreate={(inputName) => void createSessionForSplit(inputName)}
+                    onCreate={(inputName, hostId) => void createSessionForSplit(inputName, hostId)}
                 />
             )}
         </div>
@@ -817,10 +818,11 @@ function SplitSessionChooser({
     error: string | null
     onClose: () => void
     onSelect: (target: SessionTarget) => void
-    onCreate: (inputName: string) => void
+    onCreate: (inputName: string, hostId: string) => void
 }) {
     const [openedSessions, setOpenedSessions] = useState<OpenSession[]>(() => listOpenSessions())
     const [newName, setNewName] = useState('')
+    const [newHostId, setNewHostId] = useState(LOCAL_HOST_ID)
     const { data, error: listError, isLoading } = useQuery({
         queryKey: ['hostSessions'],
         queryFn: listHostSessionsData,
@@ -830,6 +832,14 @@ function SplitSessionChooser({
     useEffect(() => {
         return subscribeOpenSessions(() => setOpenedSessions(listOpenSessions()))
     }, [])
+
+    const creatableHosts = getCreatableHosts(data?.hosts)
+
+    useEffect(() => {
+        if (!creatableHosts.some((host) => host.id === newHostId)) {
+            setNewHostId(creatableHosts[0]?.id ?? LOCAL_HOST_ID)
+        }
+    }, [creatableHosts, newHostId])
 
     const liveKeys = data ? new Set(data.sessions.map(targetSessionKey)) : null
     const visibleOpenedSessions = liveKeys ? openedSessions.filter((session) => liveKeys.has(openSessionKey(session))) : openedSessions
@@ -845,7 +855,7 @@ function SplitSessionChooser({
 
     const submitNewSession = (event: FormEvent) => {
         event.preventDefault()
-        onCreate(newName)
+        onCreate(newName, newHostId)
     }
 
     return (
@@ -880,6 +890,19 @@ function SplitSessionChooser({
                             maxLength={64}
                             disabled={creating}
                         />
+                        <select
+                            className="w-24 shrink-0 rounded-md border border-neutral-800 bg-neutral-900 px-2 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600"
+                            aria-label="New session host"
+                            value={newHostId}
+                            onChange={(event) => setNewHostId(event.target.value)}
+                            disabled={creating}
+                        >
+                            {creatableHosts.map((host) => (
+                                <option key={host.id} value={host.id}>
+                                    {host.name}
+                                </option>
+                            ))}
+                        </select>
                         <button
                             type="submit"
                             className="rounded-md bg-neutral-100 px-3 py-2 text-sm font-medium text-neutral-900 disabled:opacity-50"
@@ -1117,6 +1140,13 @@ function targetKey(target: SessionTarget): string {
 
 function hostLabel(hostId: string): string {
     return hostId === LOCAL_HOST_ID ? 'Local' : hostId
+}
+
+function getCreatableHosts(hosts: HostInfo[] | undefined): HostOption[] {
+    const onlineHosts = hosts?.filter((host) => host.status === 'online' && host.capabilities.includes('create')) ?? []
+    if (onlineHosts.length === 0) return [{ id: LOCAL_HOST_ID, name: 'Local' }]
+    const local = onlineHosts.find((host) => host.id === LOCAL_HOST_ID)
+    return local ? [local, ...onlineHosts.filter((host) => host.id !== LOCAL_HOST_ID)] : onlineHosts
 }
 
 function targetSessionKey(session: TargetSession): string {

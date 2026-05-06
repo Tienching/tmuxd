@@ -135,7 +135,7 @@ Notes:
 - `TMUXD_AGENT_ID` is the stable ID stored in browser workspaces and URLs. Use letters, digits, `.`, `_`, or `-`.
 - `TMUXD_AGENT_NAME` is just the display name in the UI.
 - Use HTTPS/WSS when the hub is reachable beyond a private network.
-- A connected agent can list, create, kill, capture, and attach tmux sessions for the user running the agent process.
+- A connected agent advertises capabilities to the hub. Hosts with the `create` capability appear in New-session host pickers.
 
 The home page, terminal sidebar, mobile picker, and split chooser group sessions by host. Existing local routes such as `/attach/main` still mean the hub's `local/main`; remote sessions use `/attach/:hostId/:name`.
 
@@ -152,11 +152,12 @@ The home page, terminal sidebar, mobile picker, and split chooser group sessions
 On the sessions page:
 
 1. Optionally enter a name using letters, digits, `.`, `_`, or `-`.
-2. Click **New**.
-3. If the name is blank, tmuxd creates an auto-named session such as `web-20260428-090507`.
-4. Click **Attach** to open the terminal.
+2. Choose the host next to the session name. It defaults to **Local** when available.
+3. Click **New**.
+4. If the name is blank, tmuxd creates an auto-named session such as `web-20260428-090507`.
+5. Click **Attach** to open the terminal.
 
-New sessions start in the server user's home directory.
+New sessions start in the selected host user's home directory.
 
 ### Attach and switch sessions
 
@@ -164,8 +165,8 @@ On the terminal page:
 
 - The centered title shows the current session name.
 - **Opened** shows sessions opened in this browser.
-- **All sessions** shows live tmux sessions grouped by host.
-- **New** creates a named or auto-named session on the current host and attaches to it.
+- **Opened** and **Not opened** are grouped by host.
+- **New** creates a named or auto-named session on the selected host and attaches to it.
 - Click any session name to switch.
 - Click `×` next to an opened session to remove it from the browser-local list.
 - Click **Hide** to collapse the side panel; click **Sessions** to show it again.

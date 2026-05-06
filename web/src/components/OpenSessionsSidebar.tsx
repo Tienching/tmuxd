@@ -1,13 +1,14 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { LOCAL_HOST_ID, type SessionTarget, type TargetSession } from '@tmuxd/shared'
+import { LOCAL_HOST_ID, type HostInfo, type SessionTarget, type TargetSession } from '@tmuxd/shared'
 import { api } from '../api/client'
 import { listHostSessionsData } from '../hosts/sessionData'
 import { listOpenSessions, removeOpenSession, subscribeOpenSessions, type OpenSession } from '../session/openSessions'
 import { createSessionWithOptionalName } from '../session/createSession'
 
 const SIDEBAR_HIDDEN_KEY = 'tmuxd.sidebarHidden'
+type HostOption = Pick<HostInfo, 'id' | 'name'>
 
 export function OpenSessionsSidebar({
     currentName,
@@ -23,7 +24,8 @@ export function OpenSessionsSidebar({
     onOpenSession?: (target: SessionTarget) => void
 }) {
     const navigate = useNavigate()
-    const { createAndOpenSession, creating, createError } = useCreateAndOpenSession({ hostId: currentHostId, onOpenSession })
+    const { createAndOpenSession, creating, createError } = useCreateAndOpenSession({ onOpenSession })
+    const [newHostId, setNewHostId] = useState(LOCAL_HOST_ID)
     const [sessions, setSessions] = useState<OpenSession[]>(() => listOpenSessions())
     const { data, error, isLoading } = useQuery({
         queryKey: ['hostSessions'],
@@ -42,6 +44,14 @@ export function OpenSessionsSidebar({
         }
         navigateToTarget(navigate, target)
     }
+
+    const creatableHosts = getCreatableHosts(data?.hosts)
+
+    useEffect(() => {
+        if (!creatableHosts.some((host) => host.id === newHostId)) {
+            setNewHostId(creatableHosts[0]?.id ?? LOCAL_HOST_ID)
+        }
+    }, [creatableHosts, newHostId])
 
     const liveKeys = data ? new Set(data.sessions.map(targetSessionKey)) : null
     const visibleOpenedSessions = liveKeys ? sessions.filter((s) => liveKeys.has(openSessionKey(s))) : sessions
@@ -80,7 +90,14 @@ export function OpenSessionsSidebar({
                     </button>
                 </div>
             </div>
-            <NewSessionForm creating={creating} createError={createError} onCreate={createAndOpenSession} />
+            <NewSessionForm
+                creating={creating}
+                createError={createError}
+                hosts={creatableHosts}
+                hostId={newHostId}
+                onHostChange={setNewHostId}
+                onCreate={createAndOpenSession}
+            />
             {createError && <p className="mb-2 px-1 text-xs text-red-400">{createError}</p>}
             {visibleOpenedSessions.length === 0 ? (
                 <p className="px-1 text-xs text-neutral-600">No opened sessions yet.</p>
@@ -165,8 +182,8 @@ export function MobileSessionSelect({
     const navigate = useNavigate()
     const [sessions, setSessions] = useState<OpenSession[]>(() => listOpenSessions())
     const [menuOpen, setMenuOpen] = useState(false)
+    const [newHostId, setNewHostId] = useState(LOCAL_HOST_ID)
     const { createAndOpenSession, creating, createError } = useCreateAndOpenSession({
-        hostId: currentHostId,
         onCreated: () => setMenuOpen(false),
         onOpenSession
     })
@@ -179,6 +196,14 @@ export function MobileSessionSelect({
     useEffect(() => {
         return subscribeOpenSessions(() => setSessions(listOpenSessions()))
     }, [])
+
+    const creatableHosts = getCreatableHosts(data?.hosts)
+
+    useEffect(() => {
+        if (!creatableHosts.some((host) => host.id === newHostId)) {
+            setNewHostId(creatableHosts[0]?.id ?? LOCAL_HOST_ID)
+        }
+    }, [creatableHosts, newHostId])
 
     const liveKeys = data ? new Set(data.sessions.map(targetSessionKey)) : null
     const visibleOpenedSessions = liveKeys ? sessions.filter((s) => liveKeys.has(openSessionKey(s))) : sessions
@@ -232,7 +257,15 @@ export function MobileSessionSelect({
                             </button>
                         </div>
 
-                        <NewSessionForm creating={creating} createError={createError} onCreate={createAndOpenSession} mobile />
+                        <NewSessionForm
+                            creating={creating}
+                            createError={createError}
+                            hosts={creatableHosts}
+                            hostId={newHostId}
+                            onHostChange={setNewHostId}
+                            onCreate={createAndOpenSession}
+                            mobile
+                        />
                         {createError && <p className="mb-2 px-1 text-xs text-red-400">{createError}</p>}
 
                         {showCurrentFallback && (
@@ -361,12 +394,18 @@ function SessionMenuButton({ name, hostName, active, onClick }: { name: string; 
 function NewSessionForm({
     creating,
     createError,
+    hosts,
+    hostId,
+    onHostChange,
     onCreate,
     mobile = false
 }: {
     creating: boolean
     createError: string | null
-    onCreate: (name?: string) => Promise<boolean>
+    hosts: HostOption[]
+    hostId: string
+    onHostChange: (hostId: string) => void
+    onCreate: (name: string | undefined, hostId: string) => Promise<boolean>
     mobile?: boolean
 }) {
     const [name, setName] = useState('')
@@ -376,7 +415,7 @@ function NewSessionForm({
             className="mb-2 flex gap-1"
             onSubmit={(event) => {
                 event.preventDefault()
-                void onCreate(name).then((ok) => {
+                void onCreate(name, hostId).then((ok) => {
                     if (ok) setName('')
                 })
             }}
@@ -391,6 +430,19 @@ function NewSessionForm({
                 disabled={creating}
                 aria-invalid={Boolean(createError)}
             />
+            <select
+                className="w-20 shrink-0 rounded-md border border-neutral-800 bg-neutral-900 px-1 py-2 text-xs text-neutral-100 outline-none focus:border-neutral-600"
+                aria-label="New session host"
+                value={hostId}
+                onChange={(event) => onHostChange(event.target.value)}
+                disabled={creating}
+            >
+                {hosts.map((host) => (
+                    <option key={host.id} value={host.id}>
+                        {host.name}
+                    </option>
+                ))}
+            </select>
             <button
                 type="submit"
                 className={`shrink-0 rounded-md border border-neutral-800 bg-neutral-900 px-2 py-2 text-xs font-medium text-neutral-100 disabled:opacity-50 ${
@@ -404,22 +456,22 @@ function NewSessionForm({
     )
 }
 
-function useCreateAndOpenSession(options: { hostId: string; onCreated?: () => void; onOpenSession?: (target: SessionTarget) => void }) {
+function useCreateAndOpenSession(options: { onCreated?: () => void; onOpenSession?: (target: SessionTarget) => void } = {}) {
     const navigate = useNavigate()
     const queryClient = useQueryClient()
     const [creating, setCreating] = useState(false)
     const [createError, setCreateError] = useState<string | null>(null)
 
-    const createAndOpenSession = async (inputName = ''): Promise<boolean> => {
+    const createAndOpenSession = async (inputName = '', hostId = LOCAL_HOST_ID): Promise<boolean> => {
         if (creating) return false
         setCreating(true)
         setCreateError(null)
         try {
-            const hostId = options.hostId || LOCAL_HOST_ID
-            const name = await createSessionWithOptionalName(inputName, (name) => api.createHostSession(hostId, name))
-            await invalidateSessionQueries(queryClient, hostId)
+            const targetHostId = hostId || LOCAL_HOST_ID
+            const name = await createSessionWithOptionalName(inputName, (name) => api.createHostSession(targetHostId, name))
+            await invalidateSessionQueries(queryClient, targetHostId)
             options.onCreated?.()
-            const target = { hostId, sessionName: name }
+            const target = { hostId: targetHostId, sessionName: name }
             if (options.onOpenSession) {
                 options.onOpenSession(target)
                 return true
@@ -451,6 +503,13 @@ export function saveSidebarHidden(hidden: boolean): void {
     } catch {
         /* ignore */
     }
+}
+
+function getCreatableHosts(hosts: HostInfo[] | undefined): HostOption[] {
+    const onlineHosts = hosts?.filter((host) => host.status === 'online' && host.capabilities.includes('create')) ?? []
+    if (onlineHosts.length === 0) return [{ id: LOCAL_HOST_ID, name: 'Local' }]
+    const local = onlineHosts.find((host) => host.id === LOCAL_HOST_ID)
+    return local ? [local, ...onlineHosts.filter((host) => host.id !== LOCAL_HOST_ID)] : onlineHosts
 }
 
 function targetKey(target: SessionTarget): string {
