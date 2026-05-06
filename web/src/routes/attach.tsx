@@ -812,7 +812,7 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
                 <div className="flex shrink-0 items-center gap-1">
                     <button
                         type="button"
-                        className="inline-flex h-6 w-6 items-center justify-center rounded text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 disabled:opacity-40"
+                        className="group inline-flex h-6 w-6 items-center justify-center rounded text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 disabled:opacity-40"
                         disabled={!canSplit || splitting}
                         title="Split right and choose a tmux session"
                         aria-label="Split right and choose a tmux session"
@@ -822,11 +822,11 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
                             onSplit('row')
                         }}
                     >
-                        {splitting ? '…' : '▶'}
+                        {splitting ? '…' : <span className="h-0 w-0 border-y-[5px] border-l-[7px] border-y-transparent border-l-current" />}
                     </button>
                     <button
                         type="button"
-                        className="inline-flex h-6 w-6 items-center justify-center rounded text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 disabled:opacity-40"
+                        className="group inline-flex h-6 w-6 items-center justify-center rounded text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 disabled:opacity-40"
                         disabled={!canSplit || splitting}
                         title="Split down and choose a tmux session"
                         aria-label="Split down and choose a tmux session"
@@ -836,7 +836,7 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
                             onSplit('column')
                         }}
                     >
-                        ▼
+                        <span className="h-0 w-0 border-x-[5px] border-t-[7px] border-x-transparent border-t-current" />
                     </button>
                     <button
                         type="button"
