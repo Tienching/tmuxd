@@ -55,6 +55,10 @@ export function TerminalView(props: {
         terminal.loadAddon(links)
         terminal.loadAddon(canvas)
         terminal.open(container)
+        terminal.attachCustomKeyEventHandler((event) => {
+            if (isPasteShortcut(event)) return false
+            return true
+        })
         const touchWheel = installMobileTouchWheelBridge(terminal)
 
         const observer = new ResizeObserver(() => {
@@ -92,4 +96,9 @@ export function TerminalView(props: {
     }, [])
 
     return <div ref={containerRef} className={`h-full w-full ${props.className ?? ''}`} />
+}
+
+function isPasteShortcut(event: KeyboardEvent): boolean {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey) return false
+    return event.key.toLowerCase() === 'v' || event.code === 'KeyV'
 }
