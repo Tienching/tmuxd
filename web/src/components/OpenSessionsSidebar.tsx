@@ -49,7 +49,6 @@ export function OpenSessionsSidebar({
     const otherSessions = data?.sessions.filter((s) => !openedKeys.has(targetSessionKey(s))) ?? []
     const totalSessionCount = data?.sessions.length ?? 0
     const hostTotals = countSessionsByHost(data?.sessions ?? [])
-    const currentHostName = data?.hosts.find((host) => host.id === currentHostId)?.name ?? hostLabel(currentHostId)
 
     if (hidden) {
         return (
@@ -80,7 +79,6 @@ export function OpenSessionsSidebar({
                     </button>
                 </div>
             </div>
-            <p className="mb-1 px-1 text-[10px] text-neutral-600">New on {currentHostName}</p>
             <NewSessionForm creating={creating} createError={createError} onCreate={createAndOpenSession} />
             {createError && <p className="mb-2 px-1 text-xs text-red-400">{createError}</p>}
             {visibleOpenedSessions.length === 0 ? (
@@ -231,7 +229,6 @@ export function MobileSessionSelect({
                             </button>
                         </div>
 
-                        <p className="mb-1 px-1 text-[10px] text-neutral-600">New on {currentHostName}</p>
                         <NewSessionForm creating={creating} createError={createError} onCreate={createAndOpenSession} mobile />
                         {createError && <p className="mb-2 px-1 text-xs text-red-400">{createError}</p>}
 

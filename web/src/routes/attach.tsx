@@ -869,7 +869,6 @@ function SplitSessionChooser({
                 </div>
 
                 <div className="min-h-0 overflow-y-auto p-3">
-                    <p className="mb-1 px-1 text-[10px] text-neutral-600">New on {currentHostName}</p>
                     <form className="mb-3 flex gap-2" onSubmit={submitNewSession}>
                         <input
                             className="min-w-0 flex-1 rounded-md border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm outline-none focus:border-neutral-600"
