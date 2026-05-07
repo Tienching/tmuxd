@@ -182,6 +182,20 @@ On mobile:
 - Use **Keys** for mobile-friendly terminal keys and modifiers.
 - Use **Text** to open selectable tmux session text. The text view is positioned from tmux's current scroll position.
 - Use **Image** when browser image paste is not available; it uploads an image file and pastes its path.
+- Use **Actions** to create browser-local custom buttons that send predefined text to the active pane.
+
+### Custom actions and timers
+
+The terminal page has an **Actions** panel on desktop and mobile.
+
+- Create custom actions with a short label and payload.
+- Click an action to send its payload once to the active pane.
+- Optional timer settings can repeat an action every N seconds, with an optional repeat count.
+- Timers are bound to the pane/session that was active when started.
+- Timers stop when the pane closes, its target changes, the websocket closes/errors, or the page unloads.
+- Starting a timer whose payload contains Enter/newline asks for confirmation because it may execute shell commands.
+
+Custom actions are stored in the browser's localStorage. They are not synced between browsers and do not run in the background after the page is closed.
 
 ### Clipboard images
 

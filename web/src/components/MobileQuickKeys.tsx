@@ -5,11 +5,13 @@ export function MobileQuickKeys({
     onInput,
     onCopy,
     onImage,
+    onActions,
     copyLoading = false
 }: {
     onInput: (input: string) => void
     onCopy?: () => void
     onImage?: () => void
+    onActions?: () => void
     copyLoading?: boolean
 }) {
     const [open, setOpen] = useState(false)
@@ -43,7 +45,10 @@ export function MobileQuickKeys({
 
     return (
         <div className="border-t border-neutral-800 bg-neutral-950 p-1 pb-[calc(env(safe-area-inset-bottom)+0.25rem)] md:hidden">
-            <div className={onCopy || onImage ? 'grid gap-1' : ''} style={{ gridTemplateColumns: `repeat(${1 + (onCopy ? 1 : 0) + (onImage ? 1 : 0)}, minmax(0, 1fr))` }}>
+            <div
+                className={onCopy || onImage || onActions ? 'grid gap-1' : ''}
+                style={{ gridTemplateColumns: `repeat(${1 + (onCopy ? 1 : 0) + (onImage ? 1 : 0) + (onActions ? 1 : 0)}, minmax(0, 1fr))` }}
+            >
                 <button
                     type="button"
                     className="w-full rounded border border-neutral-800 bg-neutral-900 px-2 py-1.5 text-xs font-medium text-neutral-100 active:bg-neutral-700"
@@ -69,6 +74,15 @@ export function MobileQuickKeys({
                         onClick={onImage}
                     >
                         Image
+                    </button>
+                )}
+                {onActions && (
+                    <button
+                        type="button"
+                        className="w-full rounded border border-neutral-800 bg-neutral-900 px-2 py-1.5 text-xs font-medium text-neutral-100 active:bg-neutral-700"
+                        onClick={onActions}
+                    >
+                        Actions
                     </button>
                 )}
             </div>

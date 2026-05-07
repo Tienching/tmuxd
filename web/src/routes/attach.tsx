@@ -12,6 +12,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useParams } from '@tanstack/react-router'
 import type { Terminal, IDisposable } from '@xterm/xterm'
 import { TerminalView } from '../components/TerminalView'
+import { CustomActionsPanel, type CustomActionTimerView } from '../components/CustomActionsPanel'
 import { MobileQuickKeys } from '../components/MobileQuickKeys'
 import { encodeTerminalInputPayload } from '../components/quickKeys'
 import { getScrollTopForTmuxPosition } from '../components/terminalText'
@@ -28,6 +29,7 @@ import {
     subscribeOpenSessions,
     type OpenSession
 } from '../session/openSessions'
+import { actionPayloadNeedsTimerConfirmation, type CustomAction } from '../session/customActions'
 import {
     closeWorkspacePane,
     createWorkspaceId,
@@ -61,6 +63,13 @@ interface PaneStatus {
 interface SplitRequest {
     paneId: string
     direction: WorkspaceDirection
+}
+
+interface CustomActionTimerRuntime extends CustomActionTimerView {
+    paneId: string
+    targetKey: string
+    payload: string
+    intervalHandle: number | null
 }
 
 const WORKSPACE_STORAGE_KEY = 'tmuxd.workspace.v1'
@@ -98,8 +107,13 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
     const [copyScrollPosition, setCopyScrollPosition] = useState(0)
     const [copyLoading, setCopyLoading] = useState(false)
     const [copyError, setCopyError] = useState<string | null>(null)
+    const [customActionsOpen, setCustomActionsOpen] = useState(false)
+    const [customActionTimers, setCustomActionTimers] = useState<CustomActionTimerView[]>([])
 
     const paneHandlesRef = useRef<Record<string, TerminalPaneHandle | null>>({})
+    const panesRef = useRef<WorkspacePane[]>([])
+    const paneStatusesRef = useRef<Record<string, PaneStatus>>({})
+    const customActionTimersRef = useRef<Map<string, CustomActionTimerRuntime>>(new Map())
     const copyRequestRef = useRef(0)
     const imageInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -111,6 +125,9 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
     const activePaneStatus = (activePane && paneStatuses[activePane.id]) ?? { status: 'connecting' as Status, statusMsg: null }
     const paneIdsKey = panes.map((pane) => pane.id).join('\n')
     const paneTargetsKey = panes.map((pane) => targetKey(pane.target)).join('\n')
+
+    panesRef.current = panes
+    paneStatusesRef.current = paneStatuses
 
     useEffect(() => {
         setWorkspace((current) => {
@@ -154,6 +171,20 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
         })
     }, [paneIdsKey])
 
+    useEffect(() => {
+        for (const runtime of customActionTimersRef.current.values()) {
+            const pane = panes.find((candidate) => candidate.id === runtime.paneId)
+            const status = paneStatuses[runtime.paneId]?.status
+            if (!pane || targetKey(pane.target) !== runtime.targetKey || status === 'closed' || status === 'error') {
+                stopCustomActionTimer(runtime.id)
+            }
+        }
+    }, [paneTargetsKey, paneIdsKey, paneStatuses])
+
+    useEffect(() => {
+        return () => stopAllCustomActionTimers()
+    }, [])
+
     function registerPaneHandle(paneId: string, handle: TerminalPaneHandle | null) {
         if (handle) paneHandlesRef.current[paneId] = handle
         else delete paneHandlesRef.current[paneId]
@@ -161,7 +192,97 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
 
     function sendInput(input: string) {
         if (!activePane) return
-        paneHandlesRef.current[activePane.id]?.sendInput(input)
+        sendInputToPane(activePane.id, input)
+    }
+
+    function sendInputToPane(paneId: string, input: string) {
+        paneHandlesRef.current[paneId]?.sendInput(input)
+    }
+
+    function sendCustomActionOnce(action: CustomAction) {
+        if (!activePane) return
+        sendInputToPane(activePane.id, action.payload)
+    }
+
+    function startCustomActionTimer(action: CustomAction) {
+        if (!activePane || !action.intervalSeconds) return
+        if (actionPayloadNeedsTimerConfirmation(action.payload)) {
+            const ok = window.confirm(
+                `Start repeating action "${action.label}"? It contains Enter/newline and may execute commands in ${formatWorkspaceTarget(activePane.target)}.`
+            )
+            if (!ok) return
+        }
+
+        const timerId = createCustomActionTimerId()
+        const runtime: CustomActionTimerRuntime = {
+            id: timerId,
+            actionId: action.id,
+            label: action.label,
+            targetTitle: formatWorkspaceTarget(activePane.target),
+            intervalSeconds: action.intervalSeconds,
+            sentCount: 0,
+            repeatCount: action.repeatCount,
+            paneId: activePane.id,
+            targetKey: targetKey(activePane.target),
+            payload: action.payload,
+            intervalHandle: null
+        }
+        customActionTimersRef.current.set(timerId, runtime)
+        syncCustomActionTimerViews()
+
+        const tick = () => runCustomActionTimerTick(timerId)
+        tick()
+        if (customActionTimersRef.current.has(timerId)) {
+            runtime.intervalHandle = window.setInterval(tick, action.intervalSeconds * 1000)
+            syncCustomActionTimerViews()
+        }
+    }
+
+    function runCustomActionTimerTick(timerId: string) {
+        const runtime = customActionTimersRef.current.get(timerId)
+        if (!runtime) return
+        const pane = panesRef.current.find((candidate) => candidate.id === runtime.paneId)
+        const status = paneStatusesRef.current[runtime.paneId]?.status
+        if (!pane || targetKey(pane.target) !== runtime.targetKey || status === 'closed' || status === 'error') {
+            stopCustomActionTimer(timerId)
+            return
+        }
+        sendInputToPane(runtime.paneId, runtime.payload)
+        runtime.sentCount += 1
+        syncCustomActionTimerViews()
+        if (runtime.repeatCount && runtime.sentCount >= runtime.repeatCount) {
+            stopCustomActionTimer(timerId)
+        }
+    }
+
+    function stopCustomActionTimer(timerId: string) {
+        const runtime = customActionTimersRef.current.get(timerId)
+        if (!runtime) return
+        if (runtime.intervalHandle !== null) window.clearInterval(runtime.intervalHandle)
+        customActionTimersRef.current.delete(timerId)
+        syncCustomActionTimerViews()
+    }
+
+    function stopAllCustomActionTimers() {
+        for (const runtime of customActionTimersRef.current.values()) {
+            if (runtime.intervalHandle !== null) window.clearInterval(runtime.intervalHandle)
+        }
+        customActionTimersRef.current.clear()
+        syncCustomActionTimerViews()
+    }
+
+    function syncCustomActionTimerViews() {
+        setCustomActionTimers(
+            [...customActionTimersRef.current.values()].map((runtime) => ({
+                id: runtime.id,
+                actionId: runtime.actionId,
+                label: runtime.label,
+                targetTitle: runtime.targetTitle,
+                intervalSeconds: runtime.intervalSeconds,
+                sentCount: runtime.sentCount,
+                repeatCount: runtime.repeatCount
+            }))
+        )
     }
 
     async function pasteImageToPane(file: File, pane = activePane) {
@@ -343,6 +464,14 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
                         <button
                             type="button"
                             className="rounded border border-neutral-700 px-2 py-0.5 text-neutral-300 hover:bg-neutral-800"
+                            title="Custom terminal actions and timers"
+                            onClick={() => setCustomActionsOpen(true)}
+                        >
+                            Actions{customActionTimers.length ? ` · ${customActionTimers.length}` : ''}
+                        </button>
+                        <button
+                            type="button"
+                            className="rounded border border-neutral-700 px-2 py-0.5 text-neutral-300 hover:bg-neutral-800"
                             title="Upload an image and paste its file path"
                             onClick={openImagePicker}
                         >
@@ -391,10 +520,20 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
                             void openCopySheet()
                         }}
                         onImage={openImagePicker}
+                        onActions={() => setCustomActionsOpen(true)}
                         copyLoading={copyLoading}
                     />
                 </div>
             </div>
+            <CustomActionsPanel
+                open={customActionsOpen}
+                activeTargetTitle={activeTargetTitle}
+                timers={customActionTimers}
+                onClose={() => setCustomActionsOpen(false)}
+                onSend={sendCustomActionOnce}
+                onStartTimer={startCustomActionTimer}
+                onStopTimer={stopCustomActionTimer}
+            />
             {(copyLoading || copyText !== null || copyError !== null) && (
                 <TerminalCopySheet
                     text={copyText}
@@ -1270,6 +1409,14 @@ function findWorkspacePaneSession(workspace: WorkspaceNode, paneId: string): str
 
 function targetKey(target: SessionTarget): string {
     return `${target.hostId}\n${target.sessionName}`
+}
+
+function createCustomActionTimerId(): string {
+    try {
+        return globalThis.crypto?.randomUUID?.() ?? `timer-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    } catch {
+        return `timer-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    }
 }
 
 function hostLabel(hostId: string): string {
