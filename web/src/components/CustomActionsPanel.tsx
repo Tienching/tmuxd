@@ -3,14 +3,12 @@ import {
     createCustomAction,
     deleteCustomAction,
     formatActionPayloadPreview,
-    loadCustomActions,
     MAX_CUSTOM_ACTION_INTERVAL_SECONDS,
     MAX_CUSTOM_ACTION_LABEL_LENGTH,
     MAX_CUSTOM_ACTION_PAYLOAD_LENGTH,
     MAX_CUSTOM_ACTION_REPEAT_COUNT,
     MIN_CUSTOM_ACTION_INTERVAL_SECONDS,
     moveCustomAction,
-    saveCustomActions,
     upsertCustomAction,
     type CustomAction
 } from '../session/customActions'
@@ -27,32 +25,31 @@ export interface CustomActionTimerView {
 
 export function CustomActionsPanel({
     open,
+    actions,
     activeTargetTitle,
     timers,
+    onActionsChange,
     onClose,
     onSend,
     onStartTimer,
     onStopTimer
 }: {
     open: boolean
+    actions: CustomAction[]
     activeTargetTitle: string
     timers: CustomActionTimerView[]
+    onActionsChange: (actions: CustomAction[]) => void
     onClose: () => void
     onSend: (action: CustomAction) => void
     onStartTimer: (action: CustomAction) => void
     onStopTimer: (timerId: string) => void
 }) {
-    const [actions, setActions] = useState<CustomAction[]>(() => loadCustomActions())
     const [editingId, setEditingId] = useState<string | null>(null)
     const [label, setLabel] = useState('')
     const [payload, setPayload] = useState('')
     const [intervalSeconds, setIntervalSeconds] = useState('')
     const [repeatCount, setRepeatCount] = useState('')
     const [error, setError] = useState<string | null>(null)
-
-    useEffect(() => {
-        if (open) setActions(loadCustomActions())
-    }, [open])
 
     const editingAction = useMemo(() => actions.find((action) => action.id === editingId) ?? null, [actions, editingId])
 
@@ -68,8 +65,7 @@ export function CustomActionsPanel({
     if (!open) return null
 
     function persist(next: CustomAction[]) {
-        setActions(next)
-        saveCustomActions(next)
+        onActionsChange(next)
     }
 
     function resetForm() {
@@ -286,6 +282,69 @@ export function CustomActionsPanel({
                         </div>
                     </form>
                 </div>
+            </div>
+        </div>
+    )
+}
+
+export function CustomActionsBar({
+    actions,
+    timers,
+    onManage,
+    onSend,
+    onStopTimer
+}: {
+    actions: CustomAction[]
+    timers: CustomActionTimerView[]
+    onManage: () => void
+    onSend: (action: CustomAction) => void
+    onStopTimer: (timerId: string) => void
+}) {
+    return (
+        <div className="hidden border-t border-neutral-800 bg-neutral-950 px-2 py-1.5 md:flex">
+            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+                <button
+                    type="button"
+                    className="sticky left-0 z-10 shrink-0 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-xs font-medium text-neutral-200 hover:bg-neutral-800"
+                    title="Manage custom actions and timers"
+                    onClick={onManage}
+                >
+                    Actions{timers.length ? ` · ${timers.length}` : ''}
+                </button>
+                {actions.length === 0 ? (
+                    <button
+                        type="button"
+                        className="shrink-0 rounded border border-dashed border-neutral-700 px-2 py-1 text-xs text-neutral-500 hover:bg-neutral-900 hover:text-neutral-300"
+                        onClick={onManage}
+                    >
+                        + Add action
+                    </button>
+                ) : (
+                    actions.map((action) => (
+                        <button
+                            key={action.id}
+                            type="button"
+                            className="shrink-0 rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-xs text-neutral-100 hover:bg-neutral-800 active:bg-neutral-700"
+                            title={`${action.label}: ${formatActionPayloadPreview(action.payload)}`}
+                            onClick={() => onSend(action)}
+                        >
+                            {action.label}
+                            {action.intervalSeconds ? <span className="ml-1 text-neutral-500">⏱</span> : null}
+                        </button>
+                    ))
+                )}
+                {timers.map((timer) => (
+                    <button
+                        key={timer.id}
+                        type="button"
+                        className="shrink-0 rounded border border-emerald-900/70 bg-emerald-950/30 px-2 py-1 text-xs text-emerald-200 hover:bg-emerald-900/40"
+                        title={`Stop ${timer.label} timer`}
+                        onClick={() => onStopTimer(timer.id)}
+                    >
+                        {timer.label} {timer.sentCount}
+                        {timer.repeatCount ? `/${timer.repeatCount}` : ''} ×
+                    </button>
+                ))}
             </div>
         </div>
     )

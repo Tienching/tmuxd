@@ -12,7 +12,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useParams } from '@tanstack/react-router'
 import type { Terminal, IDisposable } from '@xterm/xterm'
 import { TerminalView } from '../components/TerminalView'
-import { CustomActionsPanel, type CustomActionTimerView } from '../components/CustomActionsPanel'
+import { CustomActionsBar, CustomActionsPanel, type CustomActionTimerView } from '../components/CustomActionsPanel'
 import { MobileQuickKeys } from '../components/MobileQuickKeys'
 import { encodeTerminalInputPayload } from '../components/quickKeys'
 import { getScrollTopForTmuxPosition } from '../components/terminalText'
@@ -29,7 +29,7 @@ import {
     subscribeOpenSessions,
     type OpenSession
 } from '../session/openSessions'
-import { actionPayloadNeedsTimerConfirmation, type CustomAction } from '../session/customActions'
+import { actionPayloadNeedsTimerConfirmation, loadCustomActions, saveCustomActions, type CustomAction } from '../session/customActions'
 import {
     closeWorkspacePane,
     createWorkspaceId,
@@ -107,6 +107,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
     const [copyScrollPosition, setCopyScrollPosition] = useState(0)
     const [copyLoading, setCopyLoading] = useState(false)
     const [copyError, setCopyError] = useState<string | null>(null)
+    const [customActions, setCustomActions] = useState<CustomAction[]>(() => loadCustomActions())
     const [customActionsOpen, setCustomActionsOpen] = useState(false)
     const [customActionTimers, setCustomActionTimers] = useState<CustomActionTimerView[]>([])
 
@@ -202,6 +203,16 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
     function sendCustomActionOnce(action: CustomAction) {
         if (!activePane) return
         sendInputToPane(activePane.id, action.payload)
+    }
+
+    function openCustomActionsPanel() {
+        setCustomActions(loadCustomActions())
+        setCustomActionsOpen(true)
+    }
+
+    function persistCustomActions(actions: CustomAction[]) {
+        saveCustomActions(actions)
+        setCustomActions(actions)
     }
 
     function startCustomActionTimer(action: CustomAction) {
@@ -461,22 +472,6 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
                     </span>
                     <div className="flex min-w-0 items-center justify-end gap-2 justify-self-end text-xs">
                         {panes.length > 1 && <span className="text-neutral-500">{panes.length} panes</span>}
-                        <button
-                            type="button"
-                            className="rounded border border-neutral-700 px-2 py-0.5 text-neutral-300 hover:bg-neutral-800"
-                            title="Custom terminal actions and timers"
-                            onClick={() => setCustomActionsOpen(true)}
-                        >
-                            Actions{customActionTimers.length ? ` · ${customActionTimers.length}` : ''}
-                        </button>
-                        <button
-                            type="button"
-                            className="rounded border border-neutral-700 px-2 py-0.5 text-neutral-300 hover:bg-neutral-800"
-                            title="Upload an image and paste its file path"
-                            onClick={openImagePicker}
-                        >
-                            Image
-                        </button>
                         <StatusDot status={activePaneStatus.status} />
                         <span className="text-neutral-400">{activePaneStatus.status}</span>
                         {activePaneStatus.statusMsg && <span className="truncate text-red-400">· {activePaneStatus.statusMsg}</span>}
@@ -514,21 +509,30 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
                             registerPaneHandle={registerPaneHandle}
                         />
                     </div>
+                    <CustomActionsBar
+                        actions={customActions}
+                        timers={customActionTimers}
+                        onManage={openCustomActionsPanel}
+                        onSend={sendCustomActionOnce}
+                        onStopTimer={stopCustomActionTimer}
+                    />
                     <MobileQuickKeys
                         onInput={sendInput}
                         onCopy={() => {
                             void openCopySheet()
                         }}
                         onImage={openImagePicker}
-                        onActions={() => setCustomActionsOpen(true)}
+                        onActions={openCustomActionsPanel}
                         copyLoading={copyLoading}
                     />
                 </div>
             </div>
             <CustomActionsPanel
                 open={customActionsOpen}
+                actions={customActions}
                 activeTargetTitle={activeTargetTitle}
                 timers={customActionTimers}
+                onActionsChange={persistCustomActions}
                 onClose={() => setCustomActionsOpen(false)}
                 onSend={sendCustomActionOnce}
                 onStartTimer={startCustomActionTimer}
