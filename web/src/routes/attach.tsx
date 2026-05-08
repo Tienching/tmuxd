@@ -66,7 +66,6 @@ interface SplitRequest {
 }
 
 interface CustomActionTimerRuntime extends CustomActionTimerView {
-    paneId: string
     targetKey: string
     payload: string
     intervalHandle: number | null
@@ -109,6 +108,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
     const [copyError, setCopyError] = useState<string | null>(null)
     const [customActions, setCustomActions] = useState<CustomAction[]>(() => loadCustomActions())
     const [customActionsOpen, setCustomActionsOpen] = useState(false)
+    const [customActionsTargetPaneId, setCustomActionsTargetPaneId] = useState<string | null>(null)
     const [customActionTimers, setCustomActionTimers] = useState<CustomActionTimerView[]>([])
 
     const paneHandlesRef = useRef<Record<string, TerminalPaneHandle | null>>({})
@@ -123,6 +123,8 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
     const activeTarget = activePane?.target ?? initialTarget
     const activeSessionName = activeTarget.sessionName
     const activeTargetTitle = formatWorkspaceTarget(activeTarget)
+    const customActionsTargetPane = (customActionsTargetPaneId && panes.find((pane) => pane.id === customActionsTargetPaneId)) || activePane
+    const customActionsTargetTitle = customActionsTargetPane ? formatWorkspaceTarget(customActionsTargetPane.target) : activeTargetTitle
     const activePaneStatus = (activePane && paneStatuses[activePane.id]) ?? { status: 'connecting' as Status, statusMsg: null }
     const paneIdsKey = panes.map((pane) => pane.id).join('\n')
     const paneTargetsKey = panes.map((pane) => targetKey(pane.target)).join('\n')
@@ -161,6 +163,9 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
 
     useEffect(() => {
         const livePaneIds = new Set(paneIdsKey ? paneIdsKey.split('\n') : [])
+        if (customActionsTargetPaneId && !livePaneIds.has(customActionsTargetPaneId)) {
+            setCustomActionsTargetPaneId(null)
+        }
         setPaneStatuses((current) => {
             const next: Record<string, PaneStatus> = {}
             let changed = false
@@ -170,7 +175,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
             }
             return changed ? next : current
         })
-    }, [paneIdsKey])
+    }, [customActionsTargetPaneId, paneIdsKey])
 
     useEffect(() => {
         for (const runtime of customActionTimersRef.current.values()) {
@@ -201,11 +206,21 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
     }
 
     function sendCustomActionOnce(action: CustomAction) {
-        if (!activePane) return
-        sendInputToPane(activePane.id, action.payload)
+        const pane = getCustomActionsTargetPane()
+        if (!pane) return
+        sendCustomActionToPane(pane.id, action)
     }
 
-    function openCustomActionsPanel() {
+    function sendCustomActionToPane(paneId: string, action: CustomAction) {
+        setActivePaneId(paneId)
+        sendInputToPane(paneId, action.payload)
+    }
+
+    function openCustomActionsPanel(paneId = activePane?.id ?? '') {
+        if (paneId) {
+            setActivePaneId(paneId)
+            setCustomActionsTargetPaneId(paneId)
+        }
         setCustomActions(loadCustomActions())
         setCustomActionsOpen(true)
     }
@@ -215,11 +230,17 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
         setCustomActions(actions)
     }
 
+    function getCustomActionsTargetPane() {
+        const targetPaneId = customActionsTargetPaneId || activePane?.id
+        return (targetPaneId ? panesRef.current.find((pane) => pane.id === targetPaneId) : null) ?? activePane
+    }
+
     function startCustomActionTimer(action: CustomAction) {
-        if (!activePane || !action.intervalSeconds) return
+        const pane = getCustomActionsTargetPane()
+        if (!pane || !action.intervalSeconds) return
         if (actionPayloadNeedsTimerConfirmation(action.payload)) {
             const ok = window.confirm(
-                `Start repeating action "${action.label}"? It contains Enter/newline and may execute commands in ${formatWorkspaceTarget(activePane.target)}.`
+                `Start repeating action "${action.label}"? It contains Enter/newline and may execute commands in ${formatWorkspaceTarget(pane.target)}.`
             )
             if (!ok) return
         }
@@ -229,12 +250,12 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
             id: timerId,
             actionId: action.id,
             label: action.label,
-            targetTitle: formatWorkspaceTarget(activePane.target),
+            targetTitle: formatWorkspaceTarget(pane.target),
             intervalSeconds: action.intervalSeconds,
             sentCount: 0,
             repeatCount: action.repeatCount,
-            paneId: activePane.id,
-            targetKey: targetKey(activePane.target),
+            paneId: pane.id,
+            targetKey: targetKey(pane.target),
             payload: action.payload,
             intervalHandle: null
         }
@@ -287,6 +308,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
             [...customActionTimersRef.current.values()].map((runtime) => ({
                 id: runtime.id,
                 actionId: runtime.actionId,
+                paneId: runtime.paneId,
                 label: runtime.label,
                 targetTitle: runtime.targetTitle,
                 intervalSeconds: runtime.intervalSeconds,
@@ -507,15 +529,13 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
                             onRatioChange={(splitId, ratio) => setWorkspace((current) => updateWorkspaceSplitRatio(current, splitId, ratio))}
                             onPaneStatus={updatePaneStatus}
                             registerPaneHandle={registerPaneHandle}
+                            actions={customActions}
+                            timers={customActionTimers}
+                            onManageActions={openCustomActionsPanel}
+                            onSendAction={sendCustomActionToPane}
+                            onStopActionTimer={stopCustomActionTimer}
                         />
                     </div>
-                    <CustomActionsBar
-                        actions={customActions}
-                        timers={customActionTimers}
-                        onManage={openCustomActionsPanel}
-                        onSend={sendCustomActionOnce}
-                        onStopTimer={stopCustomActionTimer}
-                    />
                     <MobileQuickKeys
                         onInput={sendInput}
                         onCopy={() => {
@@ -530,8 +550,8 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
             <CustomActionsPanel
                 open={customActionsOpen}
                 actions={customActions}
-                activeTargetTitle={activeTargetTitle}
-                timers={customActionTimers}
+                activeTargetTitle={customActionsTargetTitle}
+                timers={customActionsTargetPane ? customActionTimers.filter((timer) => timer.paneId === customActionsTargetPane.id) : []}
                 onActionsChange={persistCustomActions}
                 onClose={() => setCustomActionsOpen(false)}
                 onSend={sendCustomActionOnce}
@@ -582,7 +602,12 @@ function WorkspaceNodeView({
     onClose,
     onRatioChange,
     onPaneStatus,
-    registerPaneHandle
+    registerPaneHandle,
+    actions,
+    timers,
+    onManageActions,
+    onSendAction,
+    onStopActionTimer
 }: {
     node: WorkspaceNode
     activePaneId: string
@@ -595,6 +620,11 @@ function WorkspaceNodeView({
     onRatioChange: (splitId: string, ratio: number) => void
     onPaneStatus: (paneId: string, status: Status, statusMsg: string | null) => void
     registerPaneHandle: (paneId: string, handle: TerminalPaneHandle | null) => void
+    actions: CustomAction[]
+    timers: CustomActionTimerView[]
+    onManageActions: (paneId: string) => void
+    onSendAction: (paneId: string, action: CustomAction) => void
+    onStopActionTimer: (timerId: string) => void
 }) {
     if (node.type === 'pane') {
         return (
@@ -610,6 +640,11 @@ function WorkspaceNodeView({
                 onClose={() => onClose(node.id)}
                 onSplit={(direction) => onSplit(node.id, direction)}
                 onStatus={(status, statusMsg) => onPaneStatus(node.id, status, statusMsg)}
+                actions={actions}
+                timers={timers.filter((timer) => timer.paneId === node.id)}
+                onManageActions={() => onManageActions(node.id)}
+                onSendAction={(action) => onSendAction(node.id, action)}
+                onStopActionTimer={onStopActionTimer}
             />
         )
     }
@@ -627,6 +662,11 @@ function WorkspaceNodeView({
             onRatioChange={onRatioChange}
             onPaneStatus={onPaneStatus}
             registerPaneHandle={registerPaneHandle}
+            actions={actions}
+            timers={timers}
+            onManageActions={onManageActions}
+            onSendAction={onSendAction}
+            onStopActionTimer={onStopActionTimer}
         />
     )
 }
@@ -642,7 +682,12 @@ function WorkspaceSplitView({
     onClose,
     onRatioChange,
     onPaneStatus,
-    registerPaneHandle
+    registerPaneHandle,
+    actions,
+    timers,
+    onManageActions,
+    onSendAction,
+    onStopActionTimer
 }: {
     node: WorkspaceSplit
     activePaneId: string
@@ -655,6 +700,11 @@ function WorkspaceSplitView({
     onRatioChange: (splitId: string, ratio: number) => void
     onPaneStatus: (paneId: string, status: Status, statusMsg: string | null) => void
     registerPaneHandle: (paneId: string, handle: TerminalPaneHandle | null) => void
+    actions: CustomAction[]
+    timers: CustomActionTimerView[]
+    onManageActions: (paneId: string) => void
+    onSendAction: (paneId: string, action: CustomAction) => void
+    onStopActionTimer: (timerId: string) => void
 }) {
     const containerRef = useRef<HTMLDivElement | null>(null)
     const isRow = node.direction === 'row'
@@ -700,6 +750,11 @@ function WorkspaceSplitView({
                     onRatioChange={onRatioChange}
                     onPaneStatus={onPaneStatus}
                     registerPaneHandle={registerPaneHandle}
+                    actions={actions}
+                    timers={timers}
+                    onManageActions={onManageActions}
+                    onSendAction={onSendAction}
+                    onStopActionTimer={onStopActionTimer}
                 />
             </div>
             <button
@@ -723,6 +778,11 @@ function WorkspaceSplitView({
                     onRatioChange={onRatioChange}
                     onPaneStatus={onPaneStatus}
                     registerPaneHandle={registerPaneHandle}
+                    actions={actions}
+                    timers={timers}
+                    onManageActions={onManageActions}
+                    onSendAction={onSendAction}
+                    onStopActionTimer={onStopActionTimer}
                 />
             </div>
         </div>
@@ -735,11 +795,19 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
     canClose: boolean
     canSplit: boolean
     splitting: boolean
+    actions: CustomAction[]
+    timers: CustomActionTimerView[]
     onFocus: () => void
     onClose: () => void
     onSplit: (direction: WorkspaceDirection) => void
     onStatus: (status: Status, statusMsg: string | null) => void
-}>(function WorkspaceTerminalPane({ pane, active, canClose, canSplit, splitting, onFocus, onClose, onSplit, onStatus }, ref) {
+    onManageActions: () => void
+    onSendAction: (action: CustomAction) => void
+    onStopActionTimer: (timerId: string) => void
+}>(function WorkspaceTerminalPane(
+    { pane, active, canClose, canSplit, splitting, actions, timers, onFocus, onClose, onSplit, onStatus, onManageActions, onSendAction, onStopActionTimer },
+    ref
+) {
     const navigate = useNavigate()
     const wsRef = useRef<WebSocket | null>(null)
     const inputSubRef = useRef<IDisposable | null>(null)
@@ -1026,6 +1094,13 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
                     }}
                 />
             </div>
+            <CustomActionsBar
+                actions={actions}
+                timers={timers}
+                onManage={onManageActions}
+                onSend={onSendAction}
+                onStopTimer={onStopActionTimer}
+            />
         </section>
     )
 })

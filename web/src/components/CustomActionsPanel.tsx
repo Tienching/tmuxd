@@ -16,6 +16,7 @@ import {
 export interface CustomActionTimerView {
     id: string
     actionId: string
+    paneId: string
     label: string
     targetTitle: string
     intervalSeconds: number
