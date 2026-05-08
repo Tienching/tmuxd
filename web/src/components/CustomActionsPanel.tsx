@@ -306,7 +306,7 @@ export function CustomActionsBar({
             <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
                 <button
                     type="button"
-                    className="sticky left-0 z-10 shrink-0 rounded border border-dashed border-neutral-700 bg-neutral-950 px-2 py-1 text-xs font-medium text-neutral-200 hover:bg-neutral-800"
+                    className="sticky left-0 z-10 shrink-0 rounded border border-dashed border-neutral-700 bg-neutral-950 px-2 py-1 text-xs text-neutral-500 hover:bg-neutral-900 hover:text-neutral-300"
                     title="Add or manage custom actions"
                     onClick={onManage}
                 >
