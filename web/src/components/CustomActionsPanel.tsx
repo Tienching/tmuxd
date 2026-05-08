@@ -306,34 +306,24 @@ export function CustomActionsBar({
             <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
                 <button
                     type="button"
-                    className="sticky left-0 z-10 shrink-0 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-xs font-medium text-neutral-200 hover:bg-neutral-800"
-                    title="Manage custom actions and timers"
+                    className="sticky left-0 z-10 shrink-0 rounded border border-dashed border-neutral-700 bg-neutral-950 px-2 py-1 text-xs font-medium text-neutral-200 hover:bg-neutral-800"
+                    title="Add or manage custom actions"
                     onClick={onManage}
                 >
-                    Actions{timers.length ? ` · ${timers.length}` : ''}
+                    + Action
                 </button>
-                {actions.length === 0 ? (
+                {actions.map((action) => (
                     <button
+                        key={action.id}
                         type="button"
-                        className="shrink-0 rounded border border-dashed border-neutral-700 px-2 py-1 text-xs text-neutral-500 hover:bg-neutral-900 hover:text-neutral-300"
-                        onClick={onManage}
+                        className="shrink-0 rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-xs text-neutral-100 hover:bg-neutral-800 active:bg-neutral-700"
+                        title={`${action.label}: ${formatActionPayloadPreview(action.payload)}`}
+                        onClick={() => onSend(action)}
                     >
-                        + Add action
+                        {action.label}
+                        {action.intervalSeconds ? <span className="ml-1 text-neutral-500">⏱</span> : null}
                     </button>
-                ) : (
-                    actions.map((action) => (
-                        <button
-                            key={action.id}
-                            type="button"
-                            className="shrink-0 rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-xs text-neutral-100 hover:bg-neutral-800 active:bg-neutral-700"
-                            title={`${action.label}: ${formatActionPayloadPreview(action.payload)}`}
-                            onClick={() => onSend(action)}
-                        >
-                            {action.label}
-                            {action.intervalSeconds ? <span className="ml-1 text-neutral-500">⏱</span> : null}
-                        </button>
-                    ))
-                )}
+                ))}
                 {timers.map((timer) => (
                     <button
                         key={timer.id}
