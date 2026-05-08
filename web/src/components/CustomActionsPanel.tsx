@@ -182,7 +182,6 @@ export function CustomActionsPanel({
                     )}
 
                     <section className="mb-3">
-                        <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-neutral-500">Actions</h3>
                         {actions.length === 0 ? (
                             <p className="px-1 py-1 text-xs text-neutral-500">No actions yet.</p>
                         ) : (
