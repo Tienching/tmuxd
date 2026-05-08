@@ -5,8 +5,20 @@ export const MAX_CUSTOM_ACTION_REPEAT_COUNT = 999
 export const MAX_CUSTOM_ACTION_LABEL_LENGTH = 24
 export const MAX_CUSTOM_ACTION_PAYLOAD_LENGTH = 4096
 export const MAX_CUSTOM_ACTION_TRIGGER_DELAY_SECONDS = 7 * 24 * 60 * 60
+export const MAX_CUSTOM_ACTION_TRIGGER_DELAY_MS = MAX_CUSTOM_ACTION_TRIGGER_DELAY_SECONDS * 1000
 
 export type CustomActionTriggerMode = 'manual' | 'delay' | 'datetime'
+export type CustomActionValidationReason = 'required' | 'invalid_trigger_at_local'
+
+export class CustomActionValidationError extends Error {
+    readonly reason: CustomActionValidationReason
+
+    constructor(reason: CustomActionValidationReason) {
+        super(`invalid_custom_action:${reason}`)
+        this.name = 'CustomActionValidationError'
+        this.reason = reason
+    }
+}
 
 export interface CustomAction {
     id: string
@@ -58,14 +70,14 @@ export function saveCustomActions(actions: CustomAction[]): void {
     }
 }
 
-export function createCustomAction(draft: CustomActionDraft): CustomAction {
-    const action = normalizeDraft(draft)
-    if (!action) throw new Error('invalid_custom_action')
+export function createCustomAction(draft: CustomActionDraft, now = Date.now()): CustomAction {
+    const action = normalizeDraft(draft, now)
+    if (!action) throw new CustomActionValidationError('required')
     return action
 }
 
-export function upsertCustomAction(actions: CustomAction[], draft: CustomActionDraft): CustomAction[] {
-    const nextAction = createCustomAction(draft)
+export function upsertCustomAction(actions: CustomAction[], draft: CustomActionDraft, now = Date.now()): CustomAction[] {
+    const nextAction = createCustomAction(draft, now)
     const existingIndex = actions.findIndex((action) => action.id === nextAction.id)
     if (existingIndex < 0) return [nextAction, ...actions].slice(0, 32)
     const next = [...actions]
@@ -108,10 +120,10 @@ export function formatActionTriggerSummary(action: Pick<CustomAction, 'triggerMo
 }
 
 export function getActionTriggerDelayMs(action: Pick<CustomAction, 'triggerMode' | 'triggerDelaySeconds' | 'triggerAtLocal'>, now = Date.now()): number {
-    if (action.triggerMode === 'delay' && action.triggerDelaySeconds) return action.triggerDelaySeconds * 1000
+    if (action.triggerMode === 'delay' && action.triggerDelaySeconds) return Math.min(MAX_CUSTOM_ACTION_TRIGGER_DELAY_MS, action.triggerDelaySeconds * 1000)
     if (action.triggerMode === 'datetime' && action.triggerAtLocal) {
         const scheduledAt = new Date(action.triggerAtLocal).getTime()
-        if (Number.isFinite(scheduledAt)) return Math.max(0, scheduledAt - now)
+        if (Number.isFinite(scheduledAt)) return Math.min(MAX_CUSTOM_ACTION_TRIGGER_DELAY_MS, Math.max(0, scheduledAt - now))
     }
     return 0
 }
@@ -134,13 +146,17 @@ export function clampCustomActionTriggerDelay(value: unknown): number | null {
     return Math.min(MAX_CUSTOM_ACTION_TRIGGER_DELAY_SECONDS, Math.max(1, parsed))
 }
 
-function normalizeDraft(draft: CustomActionDraft): CustomAction | null {
+function normalizeDraft(draft: CustomActionDraft, now: number): CustomAction | null {
     const label = String(draft.label ?? '').trim().slice(0, MAX_CUSTOM_ACTION_LABEL_LENGTH)
     const payload = String(draft.payload ?? '').slice(0, MAX_CUSTOM_ACTION_PAYLOAD_LENGTH)
     if (!label || !payload) return null
     const triggerMode = normalizeTriggerMode(draft.triggerMode)
     const triggerDelaySeconds = triggerMode === 'delay' ? clampCustomActionTriggerDelay(draft.triggerDelaySeconds ?? null) : null
-    const triggerAtLocal = triggerMode === 'datetime' ? normalizeTriggerAtLocal(draft.triggerAtLocal ?? null) : null
+    const rawTriggerAtLocal = typeof draft.triggerAtLocal === 'string' ? draft.triggerAtLocal.trim() : ''
+    const triggerAtLocal = triggerMode === 'datetime' ? normalizeTriggerAtLocal(rawTriggerAtLocal, now) : null
+    if (triggerMode === 'datetime' && rawTriggerAtLocal && !triggerAtLocal) {
+        throw new CustomActionValidationError('invalid_trigger_at_local')
+    }
     const intervalSeconds = clampCustomActionInterval(draft.intervalSeconds ?? null)
     return {
         id: draft.id?.trim() || makeCustomActionId(),
@@ -190,12 +206,13 @@ function normalizeTriggerMode(value: unknown): CustomActionTriggerMode {
     return value === 'delay' || value === 'datetime' ? value : 'manual'
 }
 
-function normalizeTriggerAtLocal(value: unknown): string | null {
+function normalizeTriggerAtLocal(value: unknown, now = Date.now()): string | null {
     if (typeof value !== 'string') return null
     const trimmed = value.trim()
     if (!trimmed) return null
     const parsed = new Date(trimmed).getTime()
     if (!Number.isFinite(parsed)) return null
+    if (parsed - now > MAX_CUSTOM_ACTION_TRIGGER_DELAY_MS) return null
     return trimmed.slice(0, 16)
 }
 

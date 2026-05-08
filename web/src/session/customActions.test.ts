@@ -4,10 +4,13 @@ import {
     actionPayloadNeedsTimerConfirmation,
     clampCustomActionInterval,
     createCustomAction,
+    CustomActionValidationError,
     formatActionPayloadPreview,
     formatActionTriggerSummary,
     getActionTriggerDelayMs,
     loadCustomActions,
+    MAX_CUSTOM_ACTION_TRIGGER_DELAY_MS,
+    MAX_CUSTOM_ACTION_TRIGGER_DELAY_SECONDS,
     MIN_CUSTOM_ACTION_INTERVAL_SECONDS,
     moveCustomAction,
     saveCustomActions,
@@ -81,16 +84,54 @@ describe('custom actions', () => {
     })
 
     it('normalizes delayed and dated triggers', () => {
+        const now = new Date(2026, 0, 2, 3, 3).getTime()
         const delayed = createCustomAction({ label: 'Later', payload: 'x', triggerMode: 'delay', triggerDelaySeconds: '2' })
         assert.equal(delayed.triggerMode, 'delay')
         assert.equal(delayed.triggerDelaySeconds, 2)
         assert.equal(getActionTriggerDelayMs(delayed), 2000)
         assert.equal(formatActionTriggerSummary(delayed), 'after 2s')
 
-        const dated = createCustomAction({ label: 'At', payload: 'x', triggerMode: 'datetime', triggerAtLocal: '2099-01-02T03:04' })
+        const dated = createCustomAction({ label: 'At', payload: 'x', triggerMode: 'datetime', triggerAtLocal: formatLocalDateTime(new Date(now + 60_000)) }, now)
         assert.equal(dated.triggerMode, 'datetime')
-        assert.equal(dated.triggerAtLocal, '2099-01-02T03:04')
-        assert.equal(formatActionTriggerSummary(dated), 'at 2099-01-02 03:04')
-        assert.equal(getActionTriggerDelayMs(dated, new Date('2099-01-02T03:03').getTime()), 60_000)
+        assert.equal(dated.triggerAtLocal, formatLocalDateTime(new Date(now + 60_000)))
+        assert.equal(formatActionTriggerSummary(dated), `at ${formatLocalDateTime(new Date(now + 60_000)).replace('T', ' ')}`)
+        assert.equal(getActionTriggerDelayMs(dated, now), 60_000)
+    })
+
+    it('rejects dated triggers beyond the safe scheduler horizon', () => {
+        const now = new Date(2026, 0, 2, 3, 3).getTime()
+        assert.throws(
+            () =>
+                createCustomAction(
+                    {
+                        label: 'Too far',
+                        payload: 'x',
+                        triggerMode: 'datetime',
+                        triggerAtLocal: formatLocalDateTime(new Date(now + MAX_CUSTOM_ACTION_TRIGGER_DELAY_MS + 60_000))
+                    },
+                    now
+                ),
+            (error) => error instanceof CustomActionValidationError && error.reason === 'invalid_trigger_at_local'
+        )
+    })
+
+    it('caps defensive datetime delay calculations to the safe scheduler horizon', () => {
+        const now = new Date(2026, 0, 2, 3, 3).getTime()
+        assert.equal(
+            getActionTriggerDelayMs(
+                {
+                    triggerMode: 'datetime',
+                    triggerDelaySeconds: null,
+                    triggerAtLocal: formatLocalDateTime(new Date(now + MAX_CUSTOM_ACTION_TRIGGER_DELAY_MS + 60_000))
+                },
+                now
+            ),
+            MAX_CUSTOM_ACTION_TRIGGER_DELAY_SECONDS * 1000
+        )
     })
 })
+
+function formatLocalDateTime(value: Date): string {
+    const pad = (part: number) => String(part).padStart(2, '0')
+    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}T${pad(value.getHours())}:${pad(value.getMinutes())}`
+}

@@ -9,6 +9,7 @@ import {
     MAX_CUSTOM_ACTION_REPEAT_COUNT,
     MAX_CUSTOM_ACTION_TRIGGER_DELAY_SECONDS,
     MIN_CUSTOM_ACTION_INTERVAL_SECONDS,
+    CustomActionValidationError,
     moveCustomAction,
     upsertCustomAction,
     type CustomAction,
@@ -32,6 +33,7 @@ export function CustomActionsPanel({
     actions,
     activeTargetTitle,
     timers,
+    allTimers = timers,
     onActionsChange,
     onClose,
     onSend,
@@ -41,6 +43,7 @@ export function CustomActionsPanel({
     actions: CustomAction[]
     activeTargetTitle: string
     timers: CustomActionTimerView[]
+    allTimers?: CustomActionTimerView[]
     onActionsChange: (actions: CustomAction[]) => void
     onClose: () => void
     onSend: (action: CustomAction) => void
@@ -111,8 +114,12 @@ export function CustomActionsPanel({
             })
             persist(next)
             resetForm()
-        } catch {
-            setError('Label and payload are required.')
+        } catch (caught) {
+            if (caught instanceof CustomActionValidationError && caught.reason === 'invalid_trigger_at_local') {
+                setError('Choose a valid local time within the next 7 days.')
+                return
+            }
+            setError('Label and text are required.')
         }
     }
 
@@ -131,7 +138,7 @@ export function CustomActionsPanel({
     }
 
     function remove(action: CustomAction) {
-        const relatedTimers = timers.filter((timer) => timer.actionId === action.id)
+        const relatedTimers = allTimers.filter((timer) => timer.actionId === action.id)
         const suffix = relatedTimers.length ? ` This will also stop ${relatedTimers.length} active timer${relatedTimers.length === 1 ? '' : 's'}.` : ''
         if (!window.confirm(`Delete action "${action.label}"?${suffix}`)) return
         for (const timer of relatedTimers) onStopTimer(timer.id)

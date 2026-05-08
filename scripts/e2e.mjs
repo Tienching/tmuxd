@@ -360,7 +360,8 @@ async function main() {
         const capture = await execFileP('tmux', ['capture-pane', '-p', '-t', TEST_SESSION, '-S', '-50'])
         await execFileP('tmux', ['send-keys', '-t', TEST_SESSION, 'C-u'])
         await rm(r.body.path, { force: true })
-        return capture.stdout.includes(r.body.path)
+        // tmux capture-pane includes visual line wraps, so long upload paths can be split across rows.
+        return capture.stdout.includes(r.body.path) || capture.stdout.replace(/\r?\n/g, '').includes(r.body.path)
     })
 
     await check('uploads: failed session image upload cleans saved file', async () => {

@@ -52,7 +52,7 @@ import { LOCAL_HOST_ID, type ClientWsMessage, type HostInfo, type ServerWsMessag
 type Status = 'connecting' | 'open' | 'closed' | 'error'
 
 interface TerminalPaneHandle {
-    sendInput(input: string): void
+    sendInput(input: string): boolean
 }
 
 interface PaneStatus {
@@ -74,6 +74,7 @@ interface CustomActionTimerRuntime extends CustomActionTimerView {
 
 const WORKSPACE_STORAGE_KEY = 'tmuxd.workspace.v1'
 const MAX_WORKSPACE_PANES = 6
+const CUSTOM_ACTION_SEND_RETRY_MS = 1000
 type HostOption = Pick<HostInfo, 'id' | 'name'>
 
 export function AttachPage() {
@@ -202,8 +203,8 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
         sendInputToPane(activePane.id, input)
     }
 
-    function sendInputToPane(paneId: string, input: string) {
-        paneHandlesRef.current[paneId]?.sendInput(input)
+    function sendInputToPane(paneId: string, input: string): boolean {
+        return paneHandlesRef.current[paneId]?.sendInput(input) ?? false
     }
 
     function sendCustomActionToPane(paneId: string, action: CustomAction) {
@@ -274,28 +275,36 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
         if (!runtime) return
         runtime.timeoutHandle = null
         runtime.triggerAt = null
-        runCustomActionTimerTick(timerId)
+        const sent = runCustomActionTimerTick(timerId)
+        const current = customActionTimersRef.current.get(timerId)
+        if (!sent && current) {
+            current.triggerAt = Date.now() + CUSTOM_ACTION_SEND_RETRY_MS
+            current.timeoutHandle = window.setTimeout(() => activateCustomActionRuntime(timerId), CUSTOM_ACTION_SEND_RETRY_MS)
+            syncCustomActionTimerViews()
+            return
+        }
         if (customActionTimersRef.current.has(timerId) && runtime.intervalSeconds) {
             runtime.intervalHandle = window.setInterval(() => runCustomActionTimerTick(timerId), runtime.intervalSeconds * 1000)
             syncCustomActionTimerViews()
         }
     }
 
-    function runCustomActionTimerTick(timerId: string) {
+    function runCustomActionTimerTick(timerId: string): boolean {
         const runtime = customActionTimersRef.current.get(timerId)
-        if (!runtime) return
+        if (!runtime) return false
         const pane = panesRef.current.find((candidate) => candidate.id === runtime.paneId)
         const status = paneStatusesRef.current[runtime.paneId]?.status
         if (!pane || targetKey(pane.target) !== runtime.targetKey || status === 'closed' || status === 'error') {
             stopCustomActionTimer(timerId)
-            return
+            return false
         }
-        sendInputToPane(runtime.paneId, runtime.payload)
+        if (!sendInputToPane(runtime.paneId, runtime.payload)) return false
         runtime.sentCount += 1
         syncCustomActionTimerViews()
         if (runtime.repeatCount && runtime.sentCount >= runtime.repeatCount) {
             stopCustomActionTimer(timerId)
         }
+        return true
     }
 
     function stopCustomActionTimer(timerId: string) {
@@ -566,6 +575,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
                 actions={customActions}
                 activeTargetTitle={customActionsTargetTitle}
                 timers={customActionsTargetPane ? customActionTimers.filter((timer) => timer.paneId === customActionsTargetPane.id) : []}
+                allTimers={customActionTimers}
                 onActionsChange={persistCustomActions}
                 onClose={() => setCustomActionsOpen(false)}
                 onSend={sendCustomActionFromPanel}
@@ -856,12 +866,14 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
         onStatusRef.current(statusRef.current, statusMsg)
     }
 
-    function sendInput(input: string) {
-        if (input === '\u0003') return
+    function sendInput(input: string): boolean {
+        if (input === '\u0003') return false
         const ws = wsRef.current
         if (ws && ws.readyState === ws.OPEN) {
             sendWs(ws, { type: 'input', payload: encodeTerminalInputPayload(input) })
+            return true
         }
+        return false
     }
 
     async function pasteClipboardImage(file: File) {
