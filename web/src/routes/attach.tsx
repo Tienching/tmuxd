@@ -206,15 +206,16 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
         paneHandlesRef.current[paneId]?.sendInput(input)
     }
 
-    function sendCustomActionOnce(action: CustomAction) {
-        const pane = getCustomActionsTargetPane()
-        if (!pane) return
-        sendCustomActionToPane(pane.id, action)
-    }
-
     function sendCustomActionToPane(paneId: string, action: CustomAction) {
         setActivePaneId(paneId)
-        scheduleCustomAction(paneId, action, 'once')
+        scheduleCustomAction(paneId, action, action.intervalSeconds ? 'timer' : 'once')
+    }
+
+    function sendCustomActionFromPanel(action: CustomAction) {
+        const targetPaneId = customActionsTargetPaneId || activePane?.id
+        const pane = (targetPaneId ? panesRef.current.find((candidate) => candidate.id === targetPaneId) : null) ?? activePane
+        if (!pane) return
+        sendCustomActionToPane(pane.id, action)
     }
 
     function openCustomActionsPanel(paneId = activePane?.id ?? '') {
@@ -229,17 +230,6 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
     function persistCustomActions(actions: CustomAction[]) {
         saveCustomActions(actions)
         setCustomActions(actions)
-    }
-
-    function getCustomActionsTargetPane() {
-        const targetPaneId = customActionsTargetPaneId || activePane?.id
-        return (targetPaneId ? panesRef.current.find((pane) => pane.id === targetPaneId) : null) ?? activePane
-    }
-
-    function startCustomActionTimer(action: CustomAction) {
-        const pane = getCustomActionsTargetPane()
-        if (!pane || !action.intervalSeconds) return
-        scheduleCustomAction(pane.id, action, 'timer')
     }
 
     function scheduleCustomAction(paneId: string, action: CustomAction, mode: 'once' | 'timer') {
@@ -578,8 +568,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
                 timers={customActionsTargetPane ? customActionTimers.filter((timer) => timer.paneId === customActionsTargetPane.id) : []}
                 onActionsChange={persistCustomActions}
                 onClose={() => setCustomActionsOpen(false)}
-                onSend={sendCustomActionOnce}
-                onStartTimer={startCustomActionTimer}
+                onSend={sendCustomActionFromPanel}
                 onStopTimer={stopCustomActionTimer}
             />
             {(copyLoading || copyText !== null || copyError !== null) && (

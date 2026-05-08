@@ -189,7 +189,7 @@ On mobile:
 The terminal page has an **Actions** panel on desktop and mobile.
 
 - Create custom actions with a short label and payload.
-- Click an action to send its payload once to the active pane.
+- Click an action to run its configured trigger against the active pane.
 - Optional trigger settings can run an action immediately, after a delay, or at a local date/time.
 - Optional timer settings can repeat an action every N seconds after the first trigger, with an optional repeat count.
 - Timers are bound to the pane/session that was active when started.

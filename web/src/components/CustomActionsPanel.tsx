@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import {
-    createCustomAction,
     deleteCustomAction,
     formatActionPayloadPreview,
     formatActionTriggerSummary,
@@ -36,7 +35,6 @@ export function CustomActionsPanel({
     onActionsChange,
     onClose,
     onSend,
-    onStartTimer,
     onStopTimer
 }: {
     open: boolean
@@ -46,10 +44,10 @@ export function CustomActionsPanel({
     onActionsChange: (actions: CustomAction[]) => void
     onClose: () => void
     onSend: (action: CustomAction) => void
-    onStartTimer: (action: CustomAction) => void
     onStopTimer: (timerId: string) => void
 }) {
     const [editingId, setEditingId] = useState<string | null>(null)
+    const [manageOpen, setManageOpen] = useState(false)
     const [label, setLabel] = useState('')
     const [payload, setPayload] = useState('')
     const [triggerMode, setTriggerMode] = useState<CustomActionTriggerMode>('manual')
@@ -120,6 +118,7 @@ export function CustomActionsPanel({
 
     function edit(action: CustomAction) {
         setEditingId(action.id)
+        setManageOpen(false)
         setLabel(action.label)
         setPayload(action.payload)
         setTriggerMode(action.triggerMode)
@@ -129,6 +128,15 @@ export function CustomActionsPanel({
         setRepeatCount(action.repeatCount ? String(action.repeatCount) : '')
         setAdvancedOpen(hasActionAdvancedSettings(action))
         setError(null)
+    }
+
+    function remove(action: CustomAction) {
+        const relatedTimers = timers.filter((timer) => timer.actionId === action.id)
+        const suffix = relatedTimers.length ? ` This will also stop ${relatedTimers.length} active timer${relatedTimers.length === 1 ? '' : 's'}.` : ''
+        if (!window.confirm(`Delete action "${action.label}"?${suffix}`)) return
+        for (const timer of relatedTimers) onStopTimer(timer.id)
+        persist(deleteCustomAction(actions, action.id))
+        if (editingId === action.id) resetForm()
     }
 
     function appendPayload(input: string) {
@@ -182,60 +190,70 @@ export function CustomActionsPanel({
                     )}
 
                     {actions.length > 0 && (
-                        <section className="mb-3">
-                            <div className="space-y-2">
-                                {actions.map((action, index) => (
-                                    <div key={action.id} className="rounded-md border border-neutral-800 bg-neutral-900/60 p-2">
-                                        <div className="flex min-w-0 items-center gap-2">
-                                            <button
-                                                type="button"
-                                                className="min-w-0 flex-1 rounded border border-neutral-700 bg-neutral-950 px-2 py-2 text-left text-xs text-neutral-100 hover:bg-neutral-800 active:bg-neutral-800"
-                                                onClick={() => onSend(action)}
-                                            >
-                                                <span className="block truncate font-medium">{action.label}</span>
-                                                <span className="block truncate font-mono text-[10px] text-neutral-500">{formatActionPayloadPreview(action.payload)}</span>
-                                                <span className="block truncate text-[10px] text-neutral-600">{formatActionTriggerSummary(action)}</span>
-                                            </button>
-                                            {action.intervalSeconds && (
-                                                <button
-                                                    type="button"
-                                                    className="shrink-0 rounded border border-neutral-700 px-2 py-2 text-xs text-neutral-100 hover:bg-neutral-800 active:bg-neutral-800"
-                                                    title="Start timer for active pane"
-                                                    onClick={() => onStartTimer(action)}
-                                                >
-                                                    Start
-                                                </button>
-                                            )}
-                                        </div>
-                                        <div className="mt-2 flex flex-wrap gap-1 text-xs">
-                                            <button type="button" className="rounded px-2 py-1 text-neutral-400 hover:bg-neutral-800" disabled={index === 0} onClick={() => persist(moveCustomAction(actions, action.id, -1))}>
-                                                ↑
-                                            </button>
-                                            <button type="button" className="rounded px-2 py-1 text-neutral-400 hover:bg-neutral-800" disabled={index === actions.length - 1} onClick={() => persist(moveCustomAction(actions, action.id, 1))}>
-                                                ↓
-                                            </button>
-                                            <button type="button" className="rounded px-2 py-1 text-neutral-400 hover:bg-neutral-800" onClick={() => edit(action)}>
-                                                Edit
-                                            </button>
-                                            <button type="button" className="rounded px-2 py-1 text-red-400 hover:bg-neutral-800" onClick={() => persist(deleteCustomAction(actions, action.id))}>
-                                                Delete
-                                            </button>
-                                            {action.triggerMode !== 'manual' && <span className="px-2 py-1 text-neutral-500">{formatActionTriggerSummary(action)}</span>}
-                                            {action.intervalSeconds && (
-                                                <span className="px-2 py-1 text-neutral-500">
-                                                    every {action.intervalSeconds}s{action.repeatCount ? ` · ${action.repeatCount}x` : ' · until stopped'}
-                                                </span>
-                                            )}
-                                        </div>
-                                    </div>
-                                ))}
+                        <section className="mb-3 rounded-md border border-neutral-800 bg-neutral-900/40 p-2">
+                            <div className="mb-2 flex items-center justify-between gap-2">
+                                <h3 className="text-xs font-medium uppercase tracking-wide text-neutral-500">Saved</h3>
+                                <button
+                                    type="button"
+                                    className="rounded px-2 py-1 text-xs text-neutral-500 hover:bg-neutral-800 hover:text-neutral-300"
+                                    onClick={() => setManageOpen((value) => !value)}
+                                >
+                                    {manageOpen ? 'Done' : 'Manage'}
+                                </button>
                             </div>
+                            {manageOpen ? (
+                                <div className="space-y-2">
+                                    {actions.map((action, index) => (
+                                        <div key={action.id} className="rounded border border-neutral-800 bg-neutral-950/70 p-2">
+                                            <div className="min-w-0">
+                                                <div className="truncate text-xs font-medium text-neutral-100">{action.label}</div>
+                                                <div className="truncate font-mono text-[10px] text-neutral-500">{formatActionPayloadPreview(action.payload)}</div>
+                                                <div className="truncate text-[10px] text-neutral-600">
+                                                    {formatActionTriggerSummary(action)}
+                                                    {action.intervalSeconds ? ` · repeat every ${action.intervalSeconds}s${action.repeatCount ? ` · ${action.repeatCount}x` : ''}` : ''}
+                                                </div>
+                                            </div>
+                                            <div className="mt-2 flex flex-wrap gap-1 text-xs">
+                                                <button type="button" className="rounded px-2 py-1 text-neutral-400 hover:bg-neutral-800" disabled={index === 0} onClick={() => persist(moveCustomAction(actions, action.id, -1))}>
+                                                    ↑
+                                                </button>
+                                                <button type="button" className="rounded px-2 py-1 text-neutral-400 hover:bg-neutral-800" disabled={index === actions.length - 1} onClick={() => persist(moveCustomAction(actions, action.id, 1))}>
+                                                    ↓
+                                                </button>
+                                                <button type="button" className="rounded px-2 py-1 text-neutral-300 hover:bg-neutral-800" onClick={() => edit(action)}>
+                                                    Edit
+                                                </button>
+                                                <button type="button" className="rounded px-2 py-1 text-red-400 hover:bg-neutral-800" onClick={() => remove(action)}>
+                                                    Delete
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <div className="flex flex-wrap gap-1">
+                                    {actions.map((action) => (
+                                        <button
+                                            key={action.id}
+                                            type="button"
+                                            className="rounded border border-neutral-800 bg-neutral-950 px-2 py-1 text-xs text-neutral-100 hover:bg-neutral-800 active:bg-neutral-700"
+                                            title={`${action.label}: ${formatActionPayloadPreview(action.payload)} · ${formatActionTriggerSummary(action)}`}
+                                            onClick={() => onSend(action)}
+                                        >
+                                            {action.label}
+                                            {action.triggerMode !== 'manual' ? <span className="ml-1 text-neutral-500">⏳</span> : null}
+                                            {action.intervalSeconds ? <span className="ml-1 text-neutral-500">⏱</span> : null}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
                         </section>
                     )}
 
+
                     <form className="rounded-md border border-neutral-800 bg-neutral-900/50 p-2" onSubmit={submit}>
                         <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-neutral-500">
-                            {editingId ? 'Edit' : 'New action'}
+                            {editingId ? 'Edit action' : 'New action'}
                         </h3>
                         <label className="mb-2 block text-xs text-neutral-400">
                             Label
@@ -395,16 +413,16 @@ export function CustomActionsBar({
                 </button>
                 {actions.map((action) => (
                     <button
-                            key={action.id}
-                            type="button"
-                            className="shrink-0 rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-xs text-neutral-100 hover:bg-neutral-800 active:bg-neutral-700"
-                            title={`${action.label}: ${formatActionPayloadPreview(action.payload)} · ${formatActionTriggerSummary(action)}`}
-                            onClick={() => onSend(action)}
-                        >
-                            {action.label}
-                            {action.triggerMode !== 'manual' ? <span className="ml-1 text-neutral-500">⏳</span> : null}
-                            {action.intervalSeconds ? <span className="ml-1 text-neutral-500">⏱</span> : null}
-                        </button>
+                        key={action.id}
+                        type="button"
+                        className="shrink-0 rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-xs text-neutral-100 hover:bg-neutral-800 active:bg-neutral-700"
+                        title={`${action.label}: ${formatActionPayloadPreview(action.payload)} · ${formatActionTriggerSummary(action)}`}
+                        onClick={() => onSend(action)}
+                    >
+                        {action.label}
+                        {action.triggerMode !== 'manual' ? <span className="ml-1 text-neutral-500">⏳</span> : null}
+                        {action.intervalSeconds ? <span className="ml-1 text-neutral-500">⏱</span> : null}
+                    </button>
                 ))}
                 {timers.map((timer) => (
                     <button
