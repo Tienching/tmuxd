@@ -57,9 +57,14 @@ export function CustomActionsPanel({
     const [triggerAtLocal, setTriggerAtLocal] = useState('')
     const [intervalSeconds, setIntervalSeconds] = useState('')
     const [repeatCount, setRepeatCount] = useState('')
+    const [advancedOpen, setAdvancedOpen] = useState(false)
     const [error, setError] = useState<string | null>(null)
 
     const editingAction = useMemo(() => actions.find((action) => action.id === editingId) ?? null, [actions, editingId])
+    const draftAdvancedSummary = useMemo(
+        () => formatDraftAdvancedSummary(triggerMode, triggerDelaySeconds, triggerAtLocal, intervalSeconds, repeatCount),
+        [triggerMode, triggerDelaySeconds, triggerAtLocal, intervalSeconds, repeatCount]
+    )
 
     useEffect(() => {
         if (!editingAction) return
@@ -70,6 +75,7 @@ export function CustomActionsPanel({
         setTriggerAtLocal(editingAction.triggerAtLocal ?? '')
         setIntervalSeconds(editingAction.intervalSeconds ? String(editingAction.intervalSeconds) : '')
         setRepeatCount(editingAction.repeatCount ? String(editingAction.repeatCount) : '')
+        setAdvancedOpen(hasActionAdvancedSettings(editingAction))
         setError(null)
     }, [editingAction])
 
@@ -88,6 +94,7 @@ export function CustomActionsPanel({
         setTriggerAtLocal('')
         setIntervalSeconds('')
         setRepeatCount('')
+        setAdvancedOpen(false)
         setError(null)
     }
 
@@ -120,6 +127,7 @@ export function CustomActionsPanel({
         setTriggerAtLocal(action.triggerAtLocal ?? '')
         setIntervalSeconds(action.intervalSeconds ? String(action.intervalSeconds) : '')
         setRepeatCount(action.repeatCount ? String(action.repeatCount) : '')
+        setAdvancedOpen(hasActionAdvancedSettings(action))
         setError(null)
     }
 
@@ -135,8 +143,8 @@ export function CustomActionsPanel({
             >
                 <div className="mb-2 flex items-center justify-between gap-2">
                     <div className="min-w-0">
-                        <h2 className="text-sm font-medium text-neutral-100">Custom actions</h2>
-                        <p className="truncate text-xs text-neutral-500">Target: {activeTargetTitle}</p>
+                        <h2 className="text-sm font-medium text-neutral-100">Actions</h2>
+                        <p className="truncate text-xs text-neutral-500">Current pane: {activeTargetTitle}</p>
                     </div>
                     <button type="button" className="rounded px-2 py-1 text-xs text-neutral-400 hover:bg-neutral-800 active:bg-neutral-800" onClick={onClose}>
                         Close
@@ -176,9 +184,7 @@ export function CustomActionsPanel({
                     <section className="mb-3">
                         <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-neutral-500">Actions</h3>
                         {actions.length === 0 ? (
-                            <p className="rounded-md border border-neutral-800 bg-neutral-900/60 p-3 text-xs text-neutral-500">
-                                No custom actions yet. Create one below, then run it against the active pane.
-                            </p>
+                            <p className="px-1 py-1 text-xs text-neutral-500">No actions yet.</p>
                         ) : (
                             <div className="space-y-2">
                                 {actions.map((action, index) => (
@@ -232,7 +238,7 @@ export function CustomActionsPanel({
 
                     <form className="rounded-md border border-neutral-800 bg-neutral-900/50 p-2" onSubmit={submit}>
                         <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-neutral-500">
-                            {editingId ? 'Edit action' : 'New action'}
+                            {editingId ? 'Edit' : 'New action'}
                         </h3>
                         <label className="mb-2 block text-xs text-neutral-400">
                             Label
@@ -245,9 +251,9 @@ export function CustomActionsPanel({
                             />
                         </label>
                         <label className="mb-2 block text-xs text-neutral-400">
-                            Payload
+                            Text
                             <textarea
-                                className="mt-1 h-24 w-full resize-y rounded border border-neutral-800 bg-neutral-950 px-2 py-2 font-mono text-xs text-neutral-100 outline-none focus:border-neutral-600"
+                                className="mt-1 h-20 w-full resize-y rounded border border-neutral-800 bg-neutral-950 px-2 py-2 font-mono text-xs text-neutral-100 outline-none focus:border-neutral-600"
                                 value={payload}
                                 maxLength={MAX_CUSTOM_ACTION_PAYLOAD_LENGTH}
                                 placeholder="Text to send to the active terminal"
@@ -265,75 +271,90 @@ export function CustomActionsPanel({
                                 + Esc
                             </button>
                         </div>
-                        <div className="mb-2 grid gap-2 sm:grid-cols-3">
-                            <label className="block text-xs text-neutral-400">
-                                Trigger
-                                <select
-                                    className="mt-1 w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-2 text-xs text-neutral-100 outline-none focus:border-neutral-600"
-                                    value={triggerMode}
-                                    onChange={(event) => setTriggerMode(event.target.value as CustomActionTriggerMode)}
-                                >
-                                    <option value="manual">On click</option>
-                                    <option value="delay">After delay</option>
-                                    <option value="datetime">At local time</option>
-                                </select>
-                            </label>
-                            {triggerMode === 'delay' && (
-                                <label className="block text-xs text-neutral-400 sm:col-span-2">
-                                    Trigger after seconds
-                                    <input
-                                        className="mt-1 w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-2 text-xs text-neutral-100 outline-none focus:border-neutral-600"
-                                        type="number"
-                                        min={1}
-                                        max={MAX_CUSTOM_ACTION_TRIGGER_DELAY_SECONDS}
-                                        placeholder="e.g. 30"
-                                        value={triggerDelaySeconds}
-                                        onChange={(event) => setTriggerDelaySeconds(event.target.value)}
-                                    />
-                                </label>
+
+                        <div className="mb-2 rounded-md border border-neutral-800 bg-neutral-950/60">
+                            <button
+                                type="button"
+                                className="flex w-full items-center justify-between gap-2 px-2 py-2 text-left text-xs text-neutral-400 hover:bg-neutral-900"
+                                onClick={() => setAdvancedOpen((value) => !value)}
+                            >
+                                <span className="font-medium text-neutral-300">Advanced</span>
+                                <span className="min-w-0 flex-1 truncate text-right text-neutral-600">{draftAdvancedSummary}</span>
+                                <span className="text-neutral-500">{advancedOpen ? '▾' : '▸'}</span>
+                            </button>
+                            {advancedOpen && (
+                                <div className="space-y-2 border-t border-neutral-800 p-2">
+                                    <div className="grid gap-2 sm:grid-cols-3">
+                                        <label className="block text-xs text-neutral-400">
+                                            Run
+                                            <select
+                                                className="mt-1 w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-2 text-xs text-neutral-100 outline-none focus:border-neutral-600"
+                                                value={triggerMode}
+                                                onChange={(event) => setTriggerMode(event.target.value as CustomActionTriggerMode)}
+                                            >
+                                                <option value="manual">When clicked</option>
+                                                <option value="delay">After delay</option>
+                                                <option value="datetime">At local time</option>
+                                            </select>
+                                        </label>
+                                        {triggerMode === 'delay' && (
+                                            <label className="block text-xs text-neutral-400 sm:col-span-2">
+                                                Delay seconds
+                                                <input
+                                                    className="mt-1 w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-2 text-xs text-neutral-100 outline-none focus:border-neutral-600"
+                                                    type="number"
+                                                    min={1}
+                                                    max={MAX_CUSTOM_ACTION_TRIGGER_DELAY_SECONDS}
+                                                    placeholder="e.g. 30"
+                                                    value={triggerDelaySeconds}
+                                                    onChange={(event) => setTriggerDelaySeconds(event.target.value)}
+                                                />
+                                            </label>
+                                        )}
+                                        {triggerMode === 'datetime' && (
+                                            <label className="block text-xs text-neutral-400 sm:col-span-2">
+                                                Local time
+                                                <input
+                                                    className="mt-1 w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-2 text-xs text-neutral-100 outline-none focus:border-neutral-600"
+                                                    type="datetime-local"
+                                                    value={triggerAtLocal}
+                                                    onChange={(event) => setTriggerAtLocal(event.target.value)}
+                                                />
+                                            </label>
+                                        )}
+                                    </div>
+                                    <div className="grid gap-2 sm:grid-cols-2">
+                                        <label className="block text-xs text-neutral-400">
+                                            Repeat every seconds
+                                            <input
+                                                className="mt-1 w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-2 text-xs text-neutral-100 outline-none focus:border-neutral-600"
+                                                type="number"
+                                                min={MIN_CUSTOM_ACTION_INTERVAL_SECONDS}
+                                                max={MAX_CUSTOM_ACTION_INTERVAL_SECONDS}
+                                                placeholder="blank = off"
+                                                value={intervalSeconds}
+                                                onChange={(event) => setIntervalSeconds(event.target.value)}
+                                            />
+                                        </label>
+                                        <label className="block text-xs text-neutral-400">
+                                            Stop after runs
+                                            <input
+                                                className="mt-1 w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-2 text-xs text-neutral-100 outline-none focus:border-neutral-600 disabled:opacity-50"
+                                                type="number"
+                                                min={1}
+                                                max={MAX_CUSTOM_ACTION_REPEAT_COUNT}
+                                                placeholder="blank = never"
+                                                value={repeatCount}
+                                                disabled={!intervalSeconds.trim()}
+                                                onChange={(event) => setRepeatCount(event.target.value)}
+                                            />
+                                        </label>
+                                    </div>
+                                    <p className="text-xs text-neutral-600">Timers ask before sending payloads with Enter/newline.</p>
+                                </div>
                             )}
-                            {triggerMode === 'datetime' && (
-                                <label className="block text-xs text-neutral-400 sm:col-span-2">
-                                    Trigger at
-                                    <input
-                                        className="mt-1 w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-2 text-xs text-neutral-100 outline-none focus:border-neutral-600"
-                                        type="datetime-local"
-                                        value={triggerAtLocal}
-                                        onChange={(event) => setTriggerAtLocal(event.target.value)}
-                                    />
-                                </label>
-                            )}
-                        </div>
-                        <div className="grid gap-2 sm:grid-cols-2">
-                            <label className="block text-xs text-neutral-400">
-                                Timer interval seconds
-                                <input
-                                    className="mt-1 w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-2 text-xs text-neutral-100 outline-none focus:border-neutral-600"
-                                    type="number"
-                                    min={MIN_CUSTOM_ACTION_INTERVAL_SECONDS}
-                                    max={MAX_CUSTOM_ACTION_INTERVAL_SECONDS}
-                                    placeholder="blank = no timer"
-                                    value={intervalSeconds}
-                                    onChange={(event) => setIntervalSeconds(event.target.value)}
-                                />
-                            </label>
-                            <label className="block text-xs text-neutral-400">
-                                Repeat count
-                                <input
-                                    className="mt-1 w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-2 text-xs text-neutral-100 outline-none focus:border-neutral-600"
-                                    type="number"
-                                    min={1}
-                                    max={MAX_CUSTOM_ACTION_REPEAT_COUNT}
-                                    placeholder="blank = until stopped"
-                                    value={repeatCount}
-                                    onChange={(event) => setRepeatCount(event.target.value)}
-                                />
-                            </label>
                         </div>
                         {error && <p className="mt-2 text-xs text-red-400">{error}</p>}
-                        <p className="mt-2 text-xs text-neutral-500">
-                            Trigger controls when the click or timer starts. Timers repeat by interval after the first trigger. Timers with Enter/newline ask for confirmation.
-                        </p>
                         <div className="mt-2 flex justify-end gap-2">
                             {editingId && (
                                 <button type="button" className="rounded border border-neutral-700 px-3 py-1.5 text-xs text-neutral-100 hover:bg-neutral-800" onClick={resetForm}>
@@ -341,7 +362,7 @@ export function CustomActionsPanel({
                                 </button>
                             )}
                             <button type="submit" className="rounded border border-neutral-700 px-3 py-1.5 text-xs font-medium text-neutral-100 hover:bg-neutral-800 active:bg-neutral-800">
-                                {editingId ? 'Save' : 'Add'}
+                                {editingId ? 'Save' : '+ Action'}
                             </button>
                         </div>
                     </form>
@@ -403,6 +424,28 @@ export function CustomActionsBar({
             </div>
         </div>
     )
+}
+
+function hasActionAdvancedSettings(action: Pick<CustomAction, 'triggerMode' | 'intervalSeconds' | 'repeatCount'>): boolean {
+    return action.triggerMode !== 'manual' || Boolean(action.intervalSeconds || action.repeatCount)
+}
+
+function formatDraftAdvancedSummary(
+    triggerMode: CustomActionTriggerMode,
+    triggerDelaySeconds: string,
+    triggerAtLocal: string,
+    intervalSeconds: string,
+    repeatCount: string
+): string {
+    const delay = triggerDelaySeconds.trim()
+    const atLocal = triggerAtLocal.trim()
+    const interval = intervalSeconds.trim()
+    const repeat = repeatCount.trim()
+    let run = 'on click'
+    if (triggerMode === 'delay') run = delay ? `after ${delay}s` : 'after delay'
+    if (triggerMode === 'datetime') run = atLocal ? `at ${atLocal.replace('T', ' ')}` : 'at local time'
+    const repeatSummary = interval ? `repeat every ${interval}s${repeat ? ` · ${repeat}x` : ''}` : 'repeat off'
+    return `${run} · ${repeatSummary}`
 }
 
 function formatTimerStart(timestamp: number): string {

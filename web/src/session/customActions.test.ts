@@ -75,6 +75,9 @@ describe('custom actions', () => {
 
     it('treats blank interval as no timer default', () => {
         assert.equal(clampCustomActionInterval(''), null)
+        const action = createCustomAction({ label: 'A', payload: 'a', repeatCount: '3' })
+        assert.equal(action.intervalSeconds, null)
+        assert.equal(action.repeatCount, null)
     })
 
     it('normalizes delayed and dated triggers', () => {

@@ -141,6 +141,7 @@ function normalizeDraft(draft: CustomActionDraft): CustomAction | null {
     const triggerMode = normalizeTriggerMode(draft.triggerMode)
     const triggerDelaySeconds = triggerMode === 'delay' ? clampCustomActionTriggerDelay(draft.triggerDelaySeconds ?? null) : null
     const triggerAtLocal = triggerMode === 'datetime' ? normalizeTriggerAtLocal(draft.triggerAtLocal ?? null) : null
+    const intervalSeconds = clampCustomActionInterval(draft.intervalSeconds ?? null)
     return {
         id: draft.id?.trim() || makeCustomActionId(),
         label,
@@ -148,8 +149,8 @@ function normalizeDraft(draft: CustomActionDraft): CustomAction | null {
         triggerMode: triggerDelaySeconds || triggerAtLocal ? triggerMode : 'manual',
         triggerDelaySeconds,
         triggerAtLocal,
-        intervalSeconds: clampCustomActionInterval(draft.intervalSeconds ?? null),
-        repeatCount: clampCustomActionRepeatCount(draft.repeatCount ?? null),
+        intervalSeconds,
+        repeatCount: intervalSeconds ? clampCustomActionRepeatCount(draft.repeatCount ?? null) : null,
         updatedAt: Date.now()
     }
 }
@@ -164,6 +165,7 @@ function normalizeStoredAction(value: unknown): CustomAction | null {
     const triggerMode = normalizeTriggerMode(record.triggerMode)
     const triggerDelaySeconds = triggerMode === 'delay' ? clampCustomActionTriggerDelay(record.triggerDelaySeconds ?? null) : null
     const triggerAtLocal = triggerMode === 'datetime' ? normalizeTriggerAtLocal(record.triggerAtLocal ?? null) : null
+    const intervalSeconds = clampCustomActionInterval(record.intervalSeconds ?? null)
     return {
         id,
         label,
@@ -171,8 +173,8 @@ function normalizeStoredAction(value: unknown): CustomAction | null {
         triggerMode: triggerDelaySeconds || triggerAtLocal ? triggerMode : 'manual',
         triggerDelaySeconds,
         triggerAtLocal,
-        intervalSeconds: clampCustomActionInterval(record.intervalSeconds ?? null),
-        repeatCount: clampCustomActionRepeatCount(record.repeatCount ?? null),
+        intervalSeconds,
+        repeatCount: intervalSeconds ? clampCustomActionRepeatCount(record.repeatCount ?? null) : null,
         updatedAt: typeof record.updatedAt === 'number' && Number.isFinite(record.updatedAt) ? record.updatedAt : 0
     }
 }
