@@ -181,10 +181,8 @@ export function CustomActionsPanel({
                         </section>
                     )}
 
-                    <section className="mb-3">
-                        {actions.length === 0 ? (
-                            <p className="px-1 py-1 text-xs text-neutral-500">No actions yet.</p>
-                        ) : (
+                    {actions.length > 0 && (
+                        <section className="mb-3">
                             <div className="space-y-2">
                                 {actions.map((action, index) => (
                                     <div key={action.id} className="rounded-md border border-neutral-800 bg-neutral-900/60 p-2">
@@ -232,8 +230,8 @@ export function CustomActionsPanel({
                                     </div>
                                 ))}
                             </div>
-                        )}
-                    </section>
+                        </section>
+                    )}
 
                     <form className="rounded-md border border-neutral-800 bg-neutral-900/50 p-2" onSubmit={submit}>
                         <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-neutral-500">
