@@ -409,7 +409,7 @@ export function CustomActionsBar({
                     title="Add or manage custom actions"
                     onClick={onManage}
                 >
-                    + Action
+                    Actions
                 </button>
                 {actions.map((action) => (
                     <button
