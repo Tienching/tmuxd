@@ -3,14 +3,17 @@ import {
     createCustomAction,
     deleteCustomAction,
     formatActionPayloadPreview,
+    formatActionTriggerSummary,
     MAX_CUSTOM_ACTION_INTERVAL_SECONDS,
     MAX_CUSTOM_ACTION_LABEL_LENGTH,
     MAX_CUSTOM_ACTION_PAYLOAD_LENGTH,
     MAX_CUSTOM_ACTION_REPEAT_COUNT,
+    MAX_CUSTOM_ACTION_TRIGGER_DELAY_SECONDS,
     MIN_CUSTOM_ACTION_INTERVAL_SECONDS,
     moveCustomAction,
     upsertCustomAction,
-    type CustomAction
+    type CustomAction,
+    type CustomActionTriggerMode
 } from '../session/customActions'
 
 export interface CustomActionTimerView {
@@ -19,7 +22,8 @@ export interface CustomActionTimerView {
     paneId: string
     label: string
     targetTitle: string
-    intervalSeconds: number
+    triggerAt: number | null
+    intervalSeconds: number | null
     sentCount: number
     repeatCount: number | null
 }
@@ -48,6 +52,9 @@ export function CustomActionsPanel({
     const [editingId, setEditingId] = useState<string | null>(null)
     const [label, setLabel] = useState('')
     const [payload, setPayload] = useState('')
+    const [triggerMode, setTriggerMode] = useState<CustomActionTriggerMode>('manual')
+    const [triggerDelaySeconds, setTriggerDelaySeconds] = useState('')
+    const [triggerAtLocal, setTriggerAtLocal] = useState('')
     const [intervalSeconds, setIntervalSeconds] = useState('')
     const [repeatCount, setRepeatCount] = useState('')
     const [error, setError] = useState<string | null>(null)
@@ -58,6 +65,9 @@ export function CustomActionsPanel({
         if (!editingAction) return
         setLabel(editingAction.label)
         setPayload(editingAction.payload)
+        setTriggerMode(editingAction.triggerMode)
+        setTriggerDelaySeconds(editingAction.triggerDelaySeconds ? String(editingAction.triggerDelaySeconds) : '')
+        setTriggerAtLocal(editingAction.triggerAtLocal ?? '')
         setIntervalSeconds(editingAction.intervalSeconds ? String(editingAction.intervalSeconds) : '')
         setRepeatCount(editingAction.repeatCount ? String(editingAction.repeatCount) : '')
         setError(null)
@@ -73,6 +83,9 @@ export function CustomActionsPanel({
         setEditingId(null)
         setLabel('')
         setPayload('')
+        setTriggerMode('manual')
+        setTriggerDelaySeconds('')
+        setTriggerAtLocal('')
         setIntervalSeconds('')
         setRepeatCount('')
         setError(null)
@@ -85,6 +98,9 @@ export function CustomActionsPanel({
                 id: editingId ?? undefined,
                 label,
                 payload,
+                triggerMode,
+                triggerDelaySeconds,
+                triggerAtLocal,
                 intervalSeconds,
                 repeatCount
             })
@@ -99,6 +115,9 @@ export function CustomActionsPanel({
         setEditingId(action.id)
         setLabel(action.label)
         setPayload(action.payload)
+        setTriggerMode(action.triggerMode)
+        setTriggerDelaySeconds(action.triggerDelaySeconds ? String(action.triggerDelaySeconds) : '')
+        setTriggerAtLocal(action.triggerAtLocal ?? '')
         setIntervalSeconds(action.intervalSeconds ? String(action.intervalSeconds) : '')
         setRepeatCount(action.repeatCount ? String(action.repeatCount) : '')
         setError(null)
@@ -127,14 +146,17 @@ export function CustomActionsPanel({
                 <div className="min-h-0 flex-1 overflow-y-auto pr-1">
                     {timers.length > 0 && (
                         <section className="mb-3 rounded-md border border-emerald-900/60 bg-emerald-950/20 p-2">
-                            <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-emerald-300">Active timers</h3>
+                            <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-emerald-300">Scheduled / active</h3>
                             <div className="space-y-2">
                                 {timers.map((timer) => (
                                     <div key={timer.id} className="flex min-w-0 items-center justify-between gap-2 rounded border border-emerald-900/50 bg-neutral-950/80 p-2 text-xs">
                                         <div className="min-w-0">
                                             <div className="truncate font-medium text-neutral-100">{timer.label}</div>
                                             <div className="truncate text-neutral-500">
-                                                {timer.targetTitle} · every {timer.intervalSeconds}s · sent {timer.sentCount}
+                                                {timer.targetTitle}
+                                                {timer.triggerAt && timer.sentCount === 0 ? ` · starts ${formatTimerStart(timer.triggerAt)}` : ''}
+                                                {timer.intervalSeconds ? ` · every ${timer.intervalSeconds}s` : ''}
+                                                {' · '}sent {timer.sentCount}
                                                 {timer.repeatCount ? ` / ${timer.repeatCount}` : ''}
                                             </div>
                                         </div>
@@ -169,6 +191,7 @@ export function CustomActionsPanel({
                                             >
                                                 <span className="block truncate font-medium">{action.label}</span>
                                                 <span className="block truncate font-mono text-[10px] text-neutral-500">{formatActionPayloadPreview(action.payload)}</span>
+                                                <span className="block truncate text-[10px] text-neutral-600">{formatActionTriggerSummary(action)}</span>
                                             </button>
                                             {action.intervalSeconds && (
                                                 <button
@@ -194,6 +217,7 @@ export function CustomActionsPanel({
                                             <button type="button" className="rounded px-2 py-1 text-red-400 hover:bg-neutral-800" onClick={() => persist(deleteCustomAction(actions, action.id))}>
                                                 Delete
                                             </button>
+                                            {action.triggerMode !== 'manual' && <span className="px-2 py-1 text-neutral-500">{formatActionTriggerSummary(action)}</span>}
                                             {action.intervalSeconds && (
                                                 <span className="px-2 py-1 text-neutral-500">
                                                     every {action.intervalSeconds}s{action.repeatCount ? ` · ${action.repeatCount}x` : ' · until stopped'}
@@ -241,6 +265,45 @@ export function CustomActionsPanel({
                                 + Esc
                             </button>
                         </div>
+                        <div className="mb-2 grid gap-2 sm:grid-cols-3">
+                            <label className="block text-xs text-neutral-400">
+                                Trigger
+                                <select
+                                    className="mt-1 w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-2 text-xs text-neutral-100 outline-none focus:border-neutral-600"
+                                    value={triggerMode}
+                                    onChange={(event) => setTriggerMode(event.target.value as CustomActionTriggerMode)}
+                                >
+                                    <option value="manual">On click</option>
+                                    <option value="delay">After delay</option>
+                                    <option value="datetime">At local time</option>
+                                </select>
+                            </label>
+                            {triggerMode === 'delay' && (
+                                <label className="block text-xs text-neutral-400 sm:col-span-2">
+                                    Trigger after seconds
+                                    <input
+                                        className="mt-1 w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-2 text-xs text-neutral-100 outline-none focus:border-neutral-600"
+                                        type="number"
+                                        min={1}
+                                        max={MAX_CUSTOM_ACTION_TRIGGER_DELAY_SECONDS}
+                                        placeholder="e.g. 30"
+                                        value={triggerDelaySeconds}
+                                        onChange={(event) => setTriggerDelaySeconds(event.target.value)}
+                                    />
+                                </label>
+                            )}
+                            {triggerMode === 'datetime' && (
+                                <label className="block text-xs text-neutral-400 sm:col-span-2">
+                                    Trigger at
+                                    <input
+                                        className="mt-1 w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-2 text-xs text-neutral-100 outline-none focus:border-neutral-600"
+                                        type="datetime-local"
+                                        value={triggerAtLocal}
+                                        onChange={(event) => setTriggerAtLocal(event.target.value)}
+                                    />
+                                </label>
+                            )}
+                        </div>
                         <div className="grid gap-2 sm:grid-cols-2">
                             <label className="block text-xs text-neutral-400">
                                 Timer interval seconds
@@ -269,7 +332,7 @@ export function CustomActionsPanel({
                         </div>
                         {error && <p className="mt-2 text-xs text-red-400">{error}</p>}
                         <p className="mt-2 text-xs text-neutral-500">
-                            Timer starts send immediately, then repeats by interval. Timers with Enter/newline ask for confirmation.
+                            Trigger controls when the click or timer starts. Timers repeat by interval after the first trigger. Timers with Enter/newline ask for confirmation.
                         </p>
                         <div className="mt-2 flex justify-end gap-2">
                             {editingId && (
@@ -314,15 +377,16 @@ export function CustomActionsBar({
                 </button>
                 {actions.map((action) => (
                     <button
-                        key={action.id}
-                        type="button"
-                        className="shrink-0 rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-xs text-neutral-100 hover:bg-neutral-800 active:bg-neutral-700"
-                        title={`${action.label}: ${formatActionPayloadPreview(action.payload)}`}
-                        onClick={() => onSend(action)}
-                    >
-                        {action.label}
-                        {action.intervalSeconds ? <span className="ml-1 text-neutral-500">⏱</span> : null}
-                    </button>
+                            key={action.id}
+                            type="button"
+                            className="shrink-0 rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-xs text-neutral-100 hover:bg-neutral-800 active:bg-neutral-700"
+                            title={`${action.label}: ${formatActionPayloadPreview(action.payload)} · ${formatActionTriggerSummary(action)}`}
+                            onClick={() => onSend(action)}
+                        >
+                            {action.label}
+                            {action.triggerMode !== 'manual' ? <span className="ml-1 text-neutral-500">⏳</span> : null}
+                            {action.intervalSeconds ? <span className="ml-1 text-neutral-500">⏱</span> : null}
+                        </button>
                 ))}
                 {timers.map((timer) => (
                     <button
@@ -332,11 +396,17 @@ export function CustomActionsBar({
                         title={`Stop ${timer.label} timer`}
                         onClick={() => onStopTimer(timer.id)}
                     >
-                        {timer.label} {timer.sentCount}
+                        {timer.label} {timer.triggerAt && timer.sentCount === 0 ? formatTimerStart(timer.triggerAt) : timer.sentCount}
                         {timer.repeatCount ? `/${timer.repeatCount}` : ''} ×
                     </button>
                 ))}
             </div>
         </div>
     )
+}
+
+function formatTimerStart(timestamp: number): string {
+    const remainingSeconds = Math.ceil((timestamp - Date.now()) / 1000)
+    if (remainingSeconds > 0) return `in ${remainingSeconds}s`
+    return 'now'
 }

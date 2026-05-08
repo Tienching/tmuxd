@@ -4,11 +4,17 @@ export const MAX_CUSTOM_ACTION_INTERVAL_SECONDS = 3600
 export const MAX_CUSTOM_ACTION_REPEAT_COUNT = 999
 export const MAX_CUSTOM_ACTION_LABEL_LENGTH = 24
 export const MAX_CUSTOM_ACTION_PAYLOAD_LENGTH = 4096
+export const MAX_CUSTOM_ACTION_TRIGGER_DELAY_SECONDS = 7 * 24 * 60 * 60
+
+export type CustomActionTriggerMode = 'manual' | 'delay' | 'datetime'
 
 export interface CustomAction {
     id: string
     label: string
     payload: string
+    triggerMode: CustomActionTriggerMode
+    triggerDelaySeconds: number | null
+    triggerAtLocal: string | null
     intervalSeconds: number | null
     repeatCount: number | null
     updatedAt: number
@@ -18,6 +24,9 @@ export interface CustomActionDraft {
     id?: string
     label?: string
     payload?: string
+    triggerMode?: CustomActionTriggerMode | string | null
+    triggerDelaySeconds?: number | string | null
+    triggerAtLocal?: string | null
     intervalSeconds?: number | string | null
     repeatCount?: number | string | null
 }
@@ -92,6 +101,21 @@ export function formatActionPayloadPreview(payload: string): string {
         .slice(0, 80)
 }
 
+export function formatActionTriggerSummary(action: Pick<CustomAction, 'triggerMode' | 'triggerDelaySeconds' | 'triggerAtLocal'>): string {
+    if (action.triggerMode === 'delay' && action.triggerDelaySeconds) return `after ${action.triggerDelaySeconds}s`
+    if (action.triggerMode === 'datetime' && action.triggerAtLocal) return `at ${action.triggerAtLocal.replace('T', ' ')}`
+    return 'on click'
+}
+
+export function getActionTriggerDelayMs(action: Pick<CustomAction, 'triggerMode' | 'triggerDelaySeconds' | 'triggerAtLocal'>, now = Date.now()): number {
+    if (action.triggerMode === 'delay' && action.triggerDelaySeconds) return action.triggerDelaySeconds * 1000
+    if (action.triggerMode === 'datetime' && action.triggerAtLocal) {
+        const scheduledAt = new Date(action.triggerAtLocal).getTime()
+        if (Number.isFinite(scheduledAt)) return Math.max(0, scheduledAt - now)
+    }
+    return 0
+}
+
 export function clampCustomActionInterval(value: unknown): number | null {
     const parsed = parseNullableInteger(value)
     if (parsed === null) return null
@@ -104,14 +128,26 @@ export function clampCustomActionRepeatCount(value: unknown): number | null {
     return Math.min(MAX_CUSTOM_ACTION_REPEAT_COUNT, Math.max(1, parsed))
 }
 
+export function clampCustomActionTriggerDelay(value: unknown): number | null {
+    const parsed = parseNullableInteger(value)
+    if (parsed === null) return null
+    return Math.min(MAX_CUSTOM_ACTION_TRIGGER_DELAY_SECONDS, Math.max(1, parsed))
+}
+
 function normalizeDraft(draft: CustomActionDraft): CustomAction | null {
     const label = String(draft.label ?? '').trim().slice(0, MAX_CUSTOM_ACTION_LABEL_LENGTH)
     const payload = String(draft.payload ?? '').slice(0, MAX_CUSTOM_ACTION_PAYLOAD_LENGTH)
     if (!label || !payload) return null
+    const triggerMode = normalizeTriggerMode(draft.triggerMode)
+    const triggerDelaySeconds = triggerMode === 'delay' ? clampCustomActionTriggerDelay(draft.triggerDelaySeconds ?? null) : null
+    const triggerAtLocal = triggerMode === 'datetime' ? normalizeTriggerAtLocal(draft.triggerAtLocal ?? null) : null
     return {
         id: draft.id?.trim() || makeCustomActionId(),
         label,
         payload,
+        triggerMode: triggerDelaySeconds || triggerAtLocal ? triggerMode : 'manual',
+        triggerDelaySeconds,
+        triggerAtLocal,
         intervalSeconds: clampCustomActionInterval(draft.intervalSeconds ?? null),
         repeatCount: clampCustomActionRepeatCount(draft.repeatCount ?? null),
         updatedAt: Date.now()
@@ -125,10 +161,16 @@ function normalizeStoredAction(value: unknown): CustomAction | null {
     const label = typeof record.label === 'string' ? record.label.trim().slice(0, MAX_CUSTOM_ACTION_LABEL_LENGTH) : ''
     const payload = typeof record.payload === 'string' ? record.payload.slice(0, MAX_CUSTOM_ACTION_PAYLOAD_LENGTH) : ''
     if (!id || !label || !payload) return null
+    const triggerMode = normalizeTriggerMode(record.triggerMode)
+    const triggerDelaySeconds = triggerMode === 'delay' ? clampCustomActionTriggerDelay(record.triggerDelaySeconds ?? null) : null
+    const triggerAtLocal = triggerMode === 'datetime' ? normalizeTriggerAtLocal(record.triggerAtLocal ?? null) : null
     return {
         id,
         label,
         payload,
+        triggerMode: triggerDelaySeconds || triggerAtLocal ? triggerMode : 'manual',
+        triggerDelaySeconds,
+        triggerAtLocal,
         intervalSeconds: clampCustomActionInterval(record.intervalSeconds ?? null),
         repeatCount: clampCustomActionRepeatCount(record.repeatCount ?? null),
         updatedAt: typeof record.updatedAt === 'number' && Number.isFinite(record.updatedAt) ? record.updatedAt : 0
@@ -140,6 +182,19 @@ function parseNullableInteger(value: unknown): number | null {
     const parsed = typeof value === 'number' ? value : Number.parseInt(String(value), 10)
     if (!Number.isFinite(parsed) || parsed <= 0) return null
     return Math.floor(parsed)
+}
+
+function normalizeTriggerMode(value: unknown): CustomActionTriggerMode {
+    return value === 'delay' || value === 'datetime' ? value : 'manual'
+}
+
+function normalizeTriggerAtLocal(value: unknown): string | null {
+    if (typeof value !== 'string') return null
+    const trimmed = value.trim()
+    if (!trimmed) return null
+    const parsed = new Date(trimmed).getTime()
+    if (!Number.isFinite(parsed)) return null
+    return trimmed.slice(0, 16)
 }
 
 function makeCustomActionId(): string {

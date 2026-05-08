@@ -190,7 +190,8 @@ The terminal page has an **Actions** panel on desktop and mobile.
 
 - Create custom actions with a short label and payload.
 - Click an action to send its payload once to the active pane.
-- Optional timer settings can repeat an action every N seconds, with an optional repeat count.
+- Optional trigger settings can run an action immediately, after a delay, or at a local date/time.
+- Optional timer settings can repeat an action every N seconds after the first trigger, with an optional repeat count.
 - Timers are bound to the pane/session that was active when started.
 - Timers stop when the pane closes, its target changes, the websocket closes/errors, or the page unloads.
 - Starting a timer whose payload contains Enter/newline asks for confirmation because it may execute shell commands.

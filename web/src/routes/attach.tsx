@@ -29,7 +29,7 @@ import {
     subscribeOpenSessions,
     type OpenSession
 } from '../session/openSessions'
-import { actionPayloadNeedsTimerConfirmation, loadCustomActions, saveCustomActions, type CustomAction } from '../session/customActions'
+import { actionPayloadNeedsTimerConfirmation, getActionTriggerDelayMs, loadCustomActions, saveCustomActions, type CustomAction } from '../session/customActions'
 import {
     closeWorkspacePane,
     createWorkspaceId,
@@ -68,6 +68,7 @@ interface SplitRequest {
 interface CustomActionTimerRuntime extends CustomActionTimerView {
     targetKey: string
     payload: string
+    timeoutHandle: number | null
     intervalHandle: number | null
 }
 
@@ -213,7 +214,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
 
     function sendCustomActionToPane(paneId: string, action: CustomAction) {
         setActivePaneId(paneId)
-        sendInputToPane(paneId, action.payload)
+        scheduleCustomAction(paneId, action, 'once')
     }
 
     function openCustomActionsPanel(paneId = activePane?.id ?? '') {
@@ -238,34 +239,54 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
     function startCustomActionTimer(action: CustomAction) {
         const pane = getCustomActionsTargetPane()
         if (!pane || !action.intervalSeconds) return
+        scheduleCustomAction(pane.id, action, 'timer')
+    }
+
+    function scheduleCustomAction(paneId: string, action: CustomAction, mode: 'once' | 'timer') {
+        const pane = panesRef.current.find((candidate) => candidate.id === paneId)
+        if (!pane) return
+        const intervalSeconds = mode === 'timer' ? action.intervalSeconds : null
+        if (mode === 'timer' && !intervalSeconds) return
         if (actionPayloadNeedsTimerConfirmation(action.payload)) {
             const ok = window.confirm(
-                `Start repeating action "${action.label}"? It contains Enter/newline and may execute commands in ${formatWorkspaceTarget(pane.target)}.`
+                `${mode === 'timer' ? 'Start repeating' : 'Run'} action "${action.label}"? It contains Enter/newline and may execute commands in ${formatWorkspaceTarget(pane.target)}.`
             )
             if (!ok) return
         }
 
+        const triggerDelayMs = getActionTriggerDelayMs(action)
         const timerId = createCustomActionTimerId()
         const runtime: CustomActionTimerRuntime = {
             id: timerId,
             actionId: action.id,
             label: action.label,
             targetTitle: formatWorkspaceTarget(pane.target),
-            intervalSeconds: action.intervalSeconds,
+            triggerAt: triggerDelayMs > 0 ? Date.now() + triggerDelayMs : null,
+            intervalSeconds,
             sentCount: 0,
-            repeatCount: action.repeatCount,
+            repeatCount: intervalSeconds ? action.repeatCount : 1,
             paneId: pane.id,
             targetKey: targetKey(pane.target),
             payload: action.payload,
+            timeoutHandle: null,
             intervalHandle: null
         }
         customActionTimersRef.current.set(timerId, runtime)
         syncCustomActionTimerViews()
 
-        const tick = () => runCustomActionTimerTick(timerId)
-        tick()
-        if (customActionTimersRef.current.has(timerId)) {
-            runtime.intervalHandle = window.setInterval(tick, action.intervalSeconds * 1000)
+        const activate = () => activateCustomActionRuntime(timerId)
+        if (triggerDelayMs > 0) runtime.timeoutHandle = window.setTimeout(activate, triggerDelayMs)
+        else activate()
+    }
+
+    function activateCustomActionRuntime(timerId: string) {
+        const runtime = customActionTimersRef.current.get(timerId)
+        if (!runtime) return
+        runtime.timeoutHandle = null
+        runtime.triggerAt = null
+        runCustomActionTimerTick(timerId)
+        if (customActionTimersRef.current.has(timerId) && runtime.intervalSeconds) {
+            runtime.intervalHandle = window.setInterval(() => runCustomActionTimerTick(timerId), runtime.intervalSeconds * 1000)
             syncCustomActionTimerViews()
         }
     }
@@ -290,6 +311,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
     function stopCustomActionTimer(timerId: string) {
         const runtime = customActionTimersRef.current.get(timerId)
         if (!runtime) return
+        if (runtime.timeoutHandle !== null) window.clearTimeout(runtime.timeoutHandle)
         if (runtime.intervalHandle !== null) window.clearInterval(runtime.intervalHandle)
         customActionTimersRef.current.delete(timerId)
         syncCustomActionTimerViews()
@@ -297,6 +319,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
 
     function stopAllCustomActionTimers() {
         for (const runtime of customActionTimersRef.current.values()) {
+            if (runtime.timeoutHandle !== null) window.clearTimeout(runtime.timeoutHandle)
             if (runtime.intervalHandle !== null) window.clearInterval(runtime.intervalHandle)
         }
         customActionTimersRef.current.clear()
@@ -311,6 +334,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
                 paneId: runtime.paneId,
                 label: runtime.label,
                 targetTitle: runtime.targetTitle,
+                triggerAt: runtime.triggerAt,
                 intervalSeconds: runtime.intervalSeconds,
                 sentCount: runtime.sentCount,
                 repeatCount: runtime.repeatCount
