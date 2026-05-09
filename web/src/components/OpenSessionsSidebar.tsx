@@ -159,7 +159,9 @@ export function OpenSessionsSidebar({
                             const key = openSessionKey(s)
                             const liveSession = liveSessionByKey.get(key)
                             const light = sessionLights?.[key]
-                            const unread = Boolean(light?.unread || isSessionActivityUnread(liveSession, s.lastOpenedAt))
+                            const unread = Boolean(
+                                light?.unread || (!active && isSessionActivityUnread(liveSession, s.lastOpenedAt))
+                            )
                             return (
                                 <div
                                     key={`${s.hostId}:${s.name}`}
@@ -383,7 +385,9 @@ export function MobileSessionSelect({
                                             const key = openSessionKey(s)
                                             const liveSession = liveSessionByKey.get(key)
                                             const light = sessionLights?.[key]
-                                            const unread = Boolean(light?.unread || isSessionActivityUnread(liveSession, s.lastOpenedAt))
+                                            const unread = Boolean(
+                                                light?.unread || (!active && isSessionActivityUnread(liveSession, s.lastOpenedAt))
+                                            )
                                             return (
                                                 <div
                                                     key={`opened-mobile-${s.hostId}-${s.name}`}

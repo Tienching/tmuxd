@@ -7,6 +7,7 @@ import {
     getPaneStatusLight,
     getWorkspaceSessionLights,
     isSessionActivityUnread,
+    isSessionActivityUnreadAt,
     targetKey,
     type PaneStatusForLight
 } from './statusLights'
@@ -69,5 +70,11 @@ describe('status lights', () => {
     it('treats session activity after the last read as unread even for the current session', () => {
         assert.equal(isSessionActivityUnread({ activity: 100 }, 99_000), true)
         assert.equal(isSessionActivityUnread({ activity: 100 }, 100_000), false)
+    })
+
+    it('ignores far-future activity timestamps to avoid clock-skew false positives', () => {
+        const now = 1_700_000_000_000
+        assert.equal(isSessionActivityUnreadAt({ activity: Math.floor((now + 60_000) / 1000) }, now - 1_000, now), false)
+        assert.equal(isSessionActivityUnreadAt({ activity: Math.floor((now + 1_000) / 1000) }, now - 1_000, now), true)
     })
 })

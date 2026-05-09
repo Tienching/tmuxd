@@ -111,8 +111,18 @@ export function getPaneStatusLight(input: {
 }
 
 export function isSessionActivityUnread(liveSession: Pick<TargetSession, 'activity'> | undefined, lastReadAt: number): boolean {
+    return isSessionActivityUnreadAt(liveSession, lastReadAt, Date.now())
+}
+
+export function isSessionActivityUnreadAt(
+    liveSession: Pick<TargetSession, 'activity'> | undefined,
+    lastReadAt: number,
+    now: number
+): boolean {
     if (!liveSession) return false
-    return liveSession.activity * 1000 > lastReadAt
+    const activityMs = liveSession.activity * 1000
+    if (activityMs > now + 30_000) return false
+    return activityMs > lastReadAt
 }
 
 function hasUnreadSignals(signals: PaneSignals | undefined): boolean {
