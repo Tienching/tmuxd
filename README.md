@@ -170,6 +170,7 @@ On the terminal page:
 - The centered title shows the current session name.
 - **Opened** shows sessions opened in this browser.
 - **Opened** and **Not opened** are grouped by host.
+- Session rows and workspace pane headers use a small status light: gray = connecting/unknown, green = read/normal, yellow = unread activity, red = closed/error.
 - **New** creates a named or auto-named session on the selected host and attaches to it.
 - Click any session name to switch.
 - Click `×` next to an opened session to remove it from the browser-local list.
@@ -197,6 +198,82 @@ The terminal page has an **Actions** panel on desktop and mobile.
 - Starting a timer whose payload contains Enter/newline asks for confirmation because it may execute shell commands.
 
 Custom actions are stored in the browser's localStorage. They are not synced between browsers and do not run in the background after the page is closed.
+
+### Agent-facing tmux API
+
+Other local agents can use tmuxd as a JSON control plane for both **Local** and hub/agent remote tmux hosts. This mirrors the common `tmux` skill workflow: list panes, capture bounded scrollback, send literal text or special keys, and reuse named actions.
+
+All endpoints require the normal web JWT:
+
+```bash
+TOKEN=$(curl -s http://127.0.0.1:7681/api/auth \
+  -H 'content-type: application/json' \
+  -d '{"password":"..."}' | jq -r .token)
+```
+
+Pane inspection:
+
+```bash
+# All panes on a host, optionally restricted to one session.
+curl -H "Authorization: Bearer $TOKEN" \
+  'http://127.0.0.1:7681/api/hosts/local/panes?session=main'
+
+# Equivalent host-aware session helper.
+curl -H "Authorization: Bearer $TOKEN" \
+  'http://127.0.0.1:7681/api/hosts/local/sessions/main/panes'
+
+# Capture the newest 120 joined lines from a pane target, retaining at most 64 KiB.
+curl -H "Authorization: Bearer $TOKEN" \
+  'http://127.0.0.1:7681/api/hosts/local/panes/main%3A0.0/capture?lines=120&maxBytes=65536'
+
+# Stable tmux pane ids such as %7 can also be used; URL-encode % as %25.
+curl -H "Authorization: Bearer $TOKEN" \
+  'http://127.0.0.1:7681/api/hosts/local/panes/%257/capture?lines=80'
+
+# Classify whether a pane looks idle, running, waiting for input, in a permission prompt, etc.
+curl -H "Authorization: Bearer $TOKEN" \
+  'http://127.0.0.1:7681/api/hosts/local/panes/main%3A0.0/status?lines=120&maxBytes=65536'
+
+# Clear the sticky unread light after you have looked at the pane.
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  'http://127.0.0.1:7681/api/hosts/local/panes/main%3A0.0/activity/read'
+
+# One aggregate snapshot for agents that need a quick inventory.
+curl -H "Authorization: Bearer $TOKEN" \
+  'http://127.0.0.1:7681/api/agent/snapshot?capture=1&captureLimit=4'
+```
+
+Pane captures return `truncated` and `maxBytes`. When truncation is needed, tmuxd keeps the newest UTF-8-safe tail of the capture so status checks still see the latest prompt. Pane status responses also include a small sticky `activity` light: `green` = read/normal, `yellow` = unread output changed, `red` = tracked pane closed. Polling status does not clear unread; clear it explicitly with `POST /api/hosts/:hostId/panes/:target/activity/read`.
+
+Input primitives:
+
+```bash
+# Literal text is sent with `tmux send-keys -l`; Enter is sent separately.
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"text":"/status","enter":true}' \
+  'http://127.0.0.1:7681/api/hosts/local/panes/main/input'
+
+# Special tmux keys are validated and sent as argv, not through a shell.
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"keys":["C-c","Enter"]}' \
+  'http://127.0.0.1:7681/api/hosts/local/panes/main/keys'
+```
+
+Reusable server-side actions are stored in `TMUXD_HOME/actions.json`:
+
+```bash
+ACTION_ID=$(curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"label":"Status","kind":"send-text","payload":"/status","enter":true}' \
+  http://127.0.0.1:7681/api/actions | jq -r .action.id)
+
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:7681/api/hosts/local/panes/main/actions/$ACTION_ID/run"
+
+curl -H "Authorization: Bearer $TOKEN" \
+  'http://127.0.0.1:7681/api/actions/history?limit=20'
+```
+
+Remote hosts use the same routes with their host id, for example `/api/hosts/workstation/panes`. New tmuxd outbound agents advertise `panes` and `input` capabilities; older agents continue to work for session list/create/capture/attach but return `capability_not_supported` for these newer endpoints.
 
 ### Clipboard images
 
@@ -288,8 +365,9 @@ E2E coverage includes:
 - New/duplicate/bad-name/delete session flows.
 - New sessions starting in the server user's home directory.
 - Session text capture from tmux scrollback.
+- Agent-facing pane list/capture/input APIs and server-side action CRUD/run flows.
 - WebSocket attach, resize, ping/pong, input echo, UTF-8 roundtrip.
-- Hub/agent remote host connect, remote session create/list/capture/delete, and remote WebSocket attach/input.
+- Hub/agent remote host connect, remote session create/list/capture/delete, remote pane inspection/input, and remote WebSocket attach/input.
 - Multi-client shared attach.
 - Graceful shutdown with a live WebSocket.
 - Production web build smoke test.

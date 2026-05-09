@@ -10,6 +10,7 @@ import { createSessionsRoutes } from './routes/sessions.js'
 import { createHealthRoutes } from './routes/health.js'
 import { createWsServer, tryHandleUpgrade } from './ws.js'
 import { AgentRegistry } from './agentRegistry.js'
+import { TmuxActionStore } from './actions.js'
 
 function resolveWebDist(): string | null {
     const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -27,6 +28,7 @@ function resolveWebDist(): string | null {
 async function main() {
     const config = loadConfig()
     const agentRegistry = new AgentRegistry(config.agentTokens)
+    const actionStore = TmuxActionStore.inDataDir(config.dataDir)
 
     const app = new Hono()
 
@@ -41,13 +43,16 @@ async function main() {
 
     app.route('/', createHealthRoutes())
     app.route('/api', createAuthRoutes(config.password, config.jwtSecret))
-    app.route('/api', createSessionsRoutes(config.jwtSecret, agentRegistry))
+    app.route('/api', createSessionsRoutes(config.jwtSecret, agentRegistry, actionStore))
 
     const webDist = resolveWebDist()
     if (webDist) {
         // Serve static web assets with SPA fallback.
         app.use('/*', serveStatic({ root: webDist, rewriteRequestPath: (p) => p }))
         app.notFound(async (c) => {
+            if (c.req.path.startsWith('/api/')) {
+                return c.json({ error: 'not_found' }, 404)
+            }
             const indexPath = join(webDist, 'index.html')
             if (existsSync(indexPath)) {
                 const { readFile } = await import('node:fs/promises')

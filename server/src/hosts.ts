@@ -10,7 +10,7 @@ export function getLocalHost(): HostInfo {
         isLocal: true,
         version: VERSION,
         lastSeenAt: Date.now(),
-        capabilities: ['list', 'create', 'kill', 'capture', 'attach']
+        capabilities: ['list', 'create', 'kill', 'capture', 'attach', 'panes', 'input']
     }
 }
 

@@ -5,6 +5,7 @@ import {
     type HostInfo,
     type SessionTarget,
     type TargetSession,
+    type TargetPane,
     type TmuxSession
 } from '@tmuxd/shared'
 import { getToken, notifyAuthRequired } from '../auth/tokenStore'
@@ -34,6 +35,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     if (token) headers.set('authorization', `Bearer ${token}`)
     const res = await fetch(path, { ...init, headers })
     const text = await res.text()
+    const contentType = res.headers.get('content-type') ?? ''
     let body: unknown = null
     if (text) {
         try {
@@ -41,6 +43,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
         } catch {
             body = text
         }
+    }
+    if (path.startsWith('/api/') && text && !contentType.includes('json')) {
+        throw new ApiError(res.status, body, `Expected JSON response from ${path}`)
     }
     if (!res.ok) {
         if (res.status === 401) notifyAuthRequired()
@@ -79,6 +84,10 @@ export const api = {
     listSessions: () => request<{ sessions: TmuxSession[] }>('/api/sessions'),
     listHostSessions: (hostId = LOCAL_HOST_ID) =>
         request<{ sessions: TargetSession[] }>(`/api/hosts/${encodeURIComponent(hostId)}/sessions`),
+    listHostPanes: (hostId = LOCAL_HOST_ID, session?: string) => {
+        const query = session ? `?session=${encodeURIComponent(session)}` : ''
+        return request<{ panes: TargetPane[] }>(`/api/hosts/${encodeURIComponent(hostId)}/panes${query}`)
+    },
     createSession: (name: string) =>
         request<{ ok: true }>('/api/sessions', { method: 'POST', body: JSON.stringify({ name }) }),
     createHostSession: (hostId: string, name: string) =>
@@ -90,6 +99,13 @@ export const api = {
             : request<CaptureResponse>(
                   `/api/hosts/${encodeURIComponent(target.hostId)}/sessions/${encodeURIComponent(target.sessionName)}/capture`
               ),
+    readTargetPaneActivity: (target: SessionTarget, paneTarget?: string) =>
+        request<Record<string, unknown>>(
+            `/api/hosts/${encodeURIComponent(target.hostId)}/panes/${encodeURIComponent(paneTarget ?? target.sessionName)}/activity/read`,
+            {
+                method: 'POST'
+            }
+        ),
     createWsTicket: (target: SessionTarget) =>
         request<{ ticket: string; expiresAt: number }>('/api/ws-ticket', {
             method: 'POST',

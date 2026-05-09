@@ -5,8 +5,8 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { config as loadDotenv } from 'dotenv'
 import WebSocket from 'ws'
 import { attachTmuxPty, type PtyBridge } from './ptyManager.js'
-import { captureSession, createSession, killSession, listSessions } from './tmux.js'
-import type { AgentServerMessage } from './agentProtocol.js'
+import { capturePane, captureSession, createSession, killSession, listPanes, listSessions, sendKeysToTarget, sendTextToTarget } from './tmux.js'
+import { agentServerMessageSchema, type AgentServerMessage } from './agentProtocol.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 loadDotenv({ path: join(__dirname, '..', '..', '.env') })
@@ -14,7 +14,7 @@ loadDotenv()
 
 const VERSION = '0.1.0'
 const DEFAULT_NAME = 'agent'
-const CAPABILITIES = ['list', 'create', 'kill', 'capture', 'attach']
+const CAPABILITIES = ['list', 'create', 'kill', 'capture', 'attach', 'panes', 'input']
 
 interface StreamState {
     bridge: PtyBridge
@@ -160,6 +160,20 @@ async function handleMessage(ws: WebSocket, streams: Map<string, StreamState>, m
         })
     } else if (msg.type === 'capture_session') {
         await reply(ws, msg.id, async () => captureSession(msg.name))
+    } else if (msg.type === 'list_panes') {
+        await reply(ws, msg.id, async () => ({ panes: await listPanes(msg.session) }))
+    } else if (msg.type === 'capture_pane') {
+        await reply(ws, msg.id, async () => capturePane(msg.target, { lines: msg.lines, maxBytes: msg.maxBytes }))
+    } else if (msg.type === 'send_text') {
+        await reply(ws, msg.id, async () => {
+            await sendTextToTarget(msg.target, msg.text, msg.enter)
+            return { ok: true }
+        })
+    } else if (msg.type === 'send_keys') {
+        await reply(ws, msg.id, async () => {
+            await sendKeysToTarget(msg.target, msg.keys)
+            return { ok: true }
+        })
     } else if (msg.type === 'attach') {
         attachStream(ws, streams, msg.streamId, msg.session, msg.cols, msg.rows)
     } else if (msg.type === 'input') {
@@ -227,9 +241,8 @@ function disposeStream(streams: Map<string, StreamState>, streamId: string): voi
 
 function parseHubMessage(raw: WebSocket.RawData): AgentServerMessage | null {
     try {
-        const value = JSON.parse(raw.toString()) as Partial<AgentServerMessage>
-        if (!value || typeof value.type !== 'string') return null
-        return value as AgentServerMessage
+        const parsed = agentServerMessageSchema.safeParse(JSON.parse(raw.toString()))
+        return parsed.success ? parsed.data : null
     } catch {
         return null
     }

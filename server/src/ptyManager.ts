@@ -1,7 +1,8 @@
+import { execFileSync } from 'node:child_process'
 import pty, { type IPty } from 'node-pty'
-import { validateSessionName } from './tmux.js'
+import { validateSessionTargetName } from './tmux.js'
 
-/** A live PTY attached to `tmux new-session -A -s <name>`. */
+/** A live PTY attached to an existing tmux session. */
 export interface PtyBridge {
     proc: IPty
     session: string
@@ -11,12 +12,17 @@ export interface PtyBridge {
 }
 
 export function attachTmuxPty(session: string, cols: number, rows: number): PtyBridge {
-    const safe = validateSessionName(session)
+    const safe = validateSessionTargetName(session)
+    try {
+        execFileSync('tmux', ['has-session', '-t', safe], { encoding: 'utf8', stdio: 'pipe' })
+    } catch {
+        throw new Error('session_not_found')
+    }
     const shell = 'tmux'
-    // `-A` attaches if exists, otherwise creates. `-D` detaches other clients so
-    // resize matches the browser viewport (optional; comment out for shared).
-    // We keep shared attach (no -D) so multi-client viewing works.
-    const args = ['new-session', '-A', '-s', safe]
+    // Attach only; session creation is an explicit API action. Using
+    // `new-session -A` here can silently recreate stale Opened entries as empty
+    // tmux sessions when a browser reconnects.
+    const args = ['attach-session', '-t', safe]
 
     // Strip sensitive env vars from the shell the user will interact with.
     const {

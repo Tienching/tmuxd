@@ -2,14 +2,124 @@ export interface TmuxSession {
     name: string
     windows: number
     attached: boolean
+    attachedClients: number
     created: number // unix seconds
     activity: number // unix seconds
+}
+
+export interface TmuxPane {
+    target: string
+    sessionName: string
+    windowIndex: number
+    windowName: string
+    windowActive: boolean
+    paneIndex: number
+    paneId: string
+    paneActive: boolean
+    paneDead: boolean
+    currentCommand: string
+    currentPath: string
+    title: string
+    width: number
+    height: number
+    paneInMode: boolean
+    scrollPosition: number
+    historySize: number
+    sessionAttached: boolean
+    sessionAttachedClients: number
+    sessionActivity: number // unix seconds
+    windowActivity: number // unix seconds
+}
+
+export interface TmuxPaneCapture {
+    target: string
+    text: string
+    truncated: boolean
+    maxBytes: number
+    paneInMode: boolean
+    scrollPosition: number
+    historySize: number
+    paneHeight: number
+}
+
+export interface TargetPane extends TmuxPane {
+    hostId: string
+    hostName: string
+}
+
+export type TmuxActionKind = 'send-text' | 'send-keys'
+
+export interface TmuxAction {
+    id: string
+    label: string
+    description?: string
+    kind: TmuxActionKind
+    payload?: string
+    enter?: boolean
+    keys?: string[]
+    createdAt: number // unix ms
+    updatedAt: number // unix ms
+}
+
+export interface TmuxActionRun {
+    id: string
+    actionId: string
+    label: string
+    kind: TmuxActionKind
+    hostId: string
+    target: string
+    ok: boolean
+    error?: string
+    startedAt: number // unix ms
+    completedAt: number // unix ms
+}
+
+export type TmuxPaneState = 'idle' | 'running' | 'needs_input' | 'permission_prompt' | 'copy_mode' | 'dead'
+
+export type TmuxPaneActivityLight = 'green' | 'yellow' | 'red' | 'gray'
+export type TmuxPaneActivityReason = 'output' | 'closed'
+
+export interface TmuxPaneActivity {
+    light: TmuxPaneActivityLight
+    unread: boolean
+    changed: boolean
+    seq: number
+    reason?: TmuxPaneActivityReason
+    updatedAt: number // unix ms
+    checkedAt: number // unix ms
+}
+
+export interface TmuxPaneStatus {
+    target: string
+    state: TmuxPaneState
+    signals: string[]
+    summary: string
+    checkedAt: number // unix ms
+    pane?: TmuxPane
+    capture: TmuxPaneCapture
+    activity?: TmuxPaneActivity
+}
+
+export interface TmuxSnapshotError {
+    hostId: string
+    operation: string
+    error: string
+    message?: string
+}
+
+export interface TmuxSnapshot {
+    generatedAt: number // unix ms
+    hosts: HostInfo[]
+    sessions: TargetSession[]
+    panes: TargetPane[]
+    statuses?: TmuxPaneStatus[]
+    errors: TmuxSnapshotError[]
 }
 
 export const LOCAL_HOST_ID = 'local'
 
 export type HostStatus = 'online' | 'offline'
-export type HostCapability = 'list' | 'create' | 'kill' | 'capture' | 'attach'
+export type HostCapability = 'list' | 'create' | 'kill' | 'capture' | 'attach' | 'panes' | 'input'
 
 export interface HostInfo {
     id: string

@@ -20,6 +20,7 @@ describe('resolveOpenSessionHostNames', () => {
                 hostName: 'Remote Client',
                 windows: 1,
                 attached: false,
+                attachedClients: 0,
                 created: 1,
                 activity: 1
             }

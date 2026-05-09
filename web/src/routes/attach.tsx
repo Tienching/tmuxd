@@ -16,7 +16,12 @@ import { CustomActionsBar, CustomActionsPanel, type CustomActionTimerView } from
 import { MobileQuickKeys } from '../components/MobileQuickKeys'
 import { encodeTerminalInputPayload } from '../components/quickKeys'
 import { getScrollTopForTmuxPosition } from '../components/terminalText'
-import { getInitialSidebarHidden, MobileSessionSelect, OpenSessionsSidebar, saveSidebarHidden } from '../components/OpenSessionsSidebar'
+import {
+    getInitialSidebarHidden,
+    MobileSessionSelect,
+    OpenSessionsSidebar,
+    saveSidebarHidden
+} from '../components/OpenSessionsSidebar'
 import { api } from '../api/client'
 import { listHostSessionsData } from '../hosts/sessionData'
 import { getToken } from '../auth/tokenStore'
@@ -29,6 +34,15 @@ import {
     subscribeOpenSessions,
     type OpenSession
 } from '../session/openSessions'
+import {
+    clearTargetPaneSignalsState,
+    getPaneStatusLight,
+    getWorkspaceSessionLights,
+    targetKey,
+    type PaneConnectionStatus as Status,
+    type PaneSignals,
+    type PaneStatusForLight as PaneStatus
+} from '../session/statusLights'
 import { actionPayloadNeedsTimerConfirmation, getActionTriggerDelayMs, loadCustomActions, saveCustomActions, type CustomAction } from '../session/customActions'
 import {
     closeWorkspacePane,
@@ -49,15 +63,8 @@ import {
 } from '../workspace/layout'
 import { LOCAL_HOST_ID, type ClientWsMessage, type HostInfo, type ServerWsMessage, type SessionTarget, type TargetSession } from '@tmuxd/shared'
 
-type Status = 'connecting' | 'open' | 'closed' | 'error'
-
 interface TerminalPaneHandle {
     sendInput(input: string): boolean
-}
-
-interface PaneStatus {
-    status: Status
-    statusMsg: string | null
 }
 
 interface SplitRequest {
@@ -128,6 +135,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
     const customActionsTargetPane = (customActionsTargetPaneId && panes.find((pane) => pane.id === customActionsTargetPaneId)) || activePane
     const customActionsTargetTitle = customActionsTargetPane ? formatWorkspaceTarget(customActionsTargetPane.target) : activeTargetTitle
     const activePaneStatus = (activePane && paneStatuses[activePane.id]) ?? { status: 'connecting' as Status, statusMsg: null }
+    const workspaceSessionLights = getWorkspaceSessionLights(panes, paneStatuses)
     const paneIdsKey = panes.map((pane) => pane.id).join('\n')
     const paneTargetsKey = panes.map((pane) => targetKey(pane.target)).join('\n')
 
@@ -193,6 +201,13 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
         return () => stopAllCustomActionTimers()
     }, [])
 
+    useEffect(() => {
+        if (!activePane) return
+        markOpenSession(activePane.target, hostLabel(activePane.target.hostId))
+        clearTargetPaneSignals(activePane.target, ['outputChanged', 'timerTriggered'])
+        void markTargetRead(activePane.target)
+    }, [activePane?.id, activePane?.target.hostId, activePane?.target.sessionName])
+
     function registerPaneHandle(paneId: string, handle: TerminalPaneHandle | null) {
         if (handle) paneHandlesRef.current[paneId] = handle
         else delete paneHandlesRef.current[paneId]
@@ -205,6 +220,24 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
 
     function sendInputToPane(paneId: string, input: string): boolean {
         return paneHandlesRef.current[paneId]?.sendInput(input) ?? false
+    }
+
+    function activatePane(paneId: string) {
+        setActivePaneId(paneId)
+        const pane = panesRef.current.find((candidate) => candidate.id === paneId)
+        if (pane) {
+            markOpenSession(pane.target, hostLabel(pane.target.hostId))
+            clearTargetPaneSignals(pane.target, ['outputChanged', 'timerTriggered'])
+            void markTargetRead(pane.target)
+        }
+    }
+
+    function markTargetRead(target: SessionTarget) {
+        api.readTargetPaneActivity(target).then(() => {
+            markOpenSession(target, hostLabel(target.hostId))
+        }).catch(() => {
+            /* ignore mark-read failures */
+        })
     }
 
     function sendCustomActionToPane(paneId: string, action: CustomAction) {
@@ -300,6 +333,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
         }
         if (!sendInputToPane(runtime.paneId, runtime.payload)) return false
         runtime.sentCount += 1
+        markPaneSignals(runtime.paneId, { timerTriggered: true })
         syncCustomActionTimerViews()
         if (runtime.repeatCount && runtime.sentCount >= runtime.repeatCount) {
             stopCustomActionTimer(timerId)
@@ -455,7 +489,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
         setPaneStatuses((current) => {
             const previous = current[paneId]
             if (previous?.status === status && previous.statusMsg === statusMsg) return current
-            return { ...current, [paneId]: { status, statusMsg } }
+            return { ...current, [paneId]: { status, statusMsg, signals: previous?.signals } }
         })
     }
 
@@ -472,6 +506,44 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
             if (!previous || previous.statusMsg !== statusMsg) return current
             return { ...current, [paneId]: { ...previous, statusMsg: null } }
         })
+    }
+
+    function markPaneSignals(paneId: string, signals: PaneSignals) {
+        setPaneStatuses((current) => {
+            const previous = current[paneId] ?? { status: 'connecting' as Status, statusMsg: null }
+            return {
+                ...current,
+                [paneId]: {
+                    ...previous,
+                    signals: {
+                        ...previous.signals,
+                        ...signals,
+                        lastAt: Date.now()
+                    }
+                }
+            }
+        })
+    }
+
+    function clearPaneSignals(paneId: string, keys: Array<keyof PaneSignals>) {
+        setPaneStatuses((current) => {
+            const previous = current[paneId]
+            if (!previous?.signals) return current
+            const nextSignals = { ...previous.signals }
+            let changed = false
+            for (const key of keys) {
+                if (nextSignals[key] !== undefined) {
+                    delete nextSignals[key]
+                    changed = true
+                }
+            }
+            if (!changed) return current
+            return { ...current, [paneId]: { ...previous, signals: nextSignals } }
+        })
+    }
+
+    function clearTargetPaneSignals(target: SessionTarget, keys: Array<keyof PaneSignals>) {
+        setPaneStatuses((current) => clearTargetPaneSignalsState(panesRef.current, current, target, keys))
     }
 
     return (
@@ -496,10 +568,19 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
                         ← Back
                     </button>
                     <div className="min-w-0 justify-self-center">
-                        <MobileSessionSelect currentName={activeSessionName} currentHostId={activeTarget.hostId} onOpenSession={attachSessionToActive} />
+                        <MobileSessionSelect
+                            currentName={activeSessionName}
+                            currentHostId={activeTarget.hostId}
+                            onOpenSession={attachSessionToActive}
+                            sessionLights={workspaceSessionLights}
+                        />
                     </div>
                     <div className="flex items-center justify-end gap-1 text-xs">
-                        <StatusDot status={activePaneStatus.status} />
+                        <PaneStatusLight
+                            status={activePaneStatus.status}
+                            paneStatus={activePaneStatus}
+                            timers={customActionTimers.filter((timer) => timer.paneId === activePane?.id)}
+                        />
                         <span className="text-neutral-400">{activePaneStatus.status}</span>
                     </div>
                 </div>
@@ -517,7 +598,11 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
                     </span>
                     <div className="flex min-w-0 items-center justify-end gap-2 justify-self-end text-xs">
                         {panes.length > 1 && <span className="text-neutral-500">{panes.length} panes</span>}
-                        <StatusDot status={activePaneStatus.status} />
+                        <PaneStatusLight
+                            status={activePaneStatus.status}
+                            paneStatus={activePaneStatus}
+                            timers={customActionTimers.filter((timer) => timer.paneId === activePane?.id)}
+                        />
                         <span className="text-neutral-400">{activePaneStatus.status}</span>
                         {activePaneStatus.statusMsg && <span className="truncate text-red-400">· {activePaneStatus.statusMsg}</span>}
                     </div>
@@ -528,6 +613,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
                     currentName={activeSessionName}
                     currentHostId={activeTarget.hostId}
                     hidden={sidebarHidden}
+                    sessionLights={workspaceSessionLights}
                     onOpenSession={attachSessionToActive}
                     onToggleHidden={() => {
                         setSidebarHidden((hidden) => {
@@ -546,17 +632,19 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
                             canClose={panes.length > 1}
                             canSplit={panes.length < MAX_WORKSPACE_PANES}
                             splittingPaneId={splittingPaneId ?? splitRequest?.paneId ?? null}
-                            onActivate={setActivePaneId}
+                            onActivate={activatePane}
                             onSplit={openSplitChooser}
                             onClose={closePane}
                             onRatioChange={(splitId, ratio) => setWorkspace((current) => updateWorkspaceSplitRatio(current, splitId, ratio))}
                             onPaneStatus={updatePaneStatus}
                             registerPaneHandle={registerPaneHandle}
+                            paneStatuses={paneStatuses}
                             actions={customActions}
                             timers={customActionTimers}
                             onManageActions={openCustomActionsPanel}
                             onSendAction={sendCustomActionToPane}
                             onStopActionTimer={stopCustomActionTimer}
+                            onPaneSignals={markPaneSignals}
                         />
                     </div>
                     <MobileQuickKeys
@@ -626,11 +714,13 @@ function WorkspaceNodeView({
     onRatioChange,
     onPaneStatus,
     registerPaneHandle,
+    paneStatuses,
     actions,
     timers,
     onManageActions,
     onSendAction,
-    onStopActionTimer
+    onStopActionTimer,
+    onPaneSignals
 }: {
     node: WorkspaceNode
     activePaneId: string
@@ -643,11 +733,13 @@ function WorkspaceNodeView({
     onRatioChange: (splitId: string, ratio: number) => void
     onPaneStatus: (paneId: string, status: Status, statusMsg: string | null) => void
     registerPaneHandle: (paneId: string, handle: TerminalPaneHandle | null) => void
+    paneStatuses: Record<string, PaneStatus>
     actions: CustomAction[]
     timers: CustomActionTimerView[]
     onManageActions: (paneId: string) => void
     onSendAction: (paneId: string, action: CustomAction) => void
     onStopActionTimer: (timerId: string) => void
+    onPaneSignals: (paneId: string, signals: PaneSignals) => void
 }) {
     if (node.type === 'pane') {
         return (
@@ -663,11 +755,13 @@ function WorkspaceNodeView({
                 onClose={() => onClose(node.id)}
                 onSplit={(direction) => onSplit(node.id, direction)}
                 onStatus={(status, statusMsg) => onPaneStatus(node.id, status, statusMsg)}
+                paneStatus={paneStatuses[node.id]}
                 actions={actions}
                 timers={timers.filter((timer) => timer.paneId === node.id)}
                 onManageActions={() => onManageActions(node.id)}
                 onSendAction={(action) => onSendAction(node.id, action)}
                 onStopActionTimer={onStopActionTimer}
+                onSignal={(signals) => onPaneSignals(node.id, signals)}
             />
         )
     }
@@ -685,11 +779,13 @@ function WorkspaceNodeView({
             onRatioChange={onRatioChange}
             onPaneStatus={onPaneStatus}
             registerPaneHandle={registerPaneHandle}
+            paneStatuses={paneStatuses}
             actions={actions}
             timers={timers}
             onManageActions={onManageActions}
             onSendAction={onSendAction}
             onStopActionTimer={onStopActionTimer}
+            onPaneSignals={onPaneSignals}
         />
     )
 }
@@ -706,11 +802,13 @@ function WorkspaceSplitView({
     onRatioChange,
     onPaneStatus,
     registerPaneHandle,
+    paneStatuses,
     actions,
     timers,
     onManageActions,
     onSendAction,
-    onStopActionTimer
+    onStopActionTimer,
+    onPaneSignals
 }: {
     node: WorkspaceSplit
     activePaneId: string
@@ -723,11 +821,13 @@ function WorkspaceSplitView({
     onRatioChange: (splitId: string, ratio: number) => void
     onPaneStatus: (paneId: string, status: Status, statusMsg: string | null) => void
     registerPaneHandle: (paneId: string, handle: TerminalPaneHandle | null) => void
+    paneStatuses: Record<string, PaneStatus>
     actions: CustomAction[]
     timers: CustomActionTimerView[]
     onManageActions: (paneId: string) => void
     onSendAction: (paneId: string, action: CustomAction) => void
     onStopActionTimer: (timerId: string) => void
+    onPaneSignals: (paneId: string, signals: PaneSignals) => void
 }) {
     const containerRef = useRef<HTMLDivElement | null>(null)
     const isRow = node.direction === 'row'
@@ -773,11 +873,13 @@ function WorkspaceSplitView({
                     onRatioChange={onRatioChange}
                     onPaneStatus={onPaneStatus}
                     registerPaneHandle={registerPaneHandle}
+                    paneStatuses={paneStatuses}
                     actions={actions}
                     timers={timers}
                     onManageActions={onManageActions}
                     onSendAction={onSendAction}
                     onStopActionTimer={onStopActionTimer}
+                    onPaneSignals={onPaneSignals}
                 />
             </div>
             <button
@@ -801,11 +903,13 @@ function WorkspaceSplitView({
                     onRatioChange={onRatioChange}
                     onPaneStatus={onPaneStatus}
                     registerPaneHandle={registerPaneHandle}
+                    paneStatuses={paneStatuses}
                     actions={actions}
                     timers={timers}
                     onManageActions={onManageActions}
                     onSendAction={onSendAction}
                     onStopActionTimer={onStopActionTimer}
+                    onPaneSignals={onPaneSignals}
                 />
             </div>
         </div>
@@ -818,6 +922,7 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
     canClose: boolean
     canSplit: boolean
     splitting: boolean
+    paneStatus?: PaneStatus
     actions: CustomAction[]
     timers: CustomActionTimerView[]
     onFocus: () => void
@@ -827,12 +932,14 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
     onManageActions: () => void
     onSendAction: (action: CustomAction) => void
     onStopActionTimer: (timerId: string) => void
+    onSignal: (signals: PaneSignals) => void
 }>(function WorkspaceTerminalPane(
-    { pane, active, canClose, canSplit, splitting, actions, timers, onFocus, onClose, onSplit, onStatus, onManageActions, onSendAction, onStopActionTimer },
+    { pane, active, canClose, canSplit, splitting, paneStatus, actions, timers, onFocus, onClose, onSplit, onStatus, onManageActions, onSendAction, onStopActionTimer, onSignal },
     ref
 ) {
     const navigate = useNavigate()
     const wsRef = useRef<WebSocket | null>(null)
+    const activeRef = useRef(active)
     const inputSubRef = useRef<IDisposable | null>(null)
     const reconnectRef = useRef<{ timer: number | null; attempt: number; aborted: boolean }>({
         timer: null,
@@ -845,6 +952,10 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
     const onStatusRef = useRef(onStatus)
     const [status, setStatus] = useState<Status>('connecting')
     const [statusMsg, setStatusMsg] = useState<string | null>(null)
+
+    useEffect(() => {
+        activeRef.current = active
+    }, [active])
 
     useEffect(() => {
         onStatusRef.current = onStatus
@@ -992,8 +1103,10 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
                 const bytes = new Uint8Array(bin.length)
                 for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
                 term.write(bytes)
+                if (!activeRef.current) onSignal({ outputChanged: true })
             } else if (msg.type === 'exit') {
                 term.writeln(`\r\n\x1b[90m[pty exited, code=${msg.code ?? 'n/a'}]\x1b[0m`)
+                onSignal({ closed: true })
             } else if (msg.type === 'ready') {
                 term.writeln(`\x1b[90m[attached to ${msg.session}]\x1b[0m`)
             } else if (msg.type === 'error') {
@@ -1048,7 +1161,7 @@ const WorkspaceTerminalPane = forwardRef<TerminalPaneHandle, {
         >
             <div className="hidden min-h-8 items-center justify-between gap-2 border-b border-neutral-800 bg-neutral-900/80 px-2 text-xs md:flex">
                 <div className="flex min-w-0 items-center gap-2">
-                    <StatusDot status={status} />
+                    <PaneStatusLight status={status} paneStatus={paneStatus} timers={timers} />
                     <span className="truncate font-mono text-neutral-100">{formatWorkspaceTarget(pane.target)}</span>
                     {statusMsg && <span className="truncate text-red-400">· {statusMsg}</span>}
                 </div>
@@ -1479,16 +1592,23 @@ function scrollTextareaToTmuxPosition(textarea: HTMLTextAreaElement, scrollPosit
     textarea.scrollLeft = 0
 }
 
-function StatusDot({ status }: { status: Status }) {
-    const color =
-        status === 'open'
-            ? 'bg-emerald-400'
-            : status === 'connecting'
-              ? 'bg-amber-400 animate-pulse'
-              : status === 'error'
-                ? 'bg-red-500'
-                : 'bg-neutral-500'
-    return <span className={`inline-block h-2 w-2 rounded-full ${color}`} />
+function PaneStatusLight({
+    status,
+    paneStatus,
+    timers
+}: {
+    status: Status
+    paneStatus?: PaneStatus
+    timers: CustomActionTimerView[]
+}) {
+    const light = getPaneStatusLight({ status, signals: paneStatus?.signals, timerActive: timers.length > 0 })
+    return (
+        <span
+            className={`inline-block h-1 w-1 shrink-0 rounded-full ${light.colorClass}`}
+            title={light.title}
+            aria-label={light.title}
+        />
+    )
 }
 
 function loadInitialWorkspace(target: SessionTarget): WorkspaceNode {
@@ -1509,10 +1629,6 @@ function loadInitialWorkspace(target: SessionTarget): WorkspaceNode {
 function findWorkspacePaneSession(workspace: WorkspaceNode, paneId: string): string | null {
     if (workspace.type === 'pane') return workspace.id === paneId ? workspace.target.sessionName : null
     return findWorkspacePaneSession(workspace.first, paneId) ?? findWorkspacePaneSession(workspace.second, paneId)
-}
-
-function targetKey(target: SessionTarget): string {
-    return `${target.hostId}\n${target.sessionName}`
 }
 
 function createCustomActionTimerId(): string {

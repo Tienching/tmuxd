@@ -10,7 +10,6 @@
  */
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { readFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 const execFileP = promisify(execFile)

@@ -3,7 +3,20 @@ import type { Duplex } from 'node:stream'
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { WebSocket, WebSocketServer } from 'ws'
 import { z } from 'zod'
-import { LOCAL_HOST_ID, hostIdSchema, sessionNameSchema, type HostCapability, type HostInfo, type TargetSession, type TmuxSession } from '@tmuxd/shared'
+import {
+    LOCAL_HOST_ID,
+    hostIdSchema,
+    sessionNameSchema,
+    sessionTargetNameSchema,
+    tmuxKeySchema,
+    tmuxPaneTargetSchema,
+    type HostCapability,
+    type HostInfo,
+    type TargetSession,
+    type TmuxPane,
+    type TmuxPaneCapture,
+    type TmuxSession
+} from '@tmuxd/shared'
 import { agentClientMessageSchema, type AgentClientMessage, type AgentHelloMessage, type AgentServerMessage } from './agentProtocol.js'
 import type { TmuxCapture } from './tmux.js'
 
@@ -12,8 +25,22 @@ const HEARTBEAT_MS = 15_000
 const HELLO_TIMEOUT_MS = 5_000
 const REQUEST_TIMEOUT_MS = 10_000
 const STREAM_READY_TIMEOUT_MS = 10_000
-const MAX_AGENT_PAYLOAD = 512 * 1024
-const DEFAULT_CAPABILITIES: HostCapability[] = ['list', 'create', 'kill', 'capture', 'attach']
+const MAX_AGENT_PAYLOAD = 24 * 1024 * 1024
+const MAX_REMOTE_SESSION_CAPTURE_BYTES = 16 * 1024 * 1024
+const MAX_REMOTE_PANE_CAPTURE_BYTES = 384 * 1024
+const MAX_REMOTE_PANES = 1024
+const MAX_REMOTE_STRING = 4096
+const DEFAULT_CAPABILITIES: HostCapability[] = ['list', 'create', 'kill', 'capture', 'attach', 'panes', 'input']
+const tmuxResultStringSchema = z.string().min(1).max(2048)
+const tmuxOptionalStringSchema = z.string().max(MAX_REMOTE_STRING)
+const remoteSessionCaptureTextSchema = z.string().refine(
+    (value) => Buffer.byteLength(value, 'utf8') <= MAX_REMOTE_SESSION_CAPTURE_BYTES,
+    'capture text too large'
+)
+const remotePaneCaptureTextSchema = z.string().refine(
+    (value) => Buffer.byteLength(value, 'utf8') <= MAX_REMOTE_PANE_CAPTURE_BYTES,
+    'pane capture text too large'
+)
 
 export interface AgentTokenBinding {
     /**
@@ -24,20 +51,61 @@ export interface AgentTokenBinding {
     token: string
 }
 
-const tmuxSessionSchema = z.object({
-    name: sessionNameSchema,
-    windows: z.number().int().min(0),
-    attached: z.boolean(),
-    created: z.number().int().min(0),
-    activity: z.number().int().min(0)
-})
-const listSessionsResultSchema = z.object({ sessions: z.array(tmuxSessionSchema) })
+const tmuxSessionSchema = z
+    .object({
+        name: tmuxResultStringSchema,
+        windows: z.number().int().min(0),
+        attached: z.boolean(),
+        attachedClients: z.number().int().min(0).optional(),
+        created: z.number().int().min(0),
+        activity: z.number().int().min(0)
+    })
+    .transform((session) => ({
+        ...session,
+        attachedClients: session.attachedClients ?? (session.attached ? 1 : 0)
+    }))
+const listSessionsResultSchema = z.object({ sessions: z.array(tmuxSessionSchema).max(MAX_REMOTE_PANES) })
+const tmuxPaneSchema = z
+    .object({
+        target: tmuxResultStringSchema,
+        sessionName: tmuxResultStringSchema,
+        windowIndex: z.number().int().min(0),
+        windowName: tmuxOptionalStringSchema,
+        windowActive: z.boolean(),
+        paneIndex: z.number().int().min(0),
+        paneId: tmuxResultStringSchema.max(32),
+        paneActive: z.boolean(),
+        paneDead: z.boolean(),
+        currentCommand: tmuxOptionalStringSchema,
+        currentPath: tmuxOptionalStringSchema,
+        title: tmuxOptionalStringSchema,
+        width: z.number().int().min(0),
+        height: z.number().int().min(0),
+        paneInMode: z.boolean(),
+        scrollPosition: z.number().int().min(0),
+        historySize: z.number().int().min(0),
+        sessionAttached: z.boolean().optional().default(false),
+        sessionAttachedClients: z.number().int().min(0).optional(),
+        sessionActivity: z.number().int().min(0).optional().default(0),
+        windowActivity: z.number().int().min(0).optional().default(0)
+    })
+    .transform((pane) => ({
+        ...pane,
+        sessionAttachedClients: pane.sessionAttachedClients ?? (pane.sessionAttached ? 1 : 0)
+    }))
+const listPanesResultSchema = z.object({ panes: z.array(tmuxPaneSchema).max(MAX_REMOTE_PANES) })
 const captureResultSchema = z.object({
-    text: z.string(),
+    text: remoteSessionCaptureTextSchema,
     paneInMode: z.boolean(),
     scrollPosition: z.number().int().min(0),
     historySize: z.number().int().min(0),
     paneHeight: z.number().int().min(0)
+})
+const paneCaptureResultSchema = captureResultSchema.extend({
+    text: remotePaneCaptureTextSchema,
+    target: tmuxPaneTargetSchema,
+    truncated: z.boolean(),
+    maxBytes: z.number().int().min(1024).max(MAX_REMOTE_PANE_CAPTURE_BYTES)
 })
 
 export interface RemoteStreamBridge {
@@ -116,22 +184,58 @@ export class AgentRegistry {
     async killSession(hostId: string, name: string): Promise<void> {
         const agent = this.requireAgent(hostId)
         agent.requireCapability('kill')
-        const safe = sessionNameSchema.parse(name)
+        const safe = sessionTargetNameSchema.parse(name)
         await agent.request('kill_session', { name: safe })
     }
 
     async captureSession(hostId: string, name: string): Promise<TmuxCapture> {
         const agent = this.requireAgent(hostId)
         agent.requireCapability('capture')
-        const safe = sessionNameSchema.parse(name)
+        const safe = sessionTargetNameSchema.parse(name)
         const body = await agent.request('capture_session', { name: safe })
         return captureResultSchema.parse(body)
+    }
+
+    async listPanes(hostId: string, session?: string): Promise<TmuxPane[]> {
+        const agent = this.requireAgent(hostId)
+        agent.requireCapability('panes')
+        const safeSession = session ? sessionTargetNameSchema.parse(session) : undefined
+        const body = await agent.request('list_panes', safeSession ? { session: safeSession } : {})
+        return listPanesResultSchema.parse(body).panes
+    }
+
+    async capturePane(hostId: string, target: string, lines?: number, maxBytes?: number): Promise<TmuxPaneCapture> {
+        const agent = this.requireAgent(hostId)
+        agent.requireCapability('panes')
+        const safe = tmuxPaneTargetSchema.parse(target)
+        const body = await agent.request('capture_pane', {
+            target: safe,
+            ...(lines ? { lines } : {}),
+            ...(maxBytes ? { maxBytes } : {})
+        })
+        return paneCaptureResultSchema.parse(body)
+    }
+
+    async sendText(hostId: string, target: string, text: string, enter?: boolean): Promise<void> {
+        const agent = this.requireAgent(hostId)
+        agent.requireCapability('input')
+        const safe = tmuxPaneTargetSchema.parse(target)
+        await agent.request('send_text', { target: safe, text, enter })
+    }
+
+    async sendKeys(hostId: string, target: string, keys: string[]): Promise<void> {
+        const agent = this.requireAgent(hostId)
+        agent.requireCapability('input')
+        const safe = tmuxPaneTargetSchema.parse(target)
+        const safeKeys = keys.map((key) => tmuxKeySchema.parse(key))
+        await agent.request('send_keys', { target: safe, keys: safeKeys })
     }
 
     async attach(hostId: string, session: string, cols: number, rows: number): Promise<RemoteStreamBridge> {
         const agent = this.requireAgent(hostId)
         agent.requireCapability('attach')
-        return agent.attach(session, cols, rows)
+        const safe = sessionTargetNameSchema.parse(session)
+        return agent.attach(safe, cols, rows)
     }
 
     close(): void {
@@ -242,9 +346,7 @@ class RemoteHostConnection {
         if (!this.host.capabilities.includes(capability)) throw new AgentError('capability_not_supported')
     }
 
-    async request(type: 'list_sessions', payload: object): Promise<unknown>
-    async request(type: 'create_session' | 'kill_session' | 'capture_session', payload: { name: string }): Promise<unknown>
-    async request(type: 'list_sessions' | 'create_session' | 'kill_session' | 'capture_session', payload: { name?: string }): Promise<unknown> {
+    async request(type: AgentServerMessage['type'], payload: Record<string, unknown>): Promise<unknown> {
         if (this.closed || this.ws.readyState !== this.ws.OPEN) throw new AgentError('host_not_found')
         const id = `${Date.now().toString(36)}-${++this.requestCounter}`
         const msg = { type, id, ...payload } as AgentServerMessage
@@ -266,7 +368,7 @@ class RemoteHostConnection {
 
     async attach(session: string, cols: number, rows: number): Promise<RemoteStreamBridge> {
         if (this.closed || this.ws.readyState !== this.ws.OPEN) throw new AgentError('host_not_found')
-        const safe = sessionNameSchema.parse(session)
+        const safe = sessionTargetNameSchema.parse(session)
         const streamId = randomUUID()
         const stream = new RemoteStream(this, streamId, safe, cols, rows)
         this.streams.set(streamId, stream)

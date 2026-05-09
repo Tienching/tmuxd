@@ -6,28 +6,37 @@ import { api } from '../api/client'
 import { listHostSessionsData } from '../hosts/sessionData'
 import {
     listOpenSessions,
+    markOpenSession,
     removeOpenSession,
     resolveOpenSessionHostNames,
     subscribeOpenSessions,
     type OpenSession
 } from '../session/openSessions'
 import { createSessionWithOptionalName } from '../session/createSession'
+import { isSessionActivityUnread } from '../session/statusLights'
 
 const SIDEBAR_HIDDEN_KEY = 'tmuxd.sidebarHidden'
 type HostOption = Pick<HostInfo, 'id' | 'name'>
+
+export interface SessionLightOverride {
+    unread?: boolean
+    closed?: boolean
+}
 
 export function OpenSessionsSidebar({
     currentName,
     currentHostId = LOCAL_HOST_ID,
     hidden,
     onToggleHidden,
-    onOpenSession
+    onOpenSession,
+    sessionLights
 }: {
     currentName: string
     currentHostId?: string
     hidden: boolean
     onToggleHidden: () => void
     onOpenSession?: (target: SessionTarget) => void
+    sessionLights?: Record<string, SessionLightOverride>
 }) {
     const navigate = useNavigate()
     const queryClient = useQueryClient()
@@ -46,6 +55,7 @@ export function OpenSessionsSidebar({
     }, [])
 
     const openSession = (target: SessionTarget) => {
+        markOpenSession(target, data?.hosts.find((host) => host.id === target.hostId)?.name ?? hostLabel(target.hostId))
         if (onOpenSession) {
             onOpenSession(target)
             return
@@ -62,6 +72,7 @@ export function OpenSessionsSidebar({
     }, [creatableHosts, newHostId])
 
     const liveKeys = data ? new Set(data.sessions.map(targetSessionKey)) : null
+    const liveSessionByKey = new Map((data?.sessions ?? []).map((session) => [targetSessionKey(session), session]))
     const visibleOpenedSessions = liveKeys ? sessions.filter((s) => liveKeys.has(openSessionKey(s))) : sessions
     const resolvedOpenedSessions = resolveOpenSessionHostNames(visibleOpenedSessions, data?.sessions, data?.hosts)
     const openedGroups = groupedOpenSessions(resolvedOpenedSessions)
@@ -145,6 +156,10 @@ export function OpenSessionsSidebar({
                     >
                         {group.sessions.map((s) => {
                             const active = s.name === currentName && s.hostId === currentHostId
+                            const key = openSessionKey(s)
+                            const liveSession = liveSessionByKey.get(key)
+                            const light = sessionLights?.[key]
+                            const unread = Boolean(light?.unread || isSessionActivityUnread(liveSession, s.lastOpenedAt))
                             return (
                                 <div
                                     key={`${s.hostId}:${s.name}`}
@@ -159,7 +174,10 @@ export function OpenSessionsSidebar({
                                         aria-current={active ? 'page' : undefined}
                                         onClick={() => openSession(openSessionTarget(s))}
                                     >
-                                        <span className="block truncate font-mono">{s.name}</span>
+                                        <span className="flex min-w-0 items-center gap-1">
+                                            <SessionStatusLight session={liveSession} unread={unread} closed={Boolean(light?.closed)} />
+                                            <span className="truncate font-mono">{s.name}</span>
+                                        </span>
                                     </button>
                                     <button
                                         type="button"
@@ -213,11 +231,13 @@ export function OpenSessionsSidebar({
 export function MobileSessionSelect({
     currentName,
     currentHostId = LOCAL_HOST_ID,
-    onOpenSession
+    onOpenSession,
+    sessionLights
 }: {
     currentName: string
     currentHostId?: string
     onOpenSession?: (target: SessionTarget) => void
+    sessionLights?: Record<string, SessionLightOverride>
 }) {
     const navigate = useNavigate()
     const queryClient = useQueryClient()
@@ -248,6 +268,7 @@ export function MobileSessionSelect({
     }, [creatableHosts, newHostId])
 
     const liveKeys = data ? new Set(data.sessions.map(targetSessionKey)) : null
+    const liveSessionByKey = new Map((data?.sessions ?? []).map((session) => [targetSessionKey(session), session]))
     const visibleOpenedSessions = liveKeys ? sessions.filter((s) => liveKeys.has(openSessionKey(s))) : sessions
     const resolvedOpenedSessions = resolveOpenSessionHostNames(visibleOpenedSessions, data?.sessions, data?.hosts)
     const openedGroups = groupedOpenSessions(resolvedOpenedSessions)
@@ -264,6 +285,7 @@ export function MobileSessionSelect({
 
     const attachSession = (target: SessionTarget) => {
         setMenuOpen(false)
+        markOpenSession(target, data?.hosts.find((host) => host.id === target.hostId)?.name ?? hostLabel(target.hostId))
         if (onOpenSession) {
             onOpenSession(target)
             return
@@ -356,33 +378,41 @@ export function MobileSessionSelect({
                                         countLabel={formatSessionCount(group.sessions.length, hostTotals.get(group.hostId) ?? group.sessions.length)}
                                         mobile
                                     >
-                                        {group.sessions.map((s) => (
-                                            <div
-                                                key={`opened-mobile-${s.hostId}-${s.name}`}
-                                                className={`flex min-w-0 items-center gap-1 rounded-md border ${
-                                                    s.name === currentName && s.hostId === currentHostId
-                                                        ? 'border-neutral-500 bg-neutral-800'
-                                                        : 'border-neutral-800 bg-neutral-900/60'
-                                                }`}
-                                            >
-                                                <button
-                                                    type="button"
-                                                    className="min-w-0 flex-1 px-2 py-2 text-left text-xs text-neutral-100"
-                                                    aria-current={s.name === currentName && s.hostId === currentHostId ? 'page' : undefined}
-                                                    onClick={() => attachSession(openSessionTarget(s))}
+                                        {group.sessions.map((s) => {
+                                            const active = s.name === currentName && s.hostId === currentHostId
+                                            const key = openSessionKey(s)
+                                            const liveSession = liveSessionByKey.get(key)
+                                            const light = sessionLights?.[key]
+                                            const unread = Boolean(light?.unread || isSessionActivityUnread(liveSession, s.lastOpenedAt))
+                                            return (
+                                                <div
+                                                    key={`opened-mobile-${s.hostId}-${s.name}`}
+                                                    className={`flex min-w-0 items-center gap-1 rounded-md border ${
+                                                        active ? 'border-neutral-500 bg-neutral-800' : 'border-neutral-800 bg-neutral-900/60'
+                                                    }`}
                                                 >
-                                                    <span className="block truncate font-mono">{s.name}</span>
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    className="px-3 py-2 text-xs text-neutral-500 active:bg-neutral-800 active:text-neutral-100"
-                                                    aria-label={`Remove ${s.name} from opened sessions`}
-                                                    onClick={() => removeOpenSession({ hostId: s.hostId, sessionName: s.name })}
-                                                >
-                                                    ×
-                                                </button>
-                                            </div>
-                                        ))}
+                                                    <button
+                                                        type="button"
+                                                        className="min-w-0 flex-1 px-2 py-2 text-left text-xs text-neutral-100"
+                                                        aria-current={active ? 'page' : undefined}
+                                                        onClick={() => attachSession(openSessionTarget(s))}
+                                                    >
+                                                        <span className="flex min-w-0 items-center gap-1">
+                                                            <SessionStatusLight session={liveSession} unread={unread} closed={Boolean(light?.closed)} />
+                                                            <span className="truncate font-mono">{s.name}</span>
+                                                        </span>
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        className="px-3 py-2 text-xs text-neutral-500 active:bg-neutral-800 active:text-neutral-100"
+                                                        aria-label={`Remove ${s.name} from opened sessions`}
+                                                        onClick={() => removeOpenSession({ hostId: s.hostId, sessionName: s.name })}
+                                                    >
+                                                        ×
+                                                    </button>
+                                                </div>
+                                            )
+                                        })}
                                     </SessionGroup>
                                 ))}
                             </>
@@ -496,11 +526,14 @@ function NotOpenedSessionRow({
         >
             <button
                 type="button"
-                className="min-w-0 flex-1 truncate px-2 py-2 text-left font-mono text-xs text-neutral-100"
+                className="min-w-0 flex-1 px-2 py-2 text-left text-xs text-neutral-100"
                 aria-current={active ? 'page' : undefined}
                 onClick={onClick}
             >
-                {session.name}
+                <span className="flex min-w-0 items-center gap-1">
+                    <SessionStatusLight session={session} unread={false} />
+                    <span className="truncate font-mono">{session.name}</span>
+                </span>
             </button>
             {canKill && (
                 <button
@@ -516,6 +549,12 @@ function NotOpenedSessionRow({
             )}
         </div>
     )
+}
+
+function SessionStatusLight({ session, unread, closed = false }: { session?: TargetSession; unread: boolean; closed?: boolean }) {
+    const color = closed ? 'bg-red-500' : unread ? 'bg-amber-400' : session ? 'bg-emerald-400' : 'bg-neutral-500'
+    const title = closed ? 'Closed or error' : unread ? 'Unread tmux activity' : session ? 'No unread activity' : 'Unknown'
+    return <span className={`inline-block h-1 w-1 shrink-0 rounded-full ${color}`} title={title} aria-label={title} />
 }
 
 function NewSessionForm({

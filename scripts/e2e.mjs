@@ -143,6 +143,23 @@ async function waitForFrame(frames, predicate, maxMs = 5000) {
     throw new Error('timeout waiting for frame')
 }
 
+function waitForClose(ws, maxMs = 5000) {
+    return new Promise((resolve, reject) => {
+        const to = setTimeout(() => {
+            ws.close()
+            reject(new Error('timeout waiting for close'))
+        }, maxMs)
+        ws.once('close', (code, reason) => {
+            clearTimeout(to)
+            resolve({ code, reason: reason.toString('utf8') })
+        })
+        ws.once('error', (err) => {
+            clearTimeout(to)
+            reject(err)
+        })
+    })
+}
+
 
 async function waitForHost(hostId, token, maxMs = 10000) {
     const deadline = Date.now() + maxMs
@@ -152,6 +169,16 @@ async function waitForHost(hostId, token, maxMs = 10000) {
         await sleep(150)
     }
     throw new Error(`host ${hostId} did not connect in time`)
+}
+
+async function waitForHostGone(hostId, token, maxMs = 5000) {
+    const deadline = Date.now() + maxMs
+    while (Date.now() < deadline) {
+        const r = await http('/api/hosts', { headers: { authorization: `Bearer ${token}` } })
+        if (r.status === 200 && !r.body?.hosts?.some((h) => h.id === hostId)) return true
+        await sleep(100)
+    }
+    throw new Error(`host ${hostId} did not disconnect in time`)
 }
 
 function agentHelloOnce(hostId, token) {
@@ -180,6 +207,43 @@ function agentHelloOnce(hostId, token) {
         ws.on('unexpected-response', (_req, res) => {
             clearTimeout(to)
             reject(new Error('agent ws http ' + res.statusCode))
+        })
+        ws.on('error', (err) => {
+            clearTimeout(to)
+            reject(err)
+        })
+    })
+}
+
+function connectLegacyAgent(hostId, token) {
+    return new Promise((resolve, reject) => {
+        const ws = new WebSocket(`ws://${HOST}:${PORT}/agent/connect`, {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        const to = setTimeout(() => {
+            ws.close()
+            reject(new Error('legacy agent hello timeout'))
+        }, 5000)
+        ws.on('open', () => {
+            ws.send(
+                JSON.stringify({
+                    type: 'hello',
+                    id: hostId,
+                    name: 'Legacy E2E Agent'
+                    // No capabilities field: this simulates a pre-pane-API agent.
+                })
+            )
+        })
+        ws.on('message', (raw) => {
+            const msg = JSON.parse(raw.toString('utf8'))
+            if (msg.type === 'hello_ack') {
+                clearTimeout(to)
+                resolve(ws)
+            }
+        })
+        ws.on('unexpected-response', (_req, res) => {
+            clearTimeout(to)
+            reject(new Error('legacy agent ws http ' + res.statusCode))
         })
         ws.on('error', (err) => {
             clearTimeout(to)
@@ -388,6 +452,14 @@ async function main() {
         }
     })
 
+    await check('ws: missing session attach does not create an empty tmux session', async () => {
+        const missing = `tmuxd-e2e-missing-${Date.now()}`
+        await killIfPresent(missing)
+        const handle = await wsConnect(`ws://${HOST}:${PORT}/ws/${missing}?token=${encodeURIComponent(token)}&cols=80&rows=24`)
+        const closed = await waitForClose(handle.ws)
+        return closed.code === 1011 && closed.reason === 'attach_failed' && !(await tmuxHasSession(missing))
+    })
+
     await check('ws-ticket: missing target → 400', async () => {
         const r = await http('/api/ws-ticket', {
             method: 'POST',
@@ -495,6 +567,199 @@ async function main() {
         return r.status === 200 && typeof r.body?.text === 'string' && r.body.text.includes('tmuxd-roundtrip-ok')
     })
 
+    let localPaneId = null
+    await check('agent-api: local pane list includes host metadata', async () => {
+        const r = await http(`/api/hosts/local/panes?session=${encodeURIComponent(TEST_SESSION)}`, {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        if (r.status !== 200) return false
+        const pane = r.body?.panes?.find((p) => p.sessionName === TEST_SESSION && p.hostId === 'local' && p.target === `${TEST_SESSION}:0.0`)
+        localPaneId = pane?.paneId ?? null
+        return typeof localPaneId === 'string' && /^%[0-9]+$/.test(localPaneId)
+    })
+
+    await check('agent-api: local session pane helper works', async () => {
+        const r = await http(`/api/sessions/${encodeURIComponent(TEST_SESSION)}/panes`, {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        return r.status === 200 && r.body?.panes?.some((p) => p.sessionName === TEST_SESSION)
+    })
+
+    await check('agent-api: host-aware local session pane helper matches local helper', async () => {
+        const r = await http(`/api/hosts/local/sessions/${encodeURIComponent(TEST_SESSION)}/panes`, {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        return r.status === 200 && r.body?.panes?.some((p) => p.sessionName === TEST_SESSION && p.hostId === 'local')
+    })
+
+    await check('agent-api: unknown local pane session returns 404', async () => {
+        const r = await http('/api/hosts/local/panes?session=tmuxd-e2e-missing-session', {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        return r.status === 404 && r.body?.error === 'session_not_found'
+    })
+
+    await check('agent-api: local pane-id target capture works', async () => {
+        if (!localPaneId) return false
+        const r = await http(`/api/hosts/local/panes/${encodeURIComponent(localPaneId)}/capture?lines=40`, {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        return r.status === 200 && r.body?.target === localPaneId && typeof r.body?.text === 'string'
+    })
+
+    await check('agent-api: local input endpoint writes to pane', async () => {
+        const marker = 'tmuxd-agent-api-input-ok'
+        const r = await http(`/api/hosts/local/panes/${encodeURIComponent(TEST_SESSION)}/input`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ text: `printf "${marker}\\n"`, enter: true })
+        })
+        if (r.status !== 200 || r.body?.ok !== true) return false
+        await sleep(300)
+        const capture = await http(`/api/hosts/local/panes/${encodeURIComponent(`${TEST_SESSION}:0.0`)}/capture?lines=80`, {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        return capture.status === 200 && capture.body?.text?.includes(marker)
+    })
+
+    await check('agent-api: key endpoint rejects option-like keys', async () => {
+        const r = await http(`/api/hosts/local/panes/${encodeURIComponent(TEST_SESSION)}/keys`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ keys: ['-t', 'other', 'Enter'] })
+        })
+        return r.status === 400 && r.body?.error === 'invalid_body'
+    })
+
+    await check('agent-api: pane status marks content changes between polls', async () => {
+        const target = `${TEST_SESSION}:0.0`
+        const first = await http(`/api/hosts/local/panes/${encodeURIComponent(target)}/status?lines=80&maxBytes=4096`, {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        if (first.status !== 200 || typeof first.body?.activity?.seq !== 'number' || first.body?.activity?.light !== 'green') return false
+        const marker = `tmuxd-pane-activity-${Date.now()}`
+        const write = await http(`/api/hosts/local/panes/${encodeURIComponent(TEST_SESSION)}/input`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ text: `printf "${marker}\\n"`, enter: true })
+        })
+        if (write.status !== 200) return false
+        await sleep(300)
+        const second = await http(`/api/hosts/local/panes/${encodeURIComponent(target)}/status?lines=80&maxBytes=4096`, {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        if (second.status !== 200 || second.body?.activity?.unread !== true || second.body?.activity?.light !== 'yellow') return false
+        const read = await http(`/api/hosts/local/panes/${encodeURIComponent(target)}/activity/read`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${token}` }
+        })
+        return (
+            second.body?.activity?.seq > (first.body?.activity?.seq ?? -1) &&
+            second.body?.activity?.reason === 'output' &&
+            read.status === 200 &&
+            read.body?.activity?.unread === false &&
+            read.body?.activity?.light === 'green'
+        )
+    })
+
+    await check('agent-api: pane capture reports UTF-8-safe truncation', async () => {
+        const marker = 'tmuxd-long-output'
+        const write = await http(`/api/hosts/local/panes/${encodeURIComponent(TEST_SESSION)}/input`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ text: `printf "${marker}-%05000d\\n" 0`, enter: true })
+        })
+        if (write.status !== 200) return false
+        await sleep(300)
+        const capture = await http(`/api/hosts/local/panes/${encodeURIComponent(`${TEST_SESSION}:0.0`)}/capture?lines=80&maxBytes=1024`, {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        return (
+            capture.status === 200 &&
+            capture.body?.truncated === true &&
+            capture.body?.maxBytes === 1024 &&
+            Buffer.byteLength(capture.body?.text ?? '', 'utf8') <= 1024
+        )
+    })
+
+    await check('agent-api: pane status detects permission prompt', async () => {
+        const write = await http(`/api/hosts/local/panes/${encodeURIComponent(TEST_SESSION)}/input`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ text: 'printf "Do you want to proceed? Yes/No\\n"', enter: true })
+        })
+        if (write.status !== 200) return false
+        await sleep(300)
+        const status = await http(`/api/hosts/local/panes/${encodeURIComponent(`${TEST_SESSION}:0.0`)}/status?lines=80&maxBytes=4096`, {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        return status.status === 200 && status.body?.state === 'permission_prompt' && status.body?.signals?.includes('yes_no_prompt')
+    })
+
+    await check('agent-api: snapshot aggregates hosts, sessions, panes, and optional status', async () => {
+        const r = await http('/api/agent/snapshot?capture=1&captureLimit=1&lines=40&maxBytes=4096', {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        return (
+            r.status === 200 &&
+            r.body?.hosts?.some((h) => h.id === 'local') &&
+            r.body?.sessions?.some((s) => s.name === TEST_SESSION && s.hostId === 'local') &&
+            r.body?.panes?.some((p) => p.sessionName === TEST_SESSION && p.hostId === 'local') &&
+            Array.isArray(r.body?.statuses) &&
+            Array.isArray(r.body?.errors)
+        )
+    })
+
+    let actionId = null
+    await check('actions: invalid action bodies return bad request', async () => {
+        const emptyLabel = await http('/api/actions', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ label: '', kind: 'send-text', payload: 'noop' })
+        })
+        const tooBig = await http('/api/actions', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ label: 'Too big', kind: 'send-text', payload: 'x'.repeat(64 * 1024 + 1) })
+        })
+        return (
+            emptyLabel.status === 400 &&
+            emptyLabel.body?.error === 'invalid_body' &&
+            tooBig.status === 400 &&
+            tooBig.body?.error === 'invalid_body'
+        )
+    })
+
+    await check('actions: create/list/run/delete action against local pane', async () => {
+        const marker = 'tmuxd-action-api-ok'
+        const created = await http('/api/actions', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ label: 'E2E marker', kind: 'send-text', payload: `printf "${marker}\\n"`, enter: true })
+        })
+        if (created.status !== 201 || typeof created.body?.action?.id !== 'string') return false
+        actionId = created.body.action.id
+        const listed = await http('/api/actions', { headers: { authorization: `Bearer ${token}` } })
+        if (listed.status !== 200 || !listed.body?.actions?.some((a) => a.id === actionId)) return false
+        const run = await http(`/api/hosts/local/panes/${encodeURIComponent(TEST_SESSION)}/actions/${encodeURIComponent(actionId)}/run`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${token}` }
+        })
+        if (run.status !== 200 || run.body?.ok !== true || typeof run.body?.runId !== 'string') return false
+        await sleep(300)
+        const capture = await http(`/api/hosts/local/panes/${encodeURIComponent(`${TEST_SESSION}:0.0`)}/capture?lines=120`, {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        if (capture.status !== 200 || !capture.body?.text?.includes(marker)) return false
+        const history = await http('/api/actions/history?limit=20', { headers: { authorization: `Bearer ${token}` } })
+        if (history.status !== 200 || !history.body?.runs?.some((run) => run.actionId === actionId && run.ok === true)) return false
+        const deleted = await http(`/api/actions/${encodeURIComponent(actionId)}`, {
+            method: 'DELETE',
+            headers: { authorization: `Bearer ${token}` }
+        })
+        return deleted.status === 204
+    })
+
     await check('ws: resize frame accepted', async () => {
         ws.send(JSON.stringify({ type: 'resize', cols: 120, rows: 40 }))
         // No explicit ack; a successful resize means the server didn't close us.
@@ -563,6 +828,64 @@ async function main() {
             })
         }
 
+        await check('agent: legacy no-capabilities host does not claim pane APIs', async () => {
+            const legacyWs = await connectLegacyAgent(AGENT_HOST, AGENT_TOKEN)
+            try {
+                await waitForHost(AGENT_HOST, token)
+                const hosts = await http('/api/hosts', { headers: { authorization: `Bearer ${token}` } })
+                const host = hosts.body?.hosts?.find((h) => h.id === AGENT_HOST)
+                if (!host || host.capabilities?.includes('panes') || host.capabilities?.includes('input')) return false
+                const panes = await http(`/api/hosts/${AGENT_HOST}/panes`, { headers: { authorization: `Bearer ${token}` } })
+                const capture = await http(`/api/hosts/${AGENT_HOST}/panes/main/capture`, { headers: { authorization: `Bearer ${token}` } })
+                const status = await http(`/api/hosts/${AGENT_HOST}/panes/main/status`, { headers: { authorization: `Bearer ${token}` } })
+                const input = await http(`/api/hosts/${AGENT_HOST}/panes/main/input`, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ text: 'noop' })
+                })
+                const keys = await http(`/api/hosts/${AGENT_HOST}/panes/main/keys`, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ keys: ['Enter'] })
+                })
+                const action = await http('/api/actions', {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ label: 'Legacy no-op', kind: 'send-text', payload: 'noop' })
+                })
+                const run =
+                    action.status === 201
+                        ? await http(`/api/hosts/${AGENT_HOST}/panes/main/actions/${encodeURIComponent(action.body.action.id)}/run`, {
+                              method: 'POST',
+                              headers: { authorization: `Bearer ${token}` }
+                          })
+                        : { status: 0, body: null }
+                if (action.body?.action?.id) {
+                    await http(`/api/actions/${encodeURIComponent(action.body.action.id)}`, {
+                        method: 'DELETE',
+                        headers: { authorization: `Bearer ${token}` }
+                    })
+                }
+                const snapshot = await http('/api/agent/snapshot?capture=1&captureLimit=8', {
+                    headers: { authorization: `Bearer ${token}` }
+                })
+                return (
+                    panes.status === 405 &&
+                    capture.status === 405 &&
+                    status.status === 405 &&
+                    input.status === 405 &&
+                    keys.status === 405 &&
+                    run.status === 405 &&
+                    panes.body?.error === 'capability_not_supported' &&
+                    snapshot.status === 200 &&
+                    snapshot.body?.errors?.some((err) => err.hostId === AGENT_HOST && err.operation === 'list_panes')
+                )
+            } finally {
+                legacyWs.close(1000, 'test')
+                await waitForHostGone(AGENT_HOST, token)
+            }
+        })
+
         await check('agent: outbound client connects to hub', async () => {
             agentProc = startAgentProcess(AGENT_HOST, AGENT_TOKEN)
             agentProc.on('exit', (code, signal) => {
@@ -577,6 +900,22 @@ async function main() {
             if (closed.code !== 1008 || !/host_already_connected/.test(closed.reason)) return false
             const r = await http('/api/hosts', { headers: { authorization: `Bearer ${token}` } })
             return r.status === 200 && r.body?.hosts?.some((h) => h.id === AGENT_HOST && h.status === 'online')
+        })
+
+        const WEIRD_REMOTE_SESSION = 'tmuxd e2e remote weird'
+        await killIfPresent(WEIRD_REMOTE_SESSION)
+        await check('agent: remote listing tolerates externally-created unconstrained tmux session names', async () => {
+            try {
+                await execFileP('tmux', ['new-session', '-d', '-s', WEIRD_REMOTE_SESSION])
+                const sessions = await http(`/api/hosts/${AGENT_HOST}/sessions`, { headers: { authorization: `Bearer ${token}` } })
+                if (sessions.status !== 200 || !sessions.body?.sessions?.some((s) => s.name === WEIRD_REMOTE_SESSION && s.hostId === AGENT_HOST)) {
+                    return false
+                }
+                const panes = await http(`/api/hosts/${AGENT_HOST}/panes`, { headers: { authorization: `Bearer ${token}` } })
+                return panes.status === 200 && panes.body?.panes?.some((p) => p.sessionName === WEIRD_REMOTE_SESSION && p.hostId === AGENT_HOST)
+            } finally {
+                await killIfPresent(WEIRD_REMOTE_SESSION)
+            }
         })
 
         await check('agent: create remote session', async () => {
@@ -633,6 +972,171 @@ async function main() {
             return r.status === 200 && typeof r.body?.text === 'string' && r.body.text.includes('tmuxd-agent-roundtrip-ok')
         })
 
+        await check('agent: remote full-session capture handles payloads above old 512 KiB agent frame cap', async () => {
+            remoteWs?.close(1000, 'large-capture-test')
+            await execFileP('tmux', ['set-option', '-t', AGENT_SESSION, 'history-limit', '20000'])
+            await execFileP('tmux', ['new-window', '-t', AGENT_SESSION, '-n', 'large-capture'])
+            const command = `python3 -c 'for i in range(1800): print("remote-capture-large-" + "R"*480)'`
+            await execFileP('tmux', ['send-keys', '-t', AGENT_SESSION, '-l', command])
+            await execFileP('tmux', ['send-keys', '-t', AGENT_SESSION, 'Enter'])
+            try {
+                const deadline = Date.now() + 8000
+                while (Date.now() < deadline) {
+                    await sleep(300)
+                    const r = await http(`/api/hosts/${AGENT_HOST}/sessions/${encodeURIComponent(AGENT_SESSION)}/capture`, {
+                        headers: { authorization: `Bearer ${token}` }
+                    })
+                    if (r.status === 200 && typeof r.body?.text === 'string' && Buffer.byteLength(r.body.text, 'utf8') > 512 * 1024) return true
+                }
+                return false
+            } finally {
+                await execFileP('tmux', ['select-window', '-t', `${AGENT_SESSION}:0`]).catch(() => undefined)
+            }
+        })
+
+        let remotePaneId = null
+        await check('agent-api: remote pane list is proxied through outbound agent', async () => {
+            const r = await http(`/api/hosts/${AGENT_HOST}/panes?session=${encodeURIComponent(AGENT_SESSION)}`, {
+                headers: { authorization: `Bearer ${token}` }
+            })
+            if (r.status !== 200) return false
+            const pane = r.body?.panes?.find((p) => p.sessionName === AGENT_SESSION && p.hostId === AGENT_HOST && p.target === `${AGENT_SESSION}:0.0`)
+            remotePaneId = pane?.paneId ?? null
+            return (
+                typeof remotePaneId === 'string' &&
+                /^%[0-9]+$/.test(remotePaneId) &&
+                typeof pane?.sessionAttachedClients === 'number' &&
+                typeof pane?.windowActivity === 'number'
+            )
+        })
+
+        await check('agent-api: host-aware remote session pane helper works', async () => {
+            const r = await http(`/api/hosts/${AGENT_HOST}/sessions/${encodeURIComponent(AGENT_SESSION)}/panes`, {
+                headers: { authorization: `Bearer ${token}` }
+            })
+            return r.status === 200 && r.body?.panes?.some((p) => p.sessionName === AGENT_SESSION && p.hostId === AGENT_HOST)
+        })
+
+        await check('agent-api: remote missing pane session and target return 404', async () => {
+            const missingPanes = await http(`/api/hosts/${AGENT_HOST}/panes?session=tmuxd-e2e-agent-missing`, {
+                headers: { authorization: `Bearer ${token}` }
+            })
+            const missingCapture = await http(`/api/hosts/${AGENT_HOST}/panes/tmuxd-e2e-agent-missing/capture`, {
+                headers: { authorization: `Bearer ${token}` }
+            })
+            const missingStatus = await http(`/api/hosts/${AGENT_HOST}/panes/tmuxd-e2e-agent-missing/status`, {
+                headers: { authorization: `Bearer ${token}` }
+            })
+            return (
+                missingPanes.status === 404 &&
+                missingCapture.status === 404 &&
+                missingStatus.status === 404 &&
+                missingPanes.body?.error === 'session_not_found' &&
+                missingCapture.body?.error === 'session_not_found' &&
+                missingStatus.body?.error === 'session_not_found'
+            )
+        })
+
+        await check('agent-api: remote pane-id target capture works', async () => {
+            if (!remotePaneId) return false
+            const r = await http(`/api/hosts/${AGENT_HOST}/panes/${encodeURIComponent(remotePaneId)}/capture?lines=80`, {
+                headers: { authorization: `Bearer ${token}` }
+            })
+            return r.status === 200 && r.body?.target === remotePaneId && typeof r.body?.text === 'string'
+        })
+
+        await check('agent-api: remote input endpoint is proxied through outbound agent', async () => {
+            const marker = 'tmuxd-remote-agent-api-input-ok'
+            const r = await http(`/api/hosts/${AGENT_HOST}/panes/${encodeURIComponent(AGENT_SESSION)}/input`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+                body: JSON.stringify({ text: `printf "${marker}\\n"`, enter: true })
+            })
+            if (r.status !== 200 || r.body?.ok !== true) return false
+            await sleep(300)
+            const capture = await http(`/api/hosts/${AGENT_HOST}/panes/${encodeURIComponent(`${AGENT_SESSION}:0.0`)}/capture?lines=120`, {
+                headers: { authorization: `Bearer ${token}` }
+            })
+            return capture.status === 200 && capture.body?.text?.includes(marker)
+        })
+
+        await check('agent-api: remote pane status marks content changes between polls', async () => {
+            const target = `${AGENT_SESSION}:0.0`
+            const first = await http(`/api/hosts/${AGENT_HOST}/panes/${encodeURIComponent(target)}/status?lines=120&maxBytes=4096`, {
+                headers: { authorization: `Bearer ${token}` }
+            })
+            if (first.status !== 200 || typeof first.body?.activity?.seq !== 'number' || first.body?.activity?.light !== 'green') return false
+            const marker = `tmuxd-remote-pane-activity-${Date.now()}`
+            const write = await http(`/api/hosts/${AGENT_HOST}/panes/${encodeURIComponent(AGENT_SESSION)}/input`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+                body: JSON.stringify({ text: `printf "${marker}\\n"`, enter: true })
+            })
+            if (write.status !== 200) return false
+            await sleep(300)
+            const second = await http(`/api/hosts/${AGENT_HOST}/panes/${encodeURIComponent(target)}/status?lines=120&maxBytes=4096`, {
+                headers: { authorization: `Bearer ${token}` }
+            })
+            if (second.status !== 200 || second.body?.activity?.unread !== true || second.body?.activity?.light !== 'yellow') return false
+            const read = await http(`/api/hosts/${AGENT_HOST}/panes/${encodeURIComponent(target)}/activity/read`, {
+                method: 'POST',
+                headers: { authorization: `Bearer ${token}` }
+            })
+            return (
+                second.body?.activity?.seq > (first.body?.activity?.seq ?? -1) &&
+                second.body?.activity?.reason === 'output' &&
+                read.status === 200 &&
+                read.body?.activity?.unread === false &&
+                read.body?.activity?.light === 'green'
+            )
+        })
+
+        await check('agent-api: remote pane capture supports maxBytes truncation', async () => {
+            const write = await http(`/api/hosts/${AGENT_HOST}/panes/${encodeURIComponent(AGENT_SESSION)}/input`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+                body: JSON.stringify({ text: 'printf "remote-long-%05000d\\n" 0', enter: true })
+            })
+            if (write.status !== 200) return false
+            await sleep(300)
+            const capture = await http(`/api/hosts/${AGENT_HOST}/panes/${encodeURIComponent(`${AGENT_SESSION}:0.0`)}/capture?lines=120&maxBytes=1024`, {
+                headers: { authorization: `Bearer ${token}` }
+            })
+            return (
+                capture.status === 200 &&
+                capture.body?.truncated === true &&
+                capture.body?.maxBytes === 1024 &&
+                Buffer.byteLength(capture.body?.text ?? '', 'utf8') <= 1024
+            )
+        })
+
+        await check('agent-api: remote pane status matches local classifier behavior', async () => {
+            const write = await http(`/api/hosts/${AGENT_HOST}/panes/${encodeURIComponent(AGENT_SESSION)}/input`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+                body: JSON.stringify({ text: 'printf "Do you want to proceed? Yes/No\\n"', enter: true })
+            })
+            if (write.status !== 200) return false
+            await sleep(300)
+            const status = await http(`/api/hosts/${AGENT_HOST}/panes/${encodeURIComponent(`${AGENT_SESSION}:0.0`)}/status?lines=120&maxBytes=4096`, {
+                headers: { authorization: `Bearer ${token}` }
+            })
+            return status.status === 200 && status.body?.state === 'permission_prompt' && status.body?.signals?.includes('yes_no_prompt')
+        })
+
+        await check('agent-api: snapshot includes remote host sessions panes and statuses', async () => {
+            const r = await http('/api/agent/snapshot?capture=1&captureLimit=16&lines=80&maxBytes=4096', {
+                headers: { authorization: `Bearer ${token}` }
+            })
+            return (
+                r.status === 200 &&
+                r.body?.hosts?.some((h) => h.id === AGENT_HOST) &&
+                r.body?.sessions?.some((s) => s.name === AGENT_SESSION && s.hostId === AGENT_HOST) &&
+                r.body?.panes?.some((p) => p.sessionName === AGENT_SESSION && p.hostId === AGENT_HOST) &&
+                r.body?.statuses?.some((s) => s.pane?.hostId === AGENT_HOST || s.capture?.target === `${AGENT_SESSION}:0.0`)
+            )
+        })
+
         await check('agent: remote delete session', async () => {
             remoteWs?.close(1000, 'test')
             const r = await http(`/api/hosts/${AGENT_HOST}/sessions/${encodeURIComponent(AGENT_SESSION)}`, {
@@ -663,6 +1167,13 @@ async function main() {
             headers: { authorization: `Bearer ${token}` }
         })
         return r.status === 400
+    })
+
+    await check('api: unknown route returns JSON 404 instead of SPA HTML', async () => {
+        const r = await http('/api/not-a-real-route', {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        return r.status === 404 && r.body?.error === 'not_found'
     })
 
     // ---- SPA fallback ----
