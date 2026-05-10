@@ -784,6 +784,7 @@ function useOpenedSessionStatuses(
 
     const statusByKey = new Map<string, TmuxPaneStatus>()
     statusQueries.forEach((query, index) => {
+        if (query.status !== 'success') return
         const status = query.data
         if (!status) return
         const key = openSessionKey(openedSessions[index]!)
