@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { LOCAL_HOST_ID, type HostInfo, type SessionTarget, type TargetSession } from '@tmuxd/shared'
+import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { LOCAL_HOST_ID, type HostInfo, type SessionTarget, type TargetSession, type TmuxPaneStatus } from '@tmuxd/shared'
 import { api } from '../api/client'
 import { listHostSessionsData } from '../hosts/sessionData'
 import {
@@ -16,6 +16,7 @@ import { createSessionWithOptionalName } from '../session/createSession'
 import { isSessionActivityUnread } from '../session/statusLights'
 
 const SIDEBAR_HIDDEN_KEY = 'tmuxd.sidebarHidden'
+const OPENED_SESSION_STATUS_POLL_MS = 5000
 type HostOption = Pick<HostInfo, 'id' | 'name'>
 
 export interface SessionLightOverride {
@@ -47,7 +48,7 @@ export function OpenSessionsSidebar({
     const { data, error, isLoading } = useQuery({
         queryKey: ['hostSessions'],
         queryFn: listHostSessionsData,
-        refetchInterval: 5000
+        refetchInterval: OPENED_SESSION_STATUS_POLL_MS
     })
 
     useEffect(() => {
@@ -75,6 +76,7 @@ export function OpenSessionsSidebar({
     const liveSessionByKey = new Map((data?.sessions ?? []).map((session) => [targetSessionKey(session), session]))
     const visibleOpenedSessions = liveKeys ? sessions.filter((s) => liveKeys.has(openSessionKey(s))) : sessions
     const resolvedOpenedSessions = resolveOpenSessionHostNames(visibleOpenedSessions, data?.sessions, data?.hosts)
+    const openedSessionStatuses = useOpenedSessionStatuses(data ? visibleOpenedSessions : [], { enabled: !hidden })
     const openedGroups = groupedOpenSessions(resolvedOpenedSessions)
     const openedKeys = new Set(visibleOpenedSessions.map(openSessionKey))
     const otherSessions = data?.sessions.filter((s) => !openedKeys.has(targetSessionKey(s))) ?? []
@@ -159,9 +161,15 @@ export function OpenSessionsSidebar({
                             const key = openSessionKey(s)
                             const liveSession = liveSessionByKey.get(key)
                             const light = sessionLights?.[key]
-                            const unread = Boolean(
-                                light?.unread || (!active && isSessionActivityUnread(liveSession, s.lastOpenedAt))
-                            )
+                            const status = openedSessionStatuses.get(key)
+                            const unread = isOpenedSessionUnread({
+                                active,
+                                light,
+                                status,
+                                liveSession,
+                                lastOpenedAt: s.lastOpenedAt
+                            })
+                            const closed = Boolean(light?.closed || status?.activity?.light === 'red')
                             return (
                                 <div
                                     key={`${s.hostId}:${s.name}`}
@@ -177,7 +185,7 @@ export function OpenSessionsSidebar({
                                         onClick={() => openSession(openSessionTarget(s))}
                                     >
                                         <span className="flex min-w-0 items-center gap-1">
-                                            <SessionStatusLight session={liveSession} unread={unread} closed={Boolean(light?.closed)} />
+                                            <SessionStatusLight session={liveSession} unread={unread} closed={closed} />
                                             <span className="truncate font-mono">{s.name}</span>
                                         </span>
                                     </button>
@@ -273,6 +281,7 @@ export function MobileSessionSelect({
     const liveSessionByKey = new Map((data?.sessions ?? []).map((session) => [targetSessionKey(session), session]))
     const visibleOpenedSessions = liveKeys ? sessions.filter((s) => liveKeys.has(openSessionKey(s))) : sessions
     const resolvedOpenedSessions = resolveOpenSessionHostNames(visibleOpenedSessions, data?.sessions, data?.hosts)
+    const openedSessionStatuses = useOpenedSessionStatuses(data ? visibleOpenedSessions : [], { enabled: menuOpen })
     const openedGroups = groupedOpenSessions(resolvedOpenedSessions)
     const openedKeys = new Set(visibleOpenedSessions.map(openSessionKey))
     const otherSessions = data?.sessions.filter((s) => !openedKeys.has(targetSessionKey(s))) ?? []
@@ -385,9 +394,15 @@ export function MobileSessionSelect({
                                             const key = openSessionKey(s)
                                             const liveSession = liveSessionByKey.get(key)
                                             const light = sessionLights?.[key]
-                                            const unread = Boolean(
-                                                light?.unread || (!active && isSessionActivityUnread(liveSession, s.lastOpenedAt))
-                                            )
+                                            const status = openedSessionStatuses.get(key)
+                                            const unread = isOpenedSessionUnread({
+                                                active,
+                                                light,
+                                                status,
+                                                liveSession,
+                                                lastOpenedAt: s.lastOpenedAt
+                                            })
+                                            const closed = Boolean(light?.closed || status?.activity?.light === 'red')
                                             return (
                                                 <div
                                                     key={`opened-mobile-${s.hostId}-${s.name}`}
@@ -402,7 +417,7 @@ export function MobileSessionSelect({
                                                         onClick={() => attachSession(openSessionTarget(s))}
                                                     >
                                                         <span className="flex min-w-0 items-center gap-1">
-                                                            <SessionStatusLight session={liveSession} unread={unread} closed={Boolean(light?.closed)} />
+                                                            <SessionStatusLight session={liveSession} unread={unread} closed={closed} />
                                                             <span className="truncate font-mono">{s.name}</span>
                                                         </span>
                                                     </button>
@@ -558,7 +573,7 @@ function NotOpenedSessionRow({
 function SessionStatusLight({ session, unread, closed = false }: { session?: TargetSession; unread: boolean; closed?: boolean }) {
     const color = closed ? 'bg-red-500' : unread ? 'bg-amber-400' : session ? 'bg-emerald-400' : 'bg-neutral-500'
     const title = closed ? 'Closed or error' : unread ? 'Unread tmux activity' : session ? 'No unread activity' : 'Unknown'
-    return <span className={`inline-block h-1 w-1 shrink-0 rounded-full ${color}`} title={title} aria-label={title} />
+    return <span className={`inline-block h-0.5 w-0.5 shrink-0 rounded-full ${color}`} title={title} aria-label={title} />
 }
 
 function NewSessionForm({
@@ -742,6 +757,52 @@ function groupedTargetSessions(sessions: TargetSession[]): Array<{ hostId: strin
 
 function hostLabel(hostId: string): string {
     return hostId === LOCAL_HOST_ID ? 'Local' : hostId
+}
+
+function useOpenedSessionStatuses(
+    openedSessions: OpenSession[],
+    options: {
+        enabled: boolean
+    } = { enabled: true }
+): Map<string, TmuxPaneStatus> {
+    const shouldPoll = options.enabled
+
+    const statusQueries = useQueries({
+        queries: openedSessions.map((session) => {
+            const target = openSessionTarget(session)
+            return {
+                queryKey: ['paneStatus', target.hostId, target.sessionName],
+                queryFn: () => api.getTargetPaneStatus(target),
+                enabled: shouldPoll,
+                refetchInterval: shouldPoll ? OPENED_SESSION_STATUS_POLL_MS : false,
+                staleTime: 0,
+                gcTime: 10_000,
+                retry: false
+            }
+        })
+    })
+
+    const statusByKey = new Map<string, TmuxPaneStatus>()
+    statusQueries.forEach((query, index) => {
+        const status = query.data
+        if (!status) return
+        const key = openSessionKey(openedSessions[index]!)
+        statusByKey.set(key, status)
+    })
+    return statusByKey
+}
+
+function isOpenedSessionUnread(input: {
+    active: boolean
+    light?: SessionLightOverride
+    status?: TmuxPaneStatus
+    liveSession?: TargetSession
+    lastOpenedAt: number
+}): boolean {
+    if (input.active) return false
+    if (input.light?.unread) return true
+    if (input.status?.activity !== undefined) return Boolean(input.status.activity.unread)
+    return isSessionActivityUnread(input.liveSession, input.lastOpenedAt)
 }
 
 async function invalidateSessionQueries(queryClient: ReturnType<typeof useQueryClient>, hostId: string): Promise<void> {

@@ -235,6 +235,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
     function markTargetRead(target: SessionTarget) {
         api.readTargetPaneActivity(target).then(() => {
             markOpenSession(target, hostLabel(target.hostId))
+            void queryClient.invalidateQueries({ queryKey: ['paneStatus', target.hostId, target.sessionName] })
         }).catch(() => {
             /* ignore mark-read failures */
         })

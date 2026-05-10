@@ -6,6 +6,7 @@ import {
     type SessionTarget,
     type TargetSession,
     type TargetPane,
+    type TmuxPaneStatus,
     type TmuxSession
 } from '@tmuxd/shared'
 import { getToken, notifyAuthRequired } from '../auth/tokenStore'
@@ -105,6 +106,12 @@ export const api = {
             {
                 method: 'POST'
             }
+        ),
+    getTargetPaneStatus: (target: SessionTarget, paneTarget?: string) =>
+        request<TmuxPaneStatus>(
+            `/api/hosts/${encodeURIComponent(target.hostId)}/panes/${encodeURIComponent(
+                paneTarget ?? target.sessionName
+            )}/status?lines=120&maxBytes=65536`
         ),
     createWsTicket: (target: SessionTarget) =>
         request<{ ticket: string; expiresAt: number }>('/api/ws-ticket', {

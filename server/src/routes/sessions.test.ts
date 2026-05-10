@@ -669,6 +669,23 @@ describe('tmuxd sessions api', { concurrency: 1 }, () => {
             const invalidBody = (await invalidLabelResponse.json()) as { error: string }
             assert.equal(invalidBody.error, 'invalid_body')
 
+            const tooBigPayload = 'a'.repeat(64 * 1024 + 1)
+            const tooBigPayloadResponse = await app.request('/api/actions', {
+                method: 'POST',
+                headers: {
+                    ...headers,
+                    'content-type': 'application/json'
+                },
+                body: JSON.stringify({
+                    label: 'Long',
+                    kind: 'send-text',
+                    payload: tooBigPayload
+                })
+            })
+            assert.equal(tooBigPayloadResponse.status, 400)
+            const tooBigPayloadBody = (await tooBigPayloadResponse.json()) as { error: string }
+            assert.equal(tooBigPayloadBody.error, 'invalid_body')
+
             const createTextResponse = await app.request('/api/actions', {
                 method: 'POST',
                 headers: {
