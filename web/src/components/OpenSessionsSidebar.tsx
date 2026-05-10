@@ -164,7 +164,8 @@ export function OpenSessionsSidebar({
                             const unread = isOpenedSessionUnread({
                                 active,
                                 light,
-                                status
+                                status,
+                                lastOpenedAt: s.lastOpenedAt
                             })
                             const closed = Boolean(light?.closed || status?.activity?.light === 'red')
                             return (
@@ -395,7 +396,8 @@ export function MobileSessionSelect({
                                             const unread = isOpenedSessionUnread({
                                                 active,
                                                 light,
-                                                status
+                                                status,
+                                                lastOpenedAt: s.lastOpenedAt
                                             })
                                             const closed = Boolean(light?.closed || status?.activity?.light === 'red')
                                             return (
@@ -792,10 +794,18 @@ export function isOpenedSessionUnread(input: {
     active: boolean
     light?: SessionLightOverride
     status?: TmuxPaneStatus
+    lastOpenedAt: number
 }): boolean {
     if (input.active) return false
-    if (input.light?.unread) return true
-    if (input.status?.activity !== undefined) return Boolean(input.status.activity.unread)
+    if (input.light?.unread) {
+        if (input.status?.activity !== undefined) {
+            return input.status.activity.unread && input.status.activity.updatedAt >= input.lastOpenedAt
+        }
+        return true
+    }
+    if (input.status?.activity !== undefined) {
+        return input.status.activity.unread && input.status.activity.updatedAt >= input.lastOpenedAt
+    }
     return false
 }
 
