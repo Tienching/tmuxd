@@ -21,6 +21,7 @@ type HostOption = Pick<HostInfo, 'id' | 'name'>
 export interface SessionLightOverride {
     unread?: boolean
     closed?: boolean
+    unreadAt?: number
 }
 
 export function OpenSessionsSidebar({
@@ -801,7 +802,10 @@ export function isOpenedSessionUnread(input: {
         if (input.status?.activity !== undefined) {
             return input.status.activity.unread && input.status.activity.updatedAt >= input.lastOpenedAt
         }
-        return true
+        if (input.light.unreadAt !== undefined) {
+            return input.light.unreadAt >= input.lastOpenedAt
+        }
+        return false
     }
     if (input.status?.activity !== undefined) {
         return input.status.activity.unread && input.status.activity.updatedAt >= input.lastOpenedAt

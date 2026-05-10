@@ -204,7 +204,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
     useEffect(() => {
         if (!activePane) return
         markOpenSession(activePane.target, hostLabel(activePane.target.hostId))
-        clearTargetPaneSignals(activePane.target, ['outputChanged', 'timerTriggered'])
+        clearTargetPaneSignals(activePane.target, ['outputChanged', 'timerTriggered', 'closed'])
         void markTargetRead(activePane.target)
     }, [activePane?.id, activePane?.target.hostId, activePane?.target.sessionName])
 
@@ -227,13 +227,14 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
         const pane = panesRef.current.find((candidate) => candidate.id === paneId)
         if (pane) {
             markOpenSession(pane.target, hostLabel(pane.target.hostId))
-            clearTargetPaneSignals(pane.target, ['outputChanged', 'timerTriggered'])
+            clearTargetPaneSignals(pane.target, ['outputChanged', 'timerTriggered', 'closed'])
             void markTargetRead(pane.target)
         }
     }
 
     function markTargetRead(target: SessionTarget) {
         api.readTargetPaneActivity(target).then(() => {
+            clearTargetPaneSignals(target, ['outputChanged', 'timerTriggered', 'closed'])
             markOpenSession(target, hostLabel(target.hostId))
             void queryClient.invalidateQueries({ queryKey: ['paneStatus', target.hostId, target.sessionName] })
         }).catch(() => {
@@ -483,6 +484,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
         setWorkspace((current) => setWorkspacePaneTarget(current, paneId, nextTarget))
         setActivePaneId(paneId)
         markOpenSession(nextTarget, hostLabel(hostId))
+        markTargetRead(nextTarget)
         navigateToTarget(navigate, nextTarget)
     }
 

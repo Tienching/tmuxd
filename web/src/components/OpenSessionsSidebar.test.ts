@@ -125,7 +125,11 @@ describe('opened session unread state', () => {
     })
 
     it('allows explicit read-mark override to force unread', () => {
-        assert.equal(isOpenedSessionUnread({ active: false, light: { unread: true }, lastOpenedAt: 1 }), true)
+        assert.equal(isOpenedSessionUnread({ active: false, light: { unread: true, unreadAt: 100 }, lastOpenedAt: 10 }), true)
+    })
+
+    it('does not force unread when signal timestamp is missing', () => {
+        assert.equal(isOpenedSessionUnread({ active: false, light: { unread: true }, lastOpenedAt: 10 }), false)
     })
 
     it('uses server activity state when both signal light and status are present', () => {

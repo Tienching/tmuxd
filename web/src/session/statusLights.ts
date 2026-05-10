@@ -19,6 +19,7 @@ export interface PaneStatusForLight {
 export interface SessionLightOverride {
     unread?: boolean
     closed?: boolean
+    unreadAt?: number
 }
 
 export interface PaneStatusLightModel {
@@ -42,9 +43,16 @@ export function getWorkspaceSessionLights(
         const closed = Boolean(signals?.closed || paneStatus?.status === 'closed' || paneStatus?.status === 'error')
         if (!unread && !closed) continue
         const key = targetKey(pane.target)
+        const existing = lights[key]
+        const unreadAt = readSignalAt(signals)
+        const mergedUnread = Boolean(existing?.unread || unread)
+        const nextUnreadAt = mergedUnread && (unreadAt !== undefined || existing?.unreadAt !== undefined)
+            ? Math.max(existing?.unreadAt ?? 0, unreadAt ?? existing?.unreadAt ?? 0)
+            : undefined
         lights[key] = {
-            unread: Boolean(lights[key]?.unread || unread),
-            closed: Boolean(lights[key]?.closed || closed)
+            unread: mergedUnread,
+            ...(nextUnreadAt !== undefined ? { unreadAt: nextUnreadAt } : {}),
+            closed: Boolean(existing?.closed || closed)
         }
     }
     return lights
@@ -127,4 +135,8 @@ export function isSessionActivityUnreadAt(
 
 function hasUnreadSignals(signals: PaneSignals | undefined): boolean {
     return Boolean(signals?.outputChanged || signals?.timerTriggered)
+}
+
+function readSignalAt(signals: PaneSignals | undefined): number | undefined {
+    return signals?.lastAt
 }
