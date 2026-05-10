@@ -13,7 +13,6 @@ import {
     type OpenSession
 } from '../session/openSessions'
 import { createSessionWithOptionalName } from '../session/createSession'
-import { isSessionActivityUnread } from '../session/statusLights'
 
 const SIDEBAR_HIDDEN_KEY = 'tmuxd.sidebarHidden'
 const OPENED_SESSION_STATUS_POLL_MS = 5000
@@ -165,9 +164,7 @@ export function OpenSessionsSidebar({
                             const unread = isOpenedSessionUnread({
                                 active,
                                 light,
-                                status,
-                                liveSession,
-                                lastOpenedAt: s.lastOpenedAt
+                                status
                             })
                             const closed = Boolean(light?.closed || status?.activity?.light === 'red')
                             return (
@@ -398,9 +395,7 @@ export function MobileSessionSelect({
                                             const unread = isOpenedSessionUnread({
                                                 active,
                                                 light,
-                                                status,
-                                                liveSession,
-                                                lastOpenedAt: s.lastOpenedAt
+                                                status
                                             })
                                             const closed = Boolean(light?.closed || status?.activity?.light === 'red')
                                             return (
@@ -793,17 +788,15 @@ function useOpenedSessionStatuses(
     return statusByKey
 }
 
-function isOpenedSessionUnread(input: {
+export function isOpenedSessionUnread(input: {
     active: boolean
     light?: SessionLightOverride
     status?: TmuxPaneStatus
-    liveSession?: TargetSession
-    lastOpenedAt: number
 }): boolean {
     if (input.active) return false
     if (input.light?.unread) return true
     if (input.status?.activity !== undefined) return Boolean(input.status.activity.unread)
-    return isSessionActivityUnread(input.liveSession, input.lastOpenedAt)
+    return false
 }
 
 async function invalidateSessionQueries(queryClient: ReturnType<typeof useQueryClient>, hostId: string): Promise<void> {
