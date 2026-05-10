@@ -574,7 +574,7 @@ describe('tmuxd sessions api', { concurrency: 1 }, () => {
             },
             nextPaneId: 10
         }
-        const { app, token, cleanup } = await installFakeTmux(state)
+        const { app, token, cleanup, statePath } = await installFakeTmux(state)
         try {
             const headers = authHeader(token)
 
@@ -602,6 +602,29 @@ describe('tmuxd sessions api', { concurrency: 1 }, () => {
             const readBody = (await readResponse.json()) as { ok: boolean }
             assert.equal(readResponse.status, 200)
             assert.equal(readBody.ok, true)
+            assert.equal(statusBody.activity?.unread, false)
+            assert.equal((readBody as { activity?: TmuxPaneStatus['activity'] }).activity?.unread, false)
+
+            const nextState = JSON.parse(await readFile(statePath, 'utf8'))
+            nextState.captures['main:0.0'] = `workbench output\nupdated-${Date.now()}\n`
+            await writeFile(statePath, JSON.stringify(nextState), 'utf8')
+
+            const readAfterOutputResponse = await app.request(
+                `/api/hosts/local/panes/${encodeURIComponent('main:0.0')}/activity/read`,
+                {
+                    method: 'POST',
+                    headers
+                }
+            )
+            const readAfterOutputBody = (await readAfterOutputResponse.json()) as { ok: boolean; activity?: TmuxPaneStatus['activity'] }
+            assert.equal(readAfterOutputResponse.status, 200)
+            assert.equal(readAfterOutputBody.activity?.unread ?? false, false)
+
+            const latestStatusResponse = await app.request(`/api/hosts/local/panes/${encodeURIComponent('main:0.0')}/status`, { headers })
+            const latestStatusBody = (await latestStatusResponse.json()) as TmuxPaneStatus
+            assert.equal(latestStatusResponse.status, 200)
+            assert.equal(latestStatusBody.activity?.unread ?? true, false)
+            assert.equal(latestStatusBody.activity?.changed, false)
 
             const remoteCaptureResponse = await app.request('/api/hosts/remote/panes/remote:0.0/capture', {
                 headers

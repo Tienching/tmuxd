@@ -660,7 +660,7 @@ function actionRouteError(c: Context, err: unknown) {
     const message = errMsg(err)
     if (err instanceof ActionStoreError && message === 'action_exists') return c.json({ error: 'action_exists' }, 409)
     if (err instanceof ZodError) return c.json({ error: 'invalid_body', message }, 400)
-    if (/invalid/i.test(message) || /required/i.test(message)) return c.json({ error: 'invalid_body', message }, 400)
+    if (/invalid|required|too_small|too_big/i.test(message)) return c.json({ error: 'invalid_body', message }, 400)
     return c.json({ error: 'action_error', message }, 500)
 }
 
@@ -715,11 +715,14 @@ async function markPaneReadForHost(
     target: string,
     agentRegistry?: AgentRegistry
 ): Promise<{ activity: ReturnType<typeof markPaneActivityRead> } | { response: Response }> {
+    const readCaptureOptions = { lines: 120, maxBytes: 65_536 }
     if (!isLocalHost(hostId)) {
         if (!agentRegistry?.hasHost(hostId)) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
         try {
             const panes = await agentRegistry.listPanes(hostId)
             const pane = findPaneForTarget(panes, target)
+            const capture = await agentRegistry.capturePane(hostId, target, readCaptureOptions.lines, readCaptureOptions.maxBytes)
+            trackPaneActivity({ hostId, target, pane, capture })
             return { activity: markPaneActivityRead({ hostId, target, pane }) }
         } catch (err) {
             return { response: await agentErrorResponse(err) }
@@ -728,7 +731,10 @@ async function markPaneReadForHost(
     try {
         const panes = await listPanes()
         const pane = findPaneForTarget(panes, target)
-        return { activity: markPaneActivityRead({ hostId: getLocalHost().id, target, pane }) }
+        const capture = await capturePane(target, readCaptureOptions)
+        trackPaneActivity({ hostId: getLocalHost().id, target, pane, capture })
+        const activity = markPaneActivityRead({ hostId: getLocalHost().id, target, pane })
+        return activity ? { activity } : { response: jsonResponse({ error: 'tmux_error', message: 'unable_to_mark_activity_as_read' }, 500) }
     } catch (err) {
         const message = errMsg(err)
         if (/can't find|no such|not found/i.test(message)) return { response: jsonResponse({ error: 'session_not_found' }, 404) }

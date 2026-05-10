@@ -509,6 +509,10 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
         const hostId = target.hostId.trim() || LOCAL_HOST_ID
         if (!trimmed || !paneId) return
         const nextTarget = { hostId, sessionName: trimmed }
+        const currentTarget = activePane?.target
+        if (currentTarget && !sameWorkspaceTarget(currentTarget, nextTarget)) {
+            void markTargetRead(currentTarget)
+        }
         setWorkspace((current) => setWorkspacePaneTarget(current, paneId, nextTarget))
         setActivePaneId(paneId)
         markOpenSession(nextTarget, hostLabel(hostId))
