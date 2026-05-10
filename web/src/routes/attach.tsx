@@ -123,6 +123,7 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
     const paneHandlesRef = useRef<Record<string, TerminalPaneHandle | null>>({})
     const panesRef = useRef<WorkspacePane[]>([])
     const paneStatusesRef = useRef<Record<string, PaneStatus>>({})
+    const lastActivePaneTargetRef = useRef<SessionTarget | null>(null)
     const customActionTimersRef = useRef<Map<string, CustomActionTimerRuntime>>(new Map())
     const copyRequestRef = useRef(0)
     const imageInputRef = useRef<HTMLInputElement | null>(null)
@@ -203,9 +204,36 @@ function AttachTargetPage({ initialTarget }: { initialTarget: SessionTarget }) {
 
     useEffect(() => {
         if (!activePane) return
+        const previousTarget = lastActivePaneTargetRef.current
+        if (previousTarget && !sameWorkspaceTarget(previousTarget, activePane.target)) {
+            clearTargetPaneSignals(previousTarget, ['outputChanged', 'timerTriggered', 'closed'])
+            void markTargetRead(previousTarget)
+        }
         markOpenSession(activePane.target, hostLabel(activePane.target.hostId))
         clearTargetPaneSignals(activePane.target, ['outputChanged', 'timerTriggered', 'closed'])
         void markTargetRead(activePane.target)
+        lastActivePaneTargetRef.current = activePane.target
+    }, [activePane?.id, activePane?.target.hostId, activePane?.target.sessionName])
+
+    useEffect(() => {
+        if (!activePane) return
+        const target = activePane.target
+        const markActiveSessionRead = () => {
+            clearTargetPaneSignals(target, ['outputChanged', 'timerTriggered', 'closed'])
+            void markTargetRead(target)
+        }
+        const handleVisibilityChange = () => {
+            if (document.hidden) markActiveSessionRead()
+        }
+        const handleWindowBlur = () => {
+            if (!document.hidden && !document.hasFocus()) markActiveSessionRead()
+        }
+        document.addEventListener('visibilitychange', handleVisibilityChange)
+        window.addEventListener('blur', handleWindowBlur)
+        return () => {
+            document.removeEventListener('visibilitychange', handleVisibilityChange)
+            window.removeEventListener('blur', handleWindowBlur)
+        }
     }, [activePane?.id, activePane?.target.hostId, activePane?.target.sessionName])
 
     function registerPaneHandle(paneId: string, handle: TerminalPaneHandle | null) {
