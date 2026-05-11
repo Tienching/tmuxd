@@ -6,9 +6,19 @@ import { sessionNameSchema, sessionTargetNameSchema, tmuxKeySchema, tmuxPaneTarg
 
 const execFileAsync = promisify(execFile)
 
-const LIST_FORMAT = '#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}\t#{session_activity}'
-const PANE_FIELD_SEPARATOR = '\x1f'
-const PANE_RECORD_SEPARATOR = '\x1e'
+const TMUXD_FIELD_SEPARATOR = '::TMUXD_FIELD::'
+const TMUXD_RECORD_SEPARATOR = '::TMUXD_RECORD::'
+const LEGACY_PANE_FIELD_SEPARATOR = '\x1f'
+const LEGACY_PANE_RECORD_SEPARATOR = '\x1e'
+const LIST_FORMAT = [
+    '#{session_name}',
+    '#{session_windows}',
+    '#{session_attached}',
+    '#{session_created}',
+    '#{session_activity}'
+].join(TMUXD_FIELD_SEPARATOR)
+const PANE_FIELD_SEPARATOR = TMUXD_FIELD_SEPARATOR
+const PANE_RECORD_SEPARATOR = TMUXD_RECORD_SEPARATOR
 const PANE_LIST_FORMAT = [
     '#{session_name}',
     '#{window_index}',
@@ -30,7 +40,7 @@ const PANE_LIST_FORMAT = [
     '#{session_activity}',
     '#{window_activity}'
 ].join(PANE_FIELD_SEPARATOR) + PANE_RECORD_SEPARATOR
-const CAPTURE_METADATA_FORMAT = '#{pane_in_mode}\t#{scroll_position}\t#{history_size}\t#{pane_height}'
+const CAPTURE_METADATA_FORMAT = ['#{pane_in_mode}', '#{scroll_position}', '#{history_size}', '#{pane_height}'].join(TMUXD_FIELD_SEPARATOR)
 const DEFAULT_CAPTURE_LINES = 200
 const DEFAULT_CAPTURE_MAX_BYTES = 256 * 1024
 const MAX_CAPTURE_MAX_BYTES = 384 * 1024
@@ -69,7 +79,7 @@ export function parseListOutput(output: string): TmuxSession[] {
     for (const raw of output.split('\n')) {
         const line = raw.trim()
         if (!line) continue
-        const parts = line.split('\t')
+        const parts = splitTmuxFields(line)
         if (parts.length < 5) continue
         const [name, winStr, attStr, createdStr, activityStr] = parts
         const session = {
@@ -166,11 +176,15 @@ export async function listPanes(sessionName?: string): Promise<TmuxPane[]> {
 
 export function parsePaneListOutput(output: string): TmuxPane[] {
     const panes: TmuxPane[] = []
-    const rows = output.includes(PANE_RECORD_SEPARATOR) ? output.split(PANE_RECORD_SEPARATOR) : output.split('\n')
+    const rows = output.includes(PANE_RECORD_SEPARATOR)
+        ? output.split(PANE_RECORD_SEPARATOR)
+        : output.includes(LEGACY_PANE_RECORD_SEPARATOR)
+          ? output.split(LEGACY_PANE_RECORD_SEPARATOR)
+          : output.split('\n')
     for (const record of rows) {
         const raw = record.replace(/^\n/, '').replace(/\n$/, '')
         if (!raw.trim()) continue
-        const parts = raw.split(raw.includes(PANE_FIELD_SEPARATOR) ? PANE_FIELD_SEPARATOR : '\t')
+        const parts = splitTmuxFields(raw)
         if (parts.length < 16) continue
         const [
             sessionName,
@@ -270,13 +284,19 @@ export async function captureSession(name: string): Promise<TmuxCapture> {
 }
 
 export function parseCaptureMetadata(output: string): Omit<TmuxCapture, 'text'> {
-    const [paneInMode, scrollPosition, historySize, paneHeight] = output.trimEnd().split('\t')
+    const [paneInMode, scrollPosition, historySize, paneHeight] = splitTmuxFields(output.trimEnd())
     return {
         paneInMode: paneInMode === '1',
         scrollPosition: Number.parseInt(scrollPosition || '0', 10) || 0,
         historySize: Number.parseInt(historySize || '0', 10) || 0,
         paneHeight: Number.parseInt(paneHeight || '0', 10) || 0
     }
+}
+
+function splitTmuxFields(line: string): string[] {
+    if (line.includes(TMUXD_FIELD_SEPARATOR)) return line.split(TMUXD_FIELD_SEPARATOR)
+    if (line.includes(LEGACY_PANE_FIELD_SEPARATOR)) return line.split(LEGACY_PANE_FIELD_SEPARATOR)
+    return line.split('\t')
 }
 
 function toNonNegativeInt(value: string): number {

@@ -2,6 +2,8 @@ import { execFileSync } from 'node:child_process'
 import pty, { type IPty } from 'node-pty'
 import { validateSessionTargetName } from './tmux.js'
 
+let tmuxCommandCache: string | null = null
+
 /** A live PTY attached to an existing tmux session. */
 export interface PtyBridge {
     proc: IPty
@@ -13,12 +15,12 @@ export interface PtyBridge {
 
 export function attachTmuxPty(session: string, cols: number, rows: number): PtyBridge {
     const safe = validateSessionTargetName(session)
+    const tmux = resolveTmuxCommand()
     try {
-        execFileSync('tmux', ['has-session', '-t', safe], { encoding: 'utf8', stdio: 'pipe' })
+        execFileSync(tmux, ['has-session', '-t', safe], { encoding: 'utf8', stdio: 'pipe' })
     } catch {
         throw new Error('session_not_found')
     }
-    const shell = 'tmux'
     // Attach only; session creation is an explicit API action. Using
     // `new-session -A` here can silently recreate stale Opened entries as empty
     // tmux sessions when a browser reconnects.
@@ -33,7 +35,7 @@ export function attachTmuxPty(session: string, cols: number, rows: number): PtyB
         ...cleanEnv
     } = process.env
 
-    const proc = pty.spawn(shell, args, {
+    const proc = pty.spawn(tmux, args, {
         name: 'xterm-256color',
         cols: clampDim(cols),
         rows: clampDim(rows),
@@ -60,6 +62,29 @@ export function attachTmuxPty(session: string, cols: number, rows: number): PtyB
     }
 
     return bridge
+}
+
+function resolveTmuxCommand(): string {
+    if (tmuxCommandCache) return tmuxCommandCache
+    if (process.env.TMUXD_TMUX_PATH?.trim()) {
+        tmuxCommandCache = process.env.TMUXD_TMUX_PATH.trim()
+        return tmuxCommandCache
+    }
+    if (process.platform !== 'win32') {
+        tmuxCommandCache = 'tmux'
+        return tmuxCommandCache
+    }
+    try {
+        const out = execFileSync('where.exe', ['tmux'], { encoding: 'utf8' })
+        const first = out
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .find((line) => line.toLowerCase().endsWith('.exe'))
+        tmuxCommandCache = first || 'tmux.exe'
+    } catch {
+        tmuxCommandCache = 'tmux.exe'
+    }
+    return tmuxCommandCache
 }
 
 function clampDim(n: number): number {
