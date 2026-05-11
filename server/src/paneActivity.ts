@@ -3,12 +3,40 @@ import type { TmuxPane, TmuxPaneActivity, TmuxPaneCapture } from '@tmuxd/shared'
 
 const MAX_TRACKED_PANES = 512
 const ACTIVITY_SAMPLE_CHARS = 4096
+/**
+ * After the pane content stops changing for this long, the tracker auto-advances
+ * its observed baseline (`lastReadHash`) to the current content. This keeps the
+ * sidebar from remaining yellow forever for opened-but-not-attached sessions
+ * that had some activity in the past but have since settled on a stable final
+ * screen — the user doesn't have to click the row to clear it.
+ *
+ * The threshold is intentionally slightly larger than the sidebar's /status
+ * poll interval (see `OPENED_SESSION_STATUS_POLL_MS` in the web package)
+ * so that auto-settle only happens once at least one full unchanged poll
+ * has been observed.
+ */
+const AUTO_SETTLE_MS = 7_000
 
 interface PaneActivityRecord {
     contentHash: string
+    /**
+     * Hash of the content at the last time the pane was considered "read":
+     *  - explicit markPaneActivityRead (user opened the session, activity/read route), or
+     *  - auto-settle inside trackPaneActivity after content has been stable past AUTO_SETTLE_MS.
+     * A pane is `unread` iff `contentHash !== lastReadHash`.
+     */
+    lastReadHash: string
+    /** Unix ms of the most recent transition of `contentHash`. */
+    lastChangeAt: number
     paneDead: boolean
+    /**
+     * True if the last trackPaneActivity call observed a hash transition or
+     * a dead-pane transition (used for the public `changed` field).
+     */
     changed: boolean
+    /** Monotonic counter of observed changes. Kept for observability/e2e assertions. */
     seq: number
+    /** Kept for observability. Advanced alongside `lastReadHash` on read / auto-settle. */
     readSeq: number
     reason?: TmuxPaneActivity['reason']
     updatedAt: number
@@ -30,15 +58,51 @@ export function trackPaneActivity(input: {
     const contentHash = hashText(activitySample(input.capture.text))
     const paneDead = Boolean(pane?.paneDead)
     const previous = records.get(key)
-    const outputChanged = Boolean(previous && previous.contentHash !== contentHash)
-    const closedChanged = Boolean(previous && paneDead && !previous.paneDead)
+
+    if (!previous) {
+        // First observation. Treat the current screen as already "read" so the
+        // initial light is green; only subsequent transitions produce unread.
+        const record: PaneActivityRecord = {
+            contentHash,
+            lastReadHash: contentHash,
+            lastChangeAt: now,
+            paneDead,
+            changed: false,
+            seq: 0,
+            readSeq: 0,
+            updatedAt: now,
+            checkedAt: now
+        }
+        remember(key, record)
+        return toActivity(record)
+    }
+
+    const outputChanged = previous.contentHash !== contentHash
+    const closedChanged = paneDead && !previous.paneDead
     const changed = outputChanged || closedChanged
-    const seq = changed ? (previous?.seq ?? 0) + 1 : (previous?.seq ?? 0)
-    const readSeq = previous?.readSeq ?? seq
-    const reason = closedChanged ? 'closed' : outputChanged ? 'output' : previous?.reason
-    const updatedAt = changed || !previous ? now : previous.updatedAt
+
+    let { lastReadHash, lastChangeAt, seq, readSeq, reason, updatedAt } = previous
+
+    if (changed) {
+        // `closed` takes precedence over `output` when both transition in the
+        // same observation — the surviving reason should reflect the most
+        // user-visible state change.
+        reason = closedChanged ? 'closed' : 'output'
+        seq += 1
+        updatedAt = now
+        if (outputChanged) lastChangeAt = now
+    } else if (!paneDead && now - lastChangeAt >= AUTO_SETTLE_MS && lastReadHash !== contentHash) {
+        // Auto-settle: content has been stable past the threshold since its
+        // last transition. Advance the observed baseline so sticky unread
+        // clears without requiring an explicit activity/read call.
+        lastReadHash = contentHash
+        readSeq = seq
+    }
+
     const record: PaneActivityRecord = {
         contentHash,
+        lastReadHash,
+        lastChangeAt,
         paneDead,
         changed,
         seq,
@@ -56,6 +120,7 @@ export function markPaneActivityRead(input: { hostId: string; target: string; pa
     const key = paneActivityKey(input.hostId, input.target, input.pane ?? null)
     const record = records.get(key)
     if (!record) return null
+    record.lastReadHash = record.contentHash
     record.readSeq = record.seq
     record.checkedAt = input.now ?? Date.now()
     records.set(key, record)
@@ -67,7 +132,7 @@ export function resetPaneActivityTracker(): void {
 }
 
 function toActivity(record: PaneActivityRecord): TmuxPaneActivity {
-    const unread = record.seq > record.readSeq
+    const unread = record.contentHash !== record.lastReadHash
     return {
         light: record.paneDead ? 'red' : unread ? 'yellow' : 'green',
         unread,

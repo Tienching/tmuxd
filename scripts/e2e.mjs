@@ -662,6 +662,35 @@ async function main() {
         )
     })
 
+    await check('agent-api: pane status auto-settles to green once content stabilizes without an explicit read', async () => {
+        const target = `${TEST_SESSION}:0.0`
+        const marker = `tmuxd-auto-settle-${Date.now()}`
+        const write = await http(`/api/hosts/local/panes/${encodeURIComponent(TEST_SESSION)}/input`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ text: `printf "${marker}\\n"`, enter: true })
+        })
+        if (write.status !== 200) return false
+        await sleep(300)
+        const afterChange = await http(`/api/hosts/local/panes/${encodeURIComponent(target)}/status?lines=80&maxBytes=4096`, {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        if (afterChange.status !== 200 || afterChange.body?.activity?.light !== 'yellow') return false
+        // Wait past the AUTO_SETTLE_MS threshold (7s) without issuing any
+        // further input. A subsequent poll that observes an unchanged hash
+        // must advance the observed baseline and return green.
+        await sleep(7_500)
+        const settled = await http(`/api/hosts/local/panes/${encodeURIComponent(target)}/status?lines=80&maxBytes=4096`, {
+            headers: { authorization: `Bearer ${token}` }
+        })
+        return (
+            settled.status === 200 &&
+            settled.body?.activity?.light === 'green' &&
+            settled.body?.activity?.unread === false &&
+            settled.body?.activity?.seq === afterChange.body?.activity?.seq
+        )
+    })
+
     await check('agent-api: pane capture reports UTF-8-safe truncation', async () => {
         const marker = 'tmuxd-long-output'
         const write = await http(`/api/hosts/local/panes/${encodeURIComponent(TEST_SESSION)}/input`, {
@@ -1088,6 +1117,32 @@ async function main() {
                 read.status === 200 &&
                 read.body?.activity?.unread === false &&
                 read.body?.activity?.light === 'green'
+            )
+        })
+
+        await check('agent-api: remote pane status auto-settles to green once content stabilizes', async () => {
+            const target = `${AGENT_SESSION}:0.0`
+            const marker = `tmuxd-remote-auto-settle-${Date.now()}`
+            const write = await http(`/api/hosts/${AGENT_HOST}/panes/${encodeURIComponent(AGENT_SESSION)}/input`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+                body: JSON.stringify({ text: `printf "${marker}\\n"`, enter: true })
+            })
+            if (write.status !== 200) return false
+            await sleep(300)
+            const afterChange = await http(`/api/hosts/${AGENT_HOST}/panes/${encodeURIComponent(target)}/status?lines=120&maxBytes=4096`, {
+                headers: { authorization: `Bearer ${token}` }
+            })
+            if (afterChange.status !== 200 || afterChange.body?.activity?.light !== 'yellow') return false
+            await sleep(7_500)
+            const settled = await http(`/api/hosts/${AGENT_HOST}/panes/${encodeURIComponent(target)}/status?lines=120&maxBytes=4096`, {
+                headers: { authorization: `Bearer ${token}` }
+            })
+            return (
+                settled.status === 200 &&
+                settled.body?.activity?.light === 'green' &&
+                settled.body?.activity?.unread === false &&
+                settled.body?.activity?.seq === afterChange.body?.activity?.seq
             )
         })
 

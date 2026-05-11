@@ -21,7 +21,6 @@ type HostOption = Pick<HostInfo, 'id' | 'name'>
 export interface SessionLightOverride {
     unread?: boolean
     closed?: boolean
-    unreadAt?: number
 }
 
 export function OpenSessionsSidebar({
@@ -165,8 +164,7 @@ export function OpenSessionsSidebar({
                             const unread = isOpenedSessionUnread({
                                 active,
                                 light,
-                                status,
-                                lastOpenedAt: s.lastOpenedAt
+                                status
                             })
                             const closed = Boolean(light?.closed || status?.activity?.light === 'red')
                             return (
@@ -397,8 +395,7 @@ export function MobileSessionSelect({
                                             const unread = isOpenedSessionUnread({
                                                 active,
                                                 light,
-                                                status,
-                                                lastOpenedAt: s.lastOpenedAt
+                                                status
                                             })
                                             const closed = Boolean(light?.closed || status?.activity?.light === 'red')
                                             return (
@@ -795,22 +792,16 @@ export function isOpenedSessionUnread(input: {
     active: boolean
     light?: SessionLightOverride
     status?: TmuxPaneStatus
-    lastOpenedAt: number
 }): boolean {
     if (input.active) return false
-    if (input.light?.unread) {
-        if (input.status?.activity !== undefined) {
-            return input.status.activity.unread && input.status.activity.updatedAt >= input.lastOpenedAt
-        }
-        if (input.light.unreadAt !== undefined) {
-            return input.light.unreadAt >= input.lastOpenedAt
-        }
-        return false
-    }
-    if (input.status?.activity !== undefined) {
-        return input.status.activity.unread && input.status.activity.updatedAt >= input.lastOpenedAt
-    }
-    return false
+    // A live unread signal from the currently visible workspace (pane received
+    // new websocket data or a timer fired while not the active pane) wins
+    // immediately — we don't need to wait for the next /status poll.
+    if (input.light?.unread) return true
+    // Otherwise defer to the server's authoritative activity state. The server
+    // auto-settles back to `unread === false` once content has been stable past
+    // the settle threshold, so sticky yellows clear without requiring a click.
+    return Boolean(input.status?.activity?.unread)
 }
 
 async function invalidateSessionQueries(queryClient: ReturnType<typeof useQueryClient>, hostId: string): Promise<void> {
