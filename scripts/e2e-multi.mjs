@@ -7,7 +7,7 @@ import WebSocket from 'ws'
 
 const HOST = process.env.HOST || '127.0.0.1'
 const PORT = Number(process.env.PORT || 17686)
-const TOKEN = process.env.TMUXD_TOKEN || process.env.TMUXD_PASSWORD || 'e2e-all-token'
+const TOKEN = process.env.TMUXD_TOKEN || 'e2e-all-token'
 
 const tok = await fetch(`http://${HOST}:${PORT}/api/auth`, {
     method: 'POST',

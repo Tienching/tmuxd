@@ -81,8 +81,6 @@ Sign in with the value after `TMUXD_TOKEN=` in `.env`. For multi-user deployment
 | `TMUXD_AGENT_TOKENS` | unset | Preferred hub/agent auth: comma-separated entries of `[<namespace>/]<hostId>=<token>`. Binds each agent token to one `(namespace, hostId)` pair. Bare form `<hostId>=<token>` binds into the default namespace. |
 | `TMUXD_AGENT_NAMESPACE` | `default` | (Agent CLI) Namespace this agent registers under. Must match the namespace pinned in the hub's `TMUXD_AGENT_TOKENS` binding, otherwise hub closes WS with 4401 and agent exits with status 2. |
 
-`TMUXD_PASSWORD` and `TMUXD_BASE_TOKEN` are deprecated aliases for `TMUXD_TOKEN`, accepted with a startup warning. Rename in your `.env` at your convenience.
-
 Example `.env`:
 
 ```env
@@ -388,7 +386,7 @@ Implemented safeguards:
 - WebSocket Origin checks.
 - WebSocket connection limits and idle timeout.
 - API responses use `Cache-Control: no-store`.
-- PTY child environment strips `TMUXD_TOKEN`, `TMUXD_BASE_TOKEN`, `TMUXD_PASSWORD`, `TMUXD_AGENT_TOKEN`, `TMUXD_AGENT_TOKENS`, and `JWT_SECRET`.
+- PTY child environment strips `TMUXD_TOKEN`, `TMUXD_AGENT_TOKEN`, `TMUXD_AGENT_TOKENS`, and `JWT_SECRET`.
 - Browser JWTs are never forwarded to agents; the hub talks to agents over the separate agent token channel.
 
 ## Development

@@ -4,12 +4,6 @@ Status: implemented v1
 
 Branch: `feature/hub-agent-design`
 
-> **Historical note (post-merge):** This document was written before the
-> auth-token unification. References to `TMUXD_PASSWORD` below predate the
-> rename to `TMUXD_TOKEN`. The wire shapes described still apply; only
-> the env var name changed. See [hub-mode.md](./hub-mode.md) for the
-> current operator guide.
-
 Goal: let one browser page show and control tmux sessions from multiple machines.
 
 ## Summary
@@ -59,7 +53,7 @@ This is the right shape for mobile use: the phone opens one URL, then sees `loca
 Current behavior stays:
 
 ```bash
-TMUXD_PASSWORD=... HOST=0.0.0.0 PORT=17683 npm start
+TMUXD_TOKEN=... HOST=0.0.0.0 PORT=17683 npm start
 ```
 
 Internally this is the `serve` mode. It has one built-in target named `local`.
@@ -345,9 +339,9 @@ Browser auth and agent auth are separate.
 
 ### Browser auth
 
-Current browser password login stays:
+Current browser token login stays:
 
-- `TMUXD_PASSWORD`
+- `TMUXD_TOKEN`
 - short-lived JWT
 - one-time WebSocket tickets
 

@@ -25,7 +25,7 @@ const execFileP = promisify(execFile)
 
 const HOST = process.env.HOST ?? '127.0.0.1'
 const PORT = Number(process.env.PORT ?? 17683)
-const TOKEN = process.env.TMUXD_TOKEN ?? process.env.TMUXD_PASSWORD ?? 'e2e-test-token-123'
+const TOKEN = process.env.TMUXD_TOKEN ?? 'e2e-test-token-123'
 const AGENT_TOKEN = process.env.TMUXD_AGENT_TOKEN ?? ''
 const AGENT_HOST_BOUND = process.env.TMUXD_E2E_AGENT_HOST_BOUND === '1'
 const ORIGIN = `http://${HOST}:${PORT}`

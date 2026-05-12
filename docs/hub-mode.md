@@ -277,18 +277,6 @@ Users log in with the bare token (no `:namespace` suffix). The JWT is
 stamped with namespace `default`. The web UI does not display a
 namespace badge in this mode (since `default` is the implicit default).
 
-## Migration from older configs
-
-`TMUXD_PASSWORD` and `TMUXD_BASE_TOKEN` are accepted as deprecated
-aliases for `TMUXD_TOKEN`, with a startup warning:
-
-```
-[tmuxd] TMUXD_PASSWORD is deprecated; please rename to TMUXD_TOKEN. Single-user login is the same value with no `:namespace` suffix.
-```
-
-Rename in your `.env` and the warning goes away. The wire contract does
-not change — both old configs result in the same JWT shape.
-
 ## Phase 2 forward path
 
 When this gets swapped for a real per-user user store, **the wire

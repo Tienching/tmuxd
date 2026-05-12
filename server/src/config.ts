@@ -64,24 +64,7 @@ function resolveJwtSecret(dataDir: string): Uint8Array {
 }
 
 export function loadConfig(): Config {
-    const rawToken = process.env.TMUXD_TOKEN?.trim() || null
-    // Migration helper: old deployments may still set TMUXD_PASSWORD or
-    // TMUXD_BASE_TOKEN. Accept either as an alias for TMUXD_TOKEN, with
-    // a one-time startup warning pointing at the new name. Removing the
-    // aliases is a future cleanup; keeping them as a "we read your old
-    // config but please rename" courtesy.
-    const legacyPassword = process.env.TMUXD_PASSWORD?.trim() || null
-    const legacyBaseToken = process.env.TMUXD_BASE_TOKEN?.trim() || null
-
-    let token = rawToken
-    if (!token && legacyBaseToken) {
-        console.warn('[tmuxd] TMUXD_BASE_TOKEN is deprecated; please rename to TMUXD_TOKEN.')
-        token = legacyBaseToken
-    }
-    if (!token && legacyPassword) {
-        console.warn('[tmuxd] TMUXD_PASSWORD is deprecated; please rename to TMUXD_TOKEN. Single-user login is the same value with no `:namespace` suffix.')
-        token = legacyPassword
-    }
+    const token = process.env.TMUXD_TOKEN?.trim() || null
     if (!token) {
         throw new Error('Missing required auth: set TMUXD_TOKEN. For multi-user, clients log in with <token>:<namespace>; for single-user, the bare token.')
     }
