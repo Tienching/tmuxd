@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /**
- * E2E: same hostId in two namespaces + agent reconnect lifecycle.
+ * E2E: same hostId in two namespaces + agent reconnect lifecycle, under
+ * the new two-token trust model.
  *
  * Two design-doc claims that no other test directly verifies:
  *
  *   1. "Alice's `laptop` and Bob's `laptop` are distinct records once
- *      the registry is rekeyed." (P4 in docs/hub-mode.md)
+ *      the registry is rekeyed by hashed namespace." (P4 in
+ *      docs/identity-model.md)
  *
  *      Both users register an agent with hostId=`laptop`. Each must see
  *      their own without colliding with the other.
@@ -24,9 +26,9 @@ import { rm } from 'node:fs/promises'
 
 const HOST = '127.0.0.1'
 const PORT = Number(process.env.TMUXD_E2E_PORT || 17689)
-const BASE = 'lifecycle-base-secret-' + Math.random().toString(36).slice(2)
-const ALICE_TOKEN = 'alice-lifecycle-token-' + Math.random().toString(36).slice(2)
-const BOB_TOKEN = 'bob-lifecycle-token-' + Math.random().toString(36).slice(2)
+const SERVER_TOKEN = 'lifecycle-server-token-' + Math.random().toString(36).slice(2)
+const ALICE_USER_TOKEN = 'alice-lifecycle-' + Math.random().toString(36).slice(2)
+const BOB_USER_TOKEN = 'bob-lifecycle-' + Math.random().toString(36).slice(2)
 const TMUXD_HOME = `/tmp/tmuxd-e2e-lifecycle-${process.pid}`
 
 const passes = []
@@ -70,14 +72,17 @@ async function postJson(path, body, headers = {}) {
         body: JSON.stringify(body)
     })
 }
-async function login(ns) {
-    const r = await postJson('/api/auth', { token: `${BASE}:${ns}` })
-    if (r.status !== 200) throw new Error(`login as ${ns} failed: ${r.status}`)
+async function login(userToken) {
+    const r = await postJson('/api/auth', {
+        serverToken: SERVER_TOKEN,
+        userToken
+    })
+    if (r.status !== 200) throw new Error(`login failed: ${r.status}`)
     const { token } = await r.json()
     return token
 }
 
-function spawnAgent({ token, namespace, id, name }) {
+function spawnAgent({ userToken, hostId, hostName }) {
     return spawn(
         'node',
         ['node_modules/.bin/tsx', 'server/src/agent.ts'],
@@ -85,12 +90,12 @@ function spawnAgent({ token, namespace, id, name }) {
             env: {
                 ...process.env,
                 TMUXD_HUB_URL: `http://${HOST}:${PORT}`,
-                TMUXD_AGENT_TOKEN: token,
-                TMUXD_AGENT_NAMESPACE: namespace,
-                TMUXD_AGENT_ID: id,
-                TMUXD_AGENT_NAME: name,
+                TMUXD_SERVER_TOKEN: SERVER_TOKEN,
+                TMUXD_USER_TOKEN: userToken,
+                TMUXD_HOST_ID: hostId,
+                TMUXD_HOST_NAME: hostName,
                 TMUXD_AUDIT_DISABLE: '1',
-                TMUXD_HOME: `${TMUXD_HOME}-agent-${namespace}-${id}`
+                TMUXD_HOME: `${TMUXD_HOME}-agent-${userToken}-${hostId}`
             },
             stdio: ['ignore', 'pipe', 'pipe']
         }
@@ -147,11 +152,8 @@ async function main() {
         {
             env: {
                 ...process.env,
-                TMUXD_TOKEN: BASE,
+                TMUXD_SERVER_TOKEN: SERVER_TOKEN,
                 TMUXD_HUB_ONLY: '1',
-                // Same hostId 'laptop' bound for BOTH users — this is the
-                // claim under test.
-                TMUXD_AGENT_TOKENS: `alice/laptop=${ALICE_TOKEN},bob/laptop=${BOB_TOKEN}`,
                 TMUXD_HOME,
                 TMUXD_AUDIT_DISABLE: '1',
                 HOST,
@@ -165,21 +167,21 @@ async function main() {
     let bobAgent = null
     try {
         await waitUp(PORT)
-        const aliceJwt = await login('alice')
-        const bobJwt = await login('bob')
+        const aliceJwt = await login(ALICE_USER_TOKEN)
+        const bobJwt = await login(BOB_USER_TOKEN)
 
-        // ── 1. Spawn both agents with the SAME hostId
+        // ── 1. Spawn both agents with the SAME hostId — distinct user tokens
+        //    yield distinct hashed namespaces, so the registry slots them
+        //    independently.
         aliceAgent = spawnAgent({
-            token: ALICE_TOKEN,
-            namespace: 'alice',
-            id: 'laptop',
-            name: 'Alice Laptop'
+            userToken: ALICE_USER_TOKEN,
+            hostId: 'laptop',
+            hostName: 'Alice Laptop'
         })
         bobAgent = spawnAgent({
-            token: BOB_TOKEN,
-            namespace: 'bob',
-            id: 'laptop',
-            name: 'Bob Laptop'
+            userToken: BOB_USER_TOKEN,
+            hostId: 'laptop',
+            hostName: 'Bob Laptop'
         })
 
         await check('both agents register despite identical hostId', async () => {
@@ -225,10 +227,9 @@ async function main() {
         // ── 4. Restart Alice's agent — it reappears in HER namespace
         await check("restarting Alice's agent puts 'laptop' back in her namespace", async () => {
             aliceAgent = spawnAgent({
-                token: ALICE_TOKEN,
-                namespace: 'alice',
-                id: 'laptop',
-                name: 'Alice Laptop'
+                userToken: ALICE_USER_TOKEN,
+                hostId: 'laptop',
+                hostName: 'Alice Laptop'
             })
             await waitFor(async () => {
                 const a = await listRemoteHostIds(aliceJwt)
@@ -252,38 +253,44 @@ async function main() {
 
         // ── 6. Trying to register Alice's agent again before kill should fail
         // (host_already_connected). This proves the per-namespace registry
-        // doesn't leak duplicates.
+        // doesn't leak duplicates within a namespace.
         await check("duplicate Alice-agent connect rejected (host_already_connected)", async () => {
             const dup = spawnAgent({
-                token: ALICE_TOKEN,
-                namespace: 'alice',
-                id: 'laptop',
-                name: 'Alice Duplicate'
+                userToken: ALICE_USER_TOKEN,
+                hostId: 'laptop',
+                hostName: 'Alice Duplicate'
             })
             // The duplicate hello should be rejected. Agent's `connectOnce`
-            // will resolve when the WS closes; main loop retries with backoff.
-            // We just want to confirm Alice's view doesn't show two hosts.
-            await sleep(500)
+            // catches `host_already_connected` as FatalConfigError and exits
+            // with code 2. We just want to confirm Alice's view doesn't show
+            // two hosts and the duplicate dies cleanly.
+            const exitCode = await new Promise((resolve) => {
+                const t = setTimeout(() => {
+                    dup.kill('SIGKILL')
+                    resolve('timeout')
+                }, 5000)
+                dup.on('exit', (code) => {
+                    clearTimeout(t)
+                    resolve(code)
+                })
+            })
+            if (exitCode !== 2) throw new Error(`duplicate agent expected exit 2, got ${exitCode}`)
             const a = await listRemoteHostIds(aliceJwt)
             if (a.length !== 1) throw new Error(`alice has ${a.length} hosts: ${JSON.stringify(a)}`)
-            await killAndWait(dup)
         })
 
-        // ── 7. Cross-namespace probe still fails
-        await check("Alice GET /hosts/laptop/sessions doesn't accidentally hit Bob's", async () => {
+        // ── 7. Cross-namespace probe still safe
+        await check("Alice GET /hosts/laptop/sessions hits HER agent, not Bob's", async () => {
             // Alice has 'laptop' registered in HER namespace, so this is
             // a 200 from Alice's POV — but it must be HER laptop, not Bob's.
             // We can't read tmux state because the agent has no tmux running,
             // but the agent should reject with a tmux error or empty list.
             // What matters is the URL path doesn't leak Bob's host.
             const r = await get('/api/hosts/laptop/sessions', { authorization: `Bearer ${aliceJwt}` })
-            // Either 200 (alice's agent answered) or a tmux error from her
-            // agent — both prove the route hit alice's not bob's. The
-            // critical negative test is the unrelated hostId case.
+            // 200 = clean answer; 502 = agent protocol mismatch (tmux
+            // not running on the test agent); 504 = agent timeout.
+            // Anything else is a leak signal.
             if (![200, 502, 504].includes(r.status)) {
-                // 200 = clean answer; 502 = agent protocol mismatch (tmux
-                // not running on the test agent); 504 = agent timeout.
-                // Anything else is a leak signal.
                 throw new Error(`unexpected status ${r.status} (body: ${await r.text()})`)
             }
         })

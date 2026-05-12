@@ -1,8 +1,8 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { timingSafeEqual } from 'node:crypto'
-import { loginSchema } from '@tmuxd/shared'
-import { issueToken, parseAccessToken } from '../auth.js'
+import { computeNamespace, loginSchema } from '@tmuxd/shared'
+import { issueToken } from '../auth.js'
 import { logAudit } from '../audit.js'
 
 const WINDOW_MS = 60_000
@@ -19,27 +19,23 @@ interface Bucket {
 const buckets = new Map<string, Bucket>()
 
 /**
- * Single auth concept: client POSTs `{ token: "<token>[:<namespace>]" }`.
+ * Two-token login. The client POSTs `{serverToken, userToken}`.
  *
- * - Bare `<token>` → JWT scoped to `DEFAULT_NAMESPACE` (single-user mode is
- *   the no-namespace special case, not a separate auth path).
- * - `<token>:<namespace>` → JWT scoped to that namespace, validated against
- *   `namespaceSchema`.
+ *  - `serverToken` must equal the hub's `TMUXD_SERVER_TOKEN` (shared
+ *    team token — "may you use this hub"). Compared in constant time.
+ *  - `userToken` is the client's personal identity. The hub does NOT
+ *    store it; namespace is derived via sha256(userToken).slice(0,16).
  *
- * In both cases the base token must equal the configured `TMUXD_TOKEN`.
- * There is no `password` form, no `/auth/mode` endpoint, no client-side
- * mode detection — the wire shape and the UI are the same in both
- * single-user and multi-user deployments. See `docs/hub-mode.md`.
+ * See `docs/identity-model.md`.
  */
 export interface AuthRoutesOptions {
-    token: string
+    serverToken: string
     jwtSecret: Uint8Array
     /**
      * Override the JWT TTL (seconds). Defaults to 12h via `issueToken`.
      * Threading this through is for tests that need to exercise the
      * expired-JWT branch in CLI/web clients without sleeping for 12
-     * hours. Production deploys should never set this; the field is
-     * intentionally not wired into operator-facing config.
+     * hours.
      */
     jwtTtlSeconds?: number
 }
@@ -69,38 +65,37 @@ export function createAuthRoutes(opts: AuthRoutesOptions): Hono {
             })
             return c.json({ error: 'invalid_body' }, 400)
         }
-        const decoded = parseAccessToken(parsed.data.token)
-        if (!decoded) {
+        if (!constantTimeEquals(parsed.data.serverToken, opts.serverToken)) {
             recordFailure(clientKey)
             logAudit({
                 event: 'login_failure',
                 namespace: '',
                 remoteAddr: clientKey,
-                reason: 'invalid_token_shape'
+                reason: 'server_token_mismatch'
             })
             return c.json({ error: 'invalid_token' }, 401)
         }
-        if (!constantTimeEquals(decoded.baseToken, opts.token)) {
+        let namespace: string
+        try {
+            namespace = await computeNamespace(parsed.data.userToken)
+        } catch {
             recordFailure(clientKey)
-            // Namespace is best-effort here: the secret was wrong, but the
-            // parsed namespace tells us *which* namespace the attacker
-            // tried to log into. That's the forensic signal.
             logAudit({
                 event: 'login_failure',
-                namespace: decoded.namespace,
+                namespace: '',
                 remoteAddr: clientKey,
-                reason: 'token_mismatch'
+                reason: 'invalid_user_token'
             })
             return c.json({ error: 'invalid_token' }, 401)
         }
         clearFailure(clientKey)
-        const { token: jwt, expiresAt } = await issueToken(opts.jwtSecret, opts.jwtTtlSeconds, decoded.namespace)
+        const { token: jwt, expiresAt } = await issueToken(opts.jwtSecret, namespace, opts.jwtTtlSeconds)
         logAudit({
             event: 'login_success',
-            namespace: decoded.namespace,
+            namespace,
             remoteAddr: clientKey
         })
-        return c.json({ token: jwt, expiresAt })
+        return c.json({ token: jwt, expiresAt, namespace })
     })
 
     return app
@@ -120,9 +115,7 @@ function constantTimeEquals(a: string, b: string): boolean {
 function getClientKey(c: Context): string {
     // Proxy headers first (operator-trusted), socket peer second
     // (works for direct connections in dev / single-box deploys),
-    // 'unknown' last (signals misconfigured proxy chain). Mirrors
-    // the IP resolution used by the bearer-auth audit and WS attach
-    // audit so the three log streams correlate by remoteAddr.
+    // 'unknown' last (signals misconfigured proxy chain).
     const fromHeader =
         c.req.header('cf-connecting-ip') ||
         c.req.header('x-real-ip') ||

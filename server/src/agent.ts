@@ -26,7 +26,6 @@ function parseArgs(argv: string[]): Record<string, string> {
     const out: Record<string, string> = {}
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i]
-        // Map the short -h to --help so the help printer below catches it.
         if (arg === '-h') {
             out.help = '1'
             continue
@@ -49,17 +48,15 @@ function requireValue(name: string, value: string | undefined): string {
     return value.trim()
 }
 
-function makeAgentUrl(hubUrl: string): string {
+function makeAgentUrl(hubUrl: string, serverToken: string, userToken: string): string {
     const url = new URL('/agent/connect', hubUrl)
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+    url.searchParams.set('serverToken', serverToken)
+    url.searchParams.set('userToken', userToken)
     return url.toString()
 }
 
 function printHelpAndExit(): never {
-    // Operator-facing usage. Don't dump environment or token values; those
-    // are deploy-secret-class. Do enumerate every flag + env var so an
-    // operator with /etc/systemd/system/tmuxd-agent.service in front of
-    // them can write a complete unit.
     const text = `tmuxd agent — outbound WebSocket connection to a tmuxd hub
 
 Usage:
@@ -67,66 +64,79 @@ Usage:
   TMUXD_* env vars are equivalent (env-only deploys are supported).
 
 Required:
-  --hub <url>          Hub base URL, e.g. https://tmuxd.example.com
-                       (env: TMUXD_HUB_URL)
-  --token <secret>     Raw agent token from the hub's TMUXD_AGENT_TOKENS
-                       binding. Sent as Authorization: Bearer.
-                       (env: TMUXD_AGENT_TOKEN)
+  --hub <url>             Hub base URL, e.g. https://tmuxd.example.com
+                          (env: TMUXD_HUB_URL)
+  --server-token <secret> Shared trust-circle token for the hub. Same
+                          value the hub has in TMUXD_SERVER_TOKEN.
+                          (env: TMUXD_SERVER_TOKEN)
+  --user-token <secret>   Personal token of the user this agent belongs
+                          to. The hub derives namespace = sha256(this).
+                          You can re-use the same TMUXD_USER_TOKEN your
+                          'tmuxd login' uses.
+                          (env: TMUXD_USER_TOKEN)
 
 Optional:
-  --id <hostId>        Stable host ID. Must match the hostId pinned in the
-                       hub binding (e.g. \`alice/laptop=...\` → --id laptop).
-                       Defaults to the slug of --name. (env: TMUXD_AGENT_ID)
-  --name <display>     Human-readable name shown in the web UI.
-                       (env: TMUXD_AGENT_NAME, default: "agent")
-  --namespace <ns>     Multi-user hub: the namespace this agent registers
-                       under. Must match the namespace pinned in the hub
-                       binding (\`alice/laptop=...\` → --namespace alice).
-                       Mismatch → hub closes WS with code 4401 and the
-                       agent exits with status 2.
-                       (env: TMUXD_AGENT_NAMESPACE, default: "default")
-  --help, -h           Print this message and exit.
+  --host-id <id>          Stable host ID. Defaults to a slug of --name.
+                          (env: TMUXD_HOST_ID)
+  --host-name <display>   Human-readable name shown in the web UI.
+                          (env: TMUXD_HOST_NAME, default: "agent")
+  --help, -h              Print this message and exit.
 
 Exit codes:
   0   Clean shutdown (e.g. SIGTERM)
   1   Fatal startup error (missing flags, etc.)
-  2   Hub rejected configuration (namespace mismatch, host_id_token_mismatch)
+  2   Hub rejected configuration
 
 Examples:
-  tmuxd agent --hub http://hub.example:7681 --token \${ALICE_TOKEN} \\
-              --namespace alice --id laptop --name "Alice Laptop"
+  tmuxd agent --hub http://hub.example:7681 \\
+              --server-token \${TMUXD_SERVER_TOKEN} \\
+              --user-token  \${ALICE_USER_TOKEN} \\
+              --host-id laptop --host-name "Alice Laptop"
 
   TMUXD_HUB_URL=http://hub.example:7681 \\
-  TMUXD_AGENT_TOKEN=\${ALICE_TOKEN} \\
-  TMUXD_AGENT_NAMESPACE=alice \\
-  TMUXD_AGENT_ID=laptop \\
-  TMUXD_AGENT_NAME="Alice Laptop" \\
+  TMUXD_SERVER_TOKEN=\${TMUXD_SERVER_TOKEN} \\
+  TMUXD_USER_TOKEN=\${ALICE_USER_TOKEN} \\
+  TMUXD_HOST_ID=laptop \\
+  TMUXD_HOST_NAME="Alice Laptop" \\
     tmuxd agent
 
-See docs/hub-mode.md in the repo for the full multi-user deployment guide.
+See docs/identity-model.md for the trust model rationale.
 `
     process.stdout.write(text)
     process.exit(0)
 }
 
-function readConfig() {
+interface AgentConfig {
+    hubUrl: string
+    serverToken: string
+    userToken: string
+    hostName: string
+    hostId: string | undefined
+}
+
+function readConfig(): AgentConfig {
     const args = parseArgs(process.argv.slice(2))
     if (args.help || args.h) printHelpAndExit()
-    const namespace = (args.namespace || process.env.TMUXD_AGENT_NAMESPACE || '').trim() || undefined
     return {
         hubUrl: requireValue('--hub or TMUXD_HUB_URL', args.hub || process.env.TMUXD_HUB_URL),
-        token: requireValue('--token or TMUXD_AGENT_TOKEN', args.token || process.env.TMUXD_AGENT_TOKEN),
-        name: (args.name || process.env.TMUXD_AGENT_NAME || DEFAULT_NAME).trim() || DEFAULT_NAME,
-        id: (args.id || process.env.TMUXD_AGENT_ID || '').trim() || undefined,
-        namespace
+        serverToken: requireValue(
+            '--server-token or TMUXD_SERVER_TOKEN',
+            args['server-token'] || process.env.TMUXD_SERVER_TOKEN
+        ),
+        userToken: requireValue(
+            '--user-token or TMUXD_USER_TOKEN',
+            args['user-token'] || process.env.TMUXD_USER_TOKEN
+        ),
+        hostName: (args['host-name'] || process.env.TMUXD_HOST_NAME || DEFAULT_NAME).trim() || DEFAULT_NAME,
+        hostId: (args['host-id'] || process.env.TMUXD_HOST_ID || '').trim() || undefined
     }
 }
 
 /**
  * Thrown when the hub rejects the agent for a configuration reason that
- * retrying cannot fix (e.g. namespace mismatch). The agent main loop
- * catches it, prints a clear instruction, and exits with code 2 instead
- * of looping forever on backoff.
+ * retrying cannot fix. The agent main loop catches it, prints a clear
+ * instruction, and exits with code 2 instead of looping forever on
+ * backoff.
  */
 class FatalConfigError extends Error {
     constructor(message: string, public readonly hint: string) {
@@ -137,12 +147,6 @@ class FatalConfigError extends Error {
 
 async function main() {
     const config = readConfig()
-    if (!config.namespace) {
-        // Best-effort warning. The server's binding may or may not require
-        // a namespace; if it does and we omit, the close-handler below will
-        // turn the hub's 4401 reject into a hard exit.
-        console.warn('[agent] --namespace not set; defaulting to "default". Set --namespace or TMUXD_AGENT_NAMESPACE if your hub binding pins one.')
-    }
     let attempt = 0
     for (;;) {
         try {
@@ -162,11 +166,9 @@ async function main() {
     }
 }
 
-function connectOnce(config: ReturnType<typeof readConfig>): Promise<void> {
+function connectOnce(config: AgentConfig): Promise<void> {
     return new Promise((resolve, reject) => {
-        const ws = new WebSocket(makeAgentUrl(config.hubUrl), {
-            headers: { authorization: `Bearer ${config.token}` }
-        })
+        const ws = new WebSocket(makeAgentUrl(config.hubUrl, config.serverToken, config.userToken))
         const streams = new Map<string, StreamState>()
         let settled = false
 
@@ -186,11 +188,10 @@ function connectOnce(config: ReturnType<typeof readConfig>): Promise<void> {
         ws.on('open', () => {
             send(ws, {
                 type: 'hello',
-                id: config.id,
-                name: config.name,
+                id: config.hostId,
+                name: config.hostName,
                 version: VERSION,
-                capabilities: CAPABILITIES,
-                ...(config.namespace ? { namespace: config.namespace } : {})
+                capabilities: CAPABILITIES
             })
         })
 
@@ -198,11 +199,7 @@ function connectOnce(config: ReturnType<typeof readConfig>): Promise<void> {
             const msg = parseHubMessage(raw)
             if (!msg) return
             if (msg.type === 'hello_ack') {
-                // Include the namespace the agent registered under so the
-                // operator can correlate this log line with the hub's
-                // `agent_register` audit event without guessing.
-                const ns = config.namespace ?? 'default'
-                console.log(`[agent] connected as ${msg.hostId} (namespace=${ns})`)
+                console.log(`[agent] connected as ${msg.hostId}`)
                 return
             }
             if (msg.type === 'ping') {
@@ -216,6 +213,15 @@ function connectOnce(config: ReturnType<typeof readConfig>): Promise<void> {
             cleanup()
             if (!settled) {
                 settled = true
+                if (res.statusCode === 401) {
+                    reject(
+                        new FatalConfigError(
+                            `hub rejected agent websocket: HTTP 401`,
+                            'verify TMUXD_SERVER_TOKEN matches the hub, and that TMUXD_USER_TOKEN is non-empty.'
+                        )
+                    )
+                    return
+                }
                 reject(new Error(`hub rejected agent websocket: HTTP ${res.statusCode}`))
             }
         })
@@ -231,11 +237,11 @@ function connectOnce(config: ReturnType<typeof readConfig>): Promise<void> {
             const reason = reasonBuf?.toString('utf8') || ''
             if (!settled) {
                 settled = true
-                if (code === 4401 && reason.startsWith('agent_namespace_mismatch')) {
+                if (code === 1008 && reason === 'host_already_connected') {
                     reject(
                         new FatalConfigError(
-                            `hub rejected hello: ${reason}`,
-                            'set --namespace (or TMUXD_AGENT_NAMESPACE) to match the namespace pinned in TMUXD_AGENT_TOKENS on the hub.'
+                            `hub rejected hello: another agent is already connected with this host id`,
+                            'pick a different --host-id, or stop the other agent before reconnecting.'
                         )
                     )
                     return

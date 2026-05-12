@@ -7,12 +7,13 @@ import WebSocket from 'ws'
 
 const HOST = process.env.HOST || '127.0.0.1'
 const PORT = Number(process.env.PORT || 17686)
-const TOKEN = process.env.TMUXD_TOKEN || 'e2e-all-token'
+const SERVER_TOKEN = process.env.TMUXD_SERVER_TOKEN || 'e2e-all-token'
+const USER_TOKEN = process.env.TMUXD_USER_TOKEN || 'e2e-multi-user-token'
 
 const tok = await fetch(`http://${HOST}:${PORT}/api/auth`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ token: TOKEN })
+    body: JSON.stringify({ serverToken: SERVER_TOKEN, userToken: USER_TOKEN })
 })
     .then((r) => r.json())
     .then((j) => j.token)

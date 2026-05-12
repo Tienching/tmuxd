@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { hostIdSchema, namespaceSchema, sessionNameSchema, sessionTargetNameSchema, tmuxKeySchema, tmuxPaneTargetSchema } from '@tmuxd/shared'
+import { hostIdSchema, sessionNameSchema, sessionTargetNameSchema, tmuxKeySchema, tmuxPaneTargetSchema } from '@tmuxd/shared'
 
 const capabilitySchema = z.enum(['list', 'create', 'kill', 'capture', 'attach', 'panes', 'input'])
 const requestIdSchema = z.string().min(1).max(128)
@@ -9,19 +9,24 @@ const textPayloadSchema = z.string().min(1).max(64 * 1024)
 const captureLinesSchema = z.number().int().min(1).max(10_000)
 const captureBytesSchema = z.number().int().min(1024).max(384 * 1024)
 
+/**
+ * Agent hello frame.
+ *
+ * Namespace is **not** in the hello — it's derived by the hub from the
+ * `userToken` query string at WS upgrade time (see `agentRegistry.ts`).
+ * The agent self-declares only the host-level metadata (id, name,
+ * version, capabilities); the hub authoritatively assigns the namespace.
+ *
+ * This means a malicious agent cannot register into a namespace other
+ * than the one its userToken hashes to, even if it crafts a custom
+ * hello frame.
+ */
 export const agentHelloSchema = z.object({
     type: z.literal('hello'),
     id: hostIdSchema.optional(),
     name: z.string().min(1).max(64),
     version: z.string().min(1).max(64).optional(),
-    capabilities: z.array(capabilitySchema).max(8).optional(),
-    /**
-     * Namespace this agent claims. When absent, the hub treats the agent
-     * as legacy (default namespace). The hub verifies this matches the
-     * namespace pinned on the token binding and closes the socket with
-     * code 4401 `agent_namespace_mismatch` on mismatch.
-     */
-    namespace: namespaceSchema.optional()
+    capabilities: z.array(capabilitySchema).max(8).optional()
 })
 
 const agentResultSchema = z.union([

@@ -41,7 +41,7 @@ describe('cliCredentials', () => {
             hubUrl: 'http://hub.example:7681',
             jwt: 'eyJtest',
             expiresAt: Math.floor(Date.now() / 1000) + 3600,
-            namespace: 'alice'
+            namespace: 'aaaaaaaaaaaaaaaa', serverToken: 'srv-tok-1', userToken: 'alice-user-tok'
         }
         await m.saveCredentials(cred)
         const loaded = await m.loadCredentials()
@@ -60,7 +60,7 @@ describe('cliCredentials', () => {
             hubUrl: 'http://hub.example:7681',
             jwt: 'eyJtest',
             expiresAt: Math.floor(Date.now() / 1000) + 3600,
-            namespace: 'alice'
+            namespace: 'aaaaaaaaaaaaaaaa', serverToken: 'srv-tok-1', userToken: 'alice-user-tok'
         })
         const path = m.credentialsPath()
         const fileSt = await stat(path)
@@ -76,7 +76,7 @@ describe('cliCredentials', () => {
             hubUrl: 'http://hub.example:7681',
             jwt: 'eyJtest',
             expiresAt: Math.floor(Date.now() / 1000) + 3600,
-            namespace: 'alice'
+            namespace: 'aaaaaaaaaaaaaaaa', serverToken: 'srv-tok-1', userToken: 'alice-user-tok'
         })
         // Loosen the mode to simulate `chmod 644 ~/.tmuxd/cli/credentials.json`.
         const path = m.credentialsPath()
@@ -98,7 +98,7 @@ describe('cliCredentials', () => {
             hubUrl: 'http://hub.example:7681',
             jwt: 'eyJtest',
             expiresAt: Math.floor(Date.now() / 1000) + 3600,
-            namespace: 'alice'
+            namespace: 'aaaaaaaaaaaaaaaa', serverToken: 'srv-tok-1', userToken: 'alice-user-tok'
         })
         await chmod(m.credentialsPath(), 0o640)
         await assert.rejects(() => m.loadCredentials(), /mode is 640/)
@@ -145,13 +145,13 @@ describe('cliCredentials', () => {
             hubUrl: 'http://hub-a.example',
             jwt: 'a-jwt',
             expiresAt: Math.floor(Date.now() / 1000) + 3600,
-            namespace: 'alice'
+            namespace: 'aaaaaaaaaaaaaaaa', serverToken: 'srv-tok-1', userToken: 'alice-user-tok'
         }
         const b = {
             hubUrl: 'http://hub-b.example',
             jwt: 'b-jwt',
             expiresAt: Math.floor(Date.now() / 1000) + 3600,
-            namespace: 'bob'
+            namespace: 'bbbbbbbbbbbbbbbb', serverToken: 'srv-tok-1', userToken: 'bob-user-tok'
         }
         await m.saveCredentials(a)
         await m.saveCredentials(b)
@@ -170,13 +170,13 @@ describe('cliCredentials', () => {
             hubUrl: 'http://hub-a.example',
             jwt: 'a-jwt',
             expiresAt: Math.floor(Date.now() / 1000) + 3600,
-            namespace: 'alice'
+            namespace: 'aaaaaaaaaaaaaaaa', serverToken: 'srv-tok-1', userToken: 'alice-user-tok'
         }
         const b = {
             hubUrl: 'http://hub-b.example',
             jwt: 'b-jwt',
             expiresAt: Math.floor(Date.now() / 1000) + 3600,
-            namespace: 'bob'
+            namespace: 'bbbbbbbbbbbbbbbb', serverToken: 'srv-tok-1', userToken: 'bob-user-tok'
         }
         await m.saveCredentials(a)
         await m.saveCredentials(b)
@@ -199,17 +199,17 @@ describe('cliCredentials', () => {
             hubUrl: url,
             jwt: 'alice-jwt',
             expiresAt: 9999999999,
-            namespace: 'alice'
+            namespace: 'aaaaaaaaaaaaaaaa', serverToken: 'srv-tok-1', userToken: 'alice-user-tok'
         })
         await m.saveCredentials({
             hubUrl: url,
             jwt: 'bob-jwt',
             expiresAt: 9999999999,
-            namespace: 'bob'
+            namespace: 'bbbbbbbbbbbbbbbb', serverToken: 'srv-tok-1', userToken: 'bob-user-tok'
         })
         const loaded = await m.loadCredentials(url)
         assert.equal(loaded?.jwt, 'bob-jwt')
-        assert.equal(loaded?.namespace, 'bob')
+        assert.equal(loaded?.namespace, 'bbbbbbbbbbbbbbbb')
         // Read the file directly to be sure no alice entry hides under
         // a different shape.
         const raw = await (await import('node:fs/promises')).readFile(m.credentialsPath(), 'utf8')
@@ -229,7 +229,7 @@ describe('cliCredentials', () => {
             hubUrl: 'http://hub.example',
             jwt: 'eyJfresh',
             expiresAt: 9999999999,
-            namespace: 'alice'
+            namespace: 'aaaaaaaaaaaaaaaa', serverToken: 'srv-tok-1', userToken: 'alice-user-tok'
         })
         const loaded = await m.loadCredentials()
         assert.equal(loaded?.jwt, 'eyJfresh')

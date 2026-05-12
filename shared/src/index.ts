@@ -1,3 +1,3 @@
 export * from './types.js'
 export * from './schemas.js'
-export * from './accessToken.js'
+export * from './identity.js'

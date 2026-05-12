@@ -12,6 +12,13 @@ import { AgentError } from '../agentRegistry.js'
 import { parseCaptureMetadata } from '../tmux.test.js'
 import type { TmuxPaneCapture, TmuxPaneStatus, TmuxSession } from '@tmuxd/shared'
 
+// Fake 16-hex namespaces. The new identity model derives namespace from
+// sha256(userToken); these stand-in values make tests independent of the
+// hashing layer (which is exercised by auth.test.ts and routes/auth.test.ts).
+const NS_DEFAULT = '0000000000000000'
+const NS_ALICE = 'aaaaaaaaaaaaaaaa'
+const NS_BOB = 'bbbbbbbbbbbbbbbb'
+
 function authHeader(token: string): { Authorization: string } {
     return { Authorization: `Bearer ${token}` }
 }
@@ -246,7 +253,7 @@ async function installFakeTmux(defaultState: { sessions: TmuxSession[]; panes: a
     process.env.TMUXD_FAKE_TMUX_LOG = logPath
 
     const jwtSecret = new TextEncoder().encode('test-jwt-secret')
-    const { token } = await issueToken(jwtSecret)
+    const { token } = await issueToken(jwtSecret, NS_DEFAULT)
     const app = new Hono()
 
     const actionStore = TmuxActionStore.inDataDir(join(workDir, 'actions'))
@@ -1034,13 +1041,13 @@ describe('cross-namespace isolation', { concurrency: 1 }, () => {
         }
         const registry = {
             listHosts: (ns: string) => {
-                if (ns === 'alice') return [aliceHost]
-                if (ns === 'bob') return [bobHost]
+                if (ns === NS_ALICE) return [aliceHost]
+                if (ns === NS_BOB) return [bobHost]
                 return []
             },
             hasHost: (ns: string, id: string) => {
-                if (ns === 'alice') return id === aliceHost.id
-                if (ns === 'bob') return id === bobHost.id
+                if (ns === NS_ALICE) return id === aliceHost.id
+                if (ns === NS_BOB) return id === bobHost.id
                 return false
             },
             listSessions: async (_ns: string, _hostId: string) => [],
@@ -1067,8 +1074,8 @@ describe('cross-namespace isolation', { concurrency: 1 }, () => {
             const actionStore = TmuxActionStore.inDataDir(join(tmpdirPath, 'actions'))
             const app = makeAliceBobApp(jwtSecret, actionStore)
 
-            const aliceToken = (await issueToken(jwtSecret, 60, 'alice')).token
-            const bobToken = (await issueToken(jwtSecret, 60, 'bob')).token
+            const aliceToken = (await issueToken(jwtSecret, NS_ALICE, 60)).token
+            const bobToken = (await issueToken(jwtSecret, NS_BOB, 60)).token
             const aliceAuth = { Authorization: `Bearer ${aliceToken}` }
             const bobAuth = { Authorization: `Bearer ${bobToken}` }
 
@@ -1140,7 +1147,7 @@ describe('cross-namespace isolation', { concurrency: 1 }, () => {
             const actionStore = TmuxActionStore.inDataDir(join(tmpdirPath, 'actions'))
             const app = makeAliceBobApp(jwtSecret, actionStore)
 
-            const aliceToken = (await issueToken(jwtSecret, 60, 'alice')).token
+            const aliceToken = (await issueToken(jwtSecret, NS_ALICE, 60)).token
             // Alice asks for a ticket for HER host — that succeeds.
             const aliceTicketRes = await app.request('/api/ws-ticket', {
                 method: 'POST',
@@ -1152,11 +1159,11 @@ describe('cross-namespace isolation', { concurrency: 1 }, () => {
             assert.ok(ticketBody.ticket, 'ticket value should be present')
 
             // Now consume it directly via the ticket store (the WS layer does
-            // this in production). The stamped namespace must be 'alice'.
+            // this in production). The stamped namespace must be alice's.
             const { consumeWsTicket } = await import('../wsTickets.js')
             const consumed = consumeWsTicket(ticketBody.ticket, { hostId: 'alice-laptop', sessionName: 'main' })
             assert.ok(consumed, 'alice ticket should consume against her own target')
-            assert.equal(consumed!.namespace, 'alice', 'consumed ticket carries alice namespace')
+            assert.equal(consumed!.namespace, NS_ALICE, 'consumed ticket carries alice namespace')
         } finally {
             await rm(tmpdirPath, { recursive: true, force: true })
         }
@@ -1205,7 +1212,7 @@ describe('hub-only mode (TMUXD_HUB_ONLY)', { concurrency: 1 }, () => {
             const jwtSecret = new TextEncoder().encode('test-jwt-secret-for-hub-only-tests')
             const actionStore = TmuxActionStore.inDataDir(join(dir, 'actions'))
             const app = makeApp(jwtSecret, actionStore)
-            const { token } = await issueToken(jwtSecret, 60, 'alice')
+            const { token } = await issueToken(jwtSecret, NS_ALICE, 60)
             const auth = { Authorization: `Bearer ${token}` }
 
             setLocalHostEnabled(false)
@@ -1230,7 +1237,7 @@ describe('hub-only mode (TMUXD_HUB_ONLY)', { concurrency: 1 }, () => {
             const jwtSecret = new TextEncoder().encode('test-jwt-secret-for-hub-only-tests')
             const actionStore = TmuxActionStore.inDataDir(join(dir, 'actions'))
             const app = makeApp(jwtSecret, actionStore)
-            const { token } = await issueToken(jwtSecret, 60, 'alice')
+            const { token } = await issueToken(jwtSecret, NS_ALICE, 60)
             const auth = { Authorization: `Bearer ${token}` }
             const jsonAuth = { ...auth, 'content-type': 'application/json' }
 
@@ -1283,7 +1290,7 @@ describe('hub-only mode (TMUXD_HUB_ONLY)', { concurrency: 1 }, () => {
             const jwtSecret = new TextEncoder().encode('test-jwt-secret-for-hub-only-tests')
             const actionStore = TmuxActionStore.inDataDir(join(dir, 'actions'))
             const app = makeApp(jwtSecret, actionStore)
-            const { token } = await issueToken(jwtSecret, 60, 'alice')
+            const { token } = await issueToken(jwtSecret, NS_ALICE, 60)
             const auth = { Authorization: `Bearer ${token}` }
 
             setLocalHostEnabled(false)
@@ -1304,7 +1311,7 @@ describe('hub-only mode (TMUXD_HUB_ONLY)', { concurrency: 1 }, () => {
             const jwtSecret = new TextEncoder().encode('test-jwt-secret-for-hub-only-tests')
             const actionStore = TmuxActionStore.inDataDir(join(dir, 'actions'))
             const app = makeApp(jwtSecret, actionStore)
-            const { token } = await issueToken(jwtSecret, 60, 'alice')
+            const { token } = await issueToken(jwtSecret, NS_ALICE, 60)
             const auth = { Authorization: `Bearer ${token}` }
 
             // Fake registry above has remote host only in ns='alice'

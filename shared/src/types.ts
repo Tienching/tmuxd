@@ -118,18 +118,6 @@ export interface TmuxSnapshot {
 
 export const LOCAL_HOST_ID = 'local'
 
-/**
- * Default namespace for single-user / legacy mode.
- *
- * When the operator logs in with bare `TMUXD_TOKEN` (no `:<namespace>`
- * suffix), JWTs are issued with `ns = DEFAULT_NAMESPACE`, agent
- * registrations without an explicit namespace bind to
- * `DEFAULT_NAMESPACE`, and legacy agents that do not report
- * `hello.namespace` are treated as `DEFAULT_NAMESPACE`. See
- * `docs/hub-mode.md`.
- */
-export const DEFAULT_NAMESPACE = 'default'
-
 export type HostStatus = 'online' | 'offline'
 export type HostCapability = 'list' | 'create' | 'kill' | 'capture' | 'attach' | 'panes' | 'input'
 

@@ -1,5 +1,4 @@
 import { randomBytes } from 'node:crypto'
-import { DEFAULT_NAMESPACE } from '@tmuxd/shared'
 
 const TTL_SECONDS = 30
 const tickets = new Map<string, StoredTicket>()
@@ -11,13 +10,13 @@ export interface WsTicketTarget {
 
 export interface WsTicketIssueOptions extends WsTicketTarget {
     /** Namespace of the caller who requested the ticket. Stamped at issuance. */
-    namespace?: string
+    namespace: string
 }
 
 interface StoredTicket {
     expiresAt: number
     target: WsTicketTarget
-    /** The namespace this ticket was issued to. Defaults to DEFAULT_NAMESPACE. */
+    /** The namespace this ticket was issued to. */
     namespace: string
 }
 
@@ -30,11 +29,10 @@ export function issueWsTicket(target: WsTicketIssueOptions): { ticket: string; e
     sweepExpired()
     const ticket = randomBytes(24).toString('base64url')
     const expiresAt = Math.floor(Date.now() / 1000) + TTL_SECONDS
-    const namespace = target.namespace ?? DEFAULT_NAMESPACE
     tickets.set(ticket, {
         expiresAt,
         target: { hostId: target.hostId, sessionName: target.sessionName },
-        namespace
+        namespace: target.namespace
     })
     return { ticket, expiresAt }
 }

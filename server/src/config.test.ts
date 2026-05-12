@@ -1,113 +1,103 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { DEFAULT_NAMESPACE } from '@tmuxd/shared'
-import { parseBoundAgentTokens } from './config.js'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { loadConfig } from './config.js'
 
-describe('parseBoundAgentTokens', () => {
-    it('parses a single legacy hostId=token entry into DEFAULT_NAMESPACE', () => {
-        const out = parseBoundAgentTokens('workstation=supersecret')
-        assert.deepEqual(out, [{ namespace: DEFAULT_NAMESPACE, hostId: 'workstation', token: 'supersecret' }])
-    })
-    it('parses a single namespace/hostId=token entry', () => {
-        const out = parseBoundAgentTokens('alice/laptop=supersecret')
-        assert.deepEqual(out, [{ namespace: 'alice', hostId: 'laptop', token: 'supersecret' }])
-    })
-    it('parses multiple entries separated by commas', () => {
-        const out = parseBoundAgentTokens('alice/laptop=tok1,bob/desktop=tok2')
-        assert.deepEqual(out, [
-            { namespace: 'alice', hostId: 'laptop', token: 'tok1' },
-            { namespace: 'bob', hostId: 'desktop', token: 'tok2' }
-        ])
-    })
-    it('allows mixing legacy and new formats', () => {
-        const out = parseBoundAgentTokens('workstation=tok1,bob/desktop=tok2')
-        assert.deepEqual(out, [
-            { namespace: DEFAULT_NAMESPACE, hostId: 'workstation', token: 'tok1' },
-            { namespace: 'bob', hostId: 'desktop', token: 'tok2' }
-        ])
-    })
-    it('tolerates surrounding whitespace on entries', () => {
-        const out = parseBoundAgentTokens('  alice/laptop = tok1  ,  bob/desktop=tok2')
-        assert.deepEqual(out, [
-            { namespace: 'alice', hostId: 'laptop', token: 'tok1' },
-            { namespace: 'bob', hostId: 'desktop', token: 'tok2' }
-        ])
-    })
-    it('ignores empty entries from trailing commas', () => {
-        const out = parseBoundAgentTokens('alice/laptop=tok1,,')
-        assert.equal(out.length, 1)
-        assert.equal(out[0].namespace, 'alice')
-    })
-    it('rejects missing = separator', () => {
-        assert.throws(() => parseBoundAgentTokens('alice/laptop'), /must use \[namespace\/\]hostId=token/)
-    })
-    it('rejects empty token', () => {
-        assert.throws(() => parseBoundAgentTokens('alice/laptop='), /token is empty/)
-    })
-    it('rejects "local" as hostId (matches legacy behavior)', () => {
-        assert.throws(() => parseBoundAgentTokens('alice/local=tok'), /Invalid TMUXD_AGENT_TOKENS host id/)
-        assert.throws(() => parseBoundAgentTokens('local=tok'), /Invalid TMUXD_AGENT_TOKENS host id/)
-    })
-    it('rejects invalid charset in hostId', () => {
-        assert.throws(() => parseBoundAgentTokens('alice/has space=tok'), /Invalid TMUXD_AGENT_TOKENS host id/)
-        assert.throws(() => parseBoundAgentTokens('alice/has!bang=tok'), /Invalid TMUXD_AGENT_TOKENS host id/)
-    })
-    it('rejects invalid charset in namespace', () => {
-        assert.throws(() => parseBoundAgentTokens('has space/laptop=tok'), /Invalid TMUXD_AGENT_TOKENS namespace/)
-        assert.throws(() => parseBoundAgentTokens('has!bang/laptop=tok'), /Invalid TMUXD_AGENT_TOKENS namespace/)
-    })
-    it('rejects empty namespace before slash', () => {
-        assert.throws(() => parseBoundAgentTokens('/laptop=tok'), /namespace is empty/)
-    })
-    it('rejects empty hostId after slash', () => {
-        assert.throws(() => parseBoundAgentTokens('alice/=tok'), /host id is empty/)
-    })
-    it('rejects a completely empty value', () => {
-        assert.throws(() => parseBoundAgentTokens(''), /did not contain any/)
-        assert.throws(() => parseBoundAgentTokens(',,'), /did not contain any/)
-    })
-    it('allows tokens that contain = signs (split on first =)', () => {
-        // This matches historical behavior: indexOf('=') splits on the first `=`,
-        // so tokens can contain `=` (e.g., base64url padding).
-        const out = parseBoundAgentTokens('alice/laptop=ZXhhbXBsZQ==')
-        assert.equal(out[0].token, 'ZXhhbXBsZQ==')
-    })
+/**
+ * loadConfig() reads from process.env directly. We snapshot/restore the
+ * env around each test to avoid leaking state between cases.
+ */
+function withEnv<T>(overrides: Record<string, string | undefined>, fn: () => T): T {
+    const snapshot: Record<string, string | undefined> = {}
+    for (const k of Object.keys(overrides)) snapshot[k] = process.env[k]
+    try {
+        for (const [k, v] of Object.entries(overrides)) {
+            if (v === undefined) delete process.env[k]
+            else process.env[k] = v
+        }
+        return fn()
+    } finally {
+        for (const [k, v] of Object.entries(snapshot)) {
+            if (v === undefined) delete process.env[k]
+            else process.env[k] = v
+        }
+    }
+}
 
-    it('rejects duplicate (namespace, hostId) pairs', () => {
-        // Two entries pinning the same agent slot is ambiguous: only the
-        // first will ever match. Treat as a config error so the operator
-        // notices instead of silently shadowing.
+describe('loadConfig', () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'tmuxd-config-test-'))
+
+    it('requires TMUXD_SERVER_TOKEN', () => {
         assert.throws(
-            () => parseBoundAgentTokens('alice/laptop=token-1,alice/laptop=token-2'),
-            /Duplicate TMUXD_AGENT_TOKENS binding for "alice\/laptop"/
+            () =>
+                withEnv(
+                    { TMUXD_SERVER_TOKEN: undefined, TMUXD_HOME: dataDir, JWT_SECRET: 'a'.repeat(32) },
+                    () => loadConfig()
+                ),
+            /Missing required auth: set TMUXD_SERVER_TOKEN/
         )
     })
 
-    it('rejects duplicate (default-namespace, hostId) via legacy + explicit form', () => {
-        // Legacy `laptop=token` and `default/laptop=token-2` both bind the
-        // same slot; the duplicate-detector must catch that too.
+    it('parses TMUXD_SERVER_TOKEN and defaults host/port', () => {
+        const config = withEnv(
+            {
+                TMUXD_SERVER_TOKEN: 'team-secret',
+                TMUXD_HOME: dataDir,
+                JWT_SECRET: 'a'.repeat(32),
+                HOST: undefined,
+                PORT: undefined
+            },
+            () => loadConfig()
+        )
+        assert.equal(config.serverToken, 'team-secret')
+        assert.equal(config.host, '127.0.0.1')
+        assert.equal(config.port, 7681)
+        assert.equal(config.hubOnly, false)
+    })
+
+    it('TMUXD_HUB_ONLY=1 → hubOnly true', () => {
+        const config = withEnv(
+            {
+                TMUXD_SERVER_TOKEN: 'team-secret',
+                TMUXD_HUB_ONLY: '1',
+                TMUXD_HOME: dataDir,
+                JWT_SECRET: 'a'.repeat(32)
+            },
+            () => loadConfig()
+        )
+        assert.equal(config.hubOnly, true)
+    })
+
+    it('rejects invalid PORT', () => {
         assert.throws(
-            () => parseBoundAgentTokens('laptop=token-1,default/laptop=token-2'),
-            /Duplicate TMUXD_AGENT_TOKENS binding for "default\/laptop"/
+            () =>
+                withEnv(
+                    {
+                        TMUXD_SERVER_TOKEN: 'tok',
+                        PORT: 'not-a-number',
+                        TMUXD_HOME: dataDir,
+                        JWT_SECRET: 'a'.repeat(32)
+                    },
+                    () => loadConfig()
+                ),
+            /Invalid PORT/
         )
     })
 
-    it('rejects two bindings sharing the same token', () => {
-        // Same secret authenticating as two different agents is a
-        // security footgun (token rotation by accident).
+    it('JWT_SECRET shorter than 32 bytes is rejected', () => {
         assert.throws(
-            () => parseBoundAgentTokens('alice/laptop=shared-token,bob/desktop=shared-token'),
-            /Duplicate TMUXD_AGENT_TOKENS token shared by "alice\/laptop" and "bob\/desktop"/
+            () =>
+                withEnv(
+                    {
+                        TMUXD_SERVER_TOKEN: 'tok',
+                        JWT_SECRET: 'too-short',
+                        TMUXD_HOME: dataDir
+                    },
+                    () => loadConfig()
+                ),
+            /at least 32 bytes/
         )
-    })
-
-    it('allows different namespaces with the same hostId', () => {
-        // alice/laptop and bob/laptop are legitimately distinct: both
-        // users have a "laptop" agent. Only the (ns, hostId) pair must
-        // be unique, not the hostId alone.
-        const out = parseBoundAgentTokens('alice/laptop=token-a,bob/laptop=token-b')
-        assert.equal(out.length, 2)
-        assert.equal(out[0].namespace, 'alice')
-        assert.equal(out[1].namespace, 'bob')
     })
 })

@@ -30,9 +30,8 @@ export function attachTmuxPty(session: string, cols: number, rows: number): PtyB
     // The hub's auth/agent secrets must not leak into PTY children where a
     // shell user could `env | grep TMUXD`.
     const {
-        TMUXD_TOKEN: _tt,
-        TMUXD_AGENT_TOKEN: _tat,
-        TMUXD_AGENT_TOKENS: _tats,
+        TMUXD_SERVER_TOKEN: _tst,
+        TMUXD_USER_TOKEN: _tut,
         JWT_SECRET: _js,
         ...cleanEnv
     } = process.env

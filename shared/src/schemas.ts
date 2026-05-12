@@ -47,20 +47,17 @@ export const hostIdSchema = z
 /**
  * Valid namespace identifier.
  *
- * Namespaces are per-user tenancy labels in tmuxd's hub mode. A namespace
- * must be argv/URL/log-safe; `[A-Za-z0-9._-]{1,64}` is intentionally
- * stricter than HAPI's namespace charset (HAPI accepts any non-whitespace
- * string after the last `:`).
- *
- * `'local'` is NOT reserved here — namespaces and host ids share no
- * keyspace; the `'local'` name is reserved for the hub's own host id
- * (see `hostIdSchema` consumers).
+ * Namespaces are derived from user tokens via `computeNamespace()` in
+ * `identity.ts` — 16 lowercase hex characters (64 bits of a sha256
+ * digest). The regex enforces that shape everywhere a namespace flows
+ * through a schema (JWT ns claim, agent WS handshake, audit records,
+ * credentials file), so anything that doesn't look like a computed
+ * namespace is rejected early.
  */
 export const namespaceSchema = z
     .string()
-    .min(1)
-    .max(64)
-    .regex(/^[A-Za-z0-9._-]+$/, 'Invalid namespace')
+    .length(16)
+    .regex(/^[a-f0-9]{16}$/, 'Invalid namespace')
 
 export const tmuxPaneTargetSchema = z
     .string()
@@ -112,16 +109,24 @@ export const tmuxActionIdSchema = z
     .regex(/^[A-Za-z0-9._-]+$/, 'Invalid action id')
 
 /**
- * Login body. The client always sends `{ token }`; the bare token form
- * `<token>` lands the user in `DEFAULT_NAMESPACE`, while `<token>:<ns>`
- * lands them in the named namespace. The server splits with
- * `parseAccessToken`. Max length is generous to permit long secrets;
- * the parser rejects anything not well-formed after trimming.
+ * Login body.
  *
- * There is exactly one login concept — see `docs/hub-mode.md`.
+ * The client POSTs two tokens:
+ *   - serverToken: the shared trust-circle token (= TMUXD_SERVER_TOKEN
+ *     on the hub). Required for every request; only holders of this
+ *     token may use the hub as a relay.
+ *   - userToken: the client's personal token. The hub does NOT store
+ *     this; it derives a stable namespace via sha256(userToken) and
+ *     stamps that namespace onto the JWT.
+ *
+ * Both tokens are opaque strings; only length is bounded to prevent
+ * absurd payloads.
+ *
+ * See `docs/identity-model.md`.
  */
 export const loginSchema = z.object({
-    token: z.string().min(1).max(1024)
+    serverToken: z.string().min(1).max(1024),
+    userToken: z.string().min(1).max(1024)
 })
 
 export const createSessionSchema = z.object({

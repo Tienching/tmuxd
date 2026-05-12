@@ -8,6 +8,8 @@ import { issueWsTicket } from './wsTickets.js'
 import { tryHandleUpgrade } from './ws.js'
 
 const TEST_SECRET = new TextEncoder().encode('test-jwt-secret-of-at-least-32-bytes-long')
+const NS_ALICE = 'aaaaaaaaaaaaaaaa'
+const NS_BOB = 'bbbbbbbbbbbbbbbb'
 
 /**
  * Synthesize a minimal IncomingMessage + Duplex pair so we can drive
@@ -57,8 +59,8 @@ describe('ws.tryHandleUpgrade — namespace gating', { concurrency: 1 }, () => {
     it("rejects Alice's JWT trying to attach Bob's host with 404", async () => {
         const wss = new WebSocketServer({ noServer: true })
         try {
-            const aliceToken = (await issueToken(TEST_SECRET, 60, 'alice')).token
-            const registry = makeRegistry({ alice: ['alice-laptop'], bob: ['bob-desktop'] })
+            const aliceToken = (await issueToken(TEST_SECRET, NS_ALICE, 60)).token
+            const registry = makeRegistry({ [NS_ALICE]: ['alice-laptop'], [NS_BOB]: ['bob-desktop'] })
             const { req, sock, written } = fakeRequest(
                 `/ws/bob-desktop/main?token=${encodeURIComponent(aliceToken)}`
             )
@@ -76,7 +78,7 @@ describe('ws.tryHandleUpgrade — namespace gating', { concurrency: 1 }, () => {
     it('rejects unknown JWT with 401', async () => {
         const wss = new WebSocketServer({ noServer: true })
         try {
-            const registry = makeRegistry({ alice: ['alice-laptop'] })
+            const registry = makeRegistry({ [NS_ALICE]: ['alice-laptop'] })
             const { req, sock, written } = fakeRequest('/ws/alice-laptop/main?token=garbage')
             const handled = await tryHandleUpgrade(wss, TEST_SECRET, req, sock, Buffer.alloc(0), {
                 agentRegistry: registry as any
@@ -96,7 +98,7 @@ describe('ws.tryHandleUpgrade — namespace gating', { concurrency: 1 }, () => {
         // close the door because the registry won't find (alice, bob-desktop).
         const wss = new WebSocketServer({ noServer: true })
         try {
-            const registry = makeRegistry({ alice: ['alice-laptop'], bob: ['bob-desktop'] })
+            const registry = makeRegistry({ [NS_ALICE]: ['alice-laptop'], [NS_BOB]: ['bob-desktop'] })
             // Mint a ticket directly via the ticket store, stamping ns=alice
             // but pointing at bob-desktop. (In production wsTicketRequestSchema
             // + the routes layer would refuse to issue this, but the WS layer
@@ -104,7 +106,7 @@ describe('ws.tryHandleUpgrade — namespace gating', { concurrency: 1 }, () => {
             const { ticket } = issueWsTicket({
                 hostId: 'bob-desktop',
                 sessionName: 'main',
-                namespace: 'alice'
+                namespace: NS_ALICE
             })
             const { req, sock, written } = fakeRequest(
                 `/ws/bob-desktop/main?ticket=${encodeURIComponent(ticket)}`
@@ -124,7 +126,7 @@ describe('ws.tryHandleUpgrade — namespace gating', { concurrency: 1 }, () => {
     it('rejects requests without any auth credential with 401', async () => {
         const wss = new WebSocketServer({ noServer: true })
         try {
-            const registry = makeRegistry({ alice: ['alice-laptop'] })
+            const registry = makeRegistry({ [NS_ALICE]: ['alice-laptop'] })
             const { req, sock, written } = fakeRequest('/ws/alice-laptop/main')
             const handled = await tryHandleUpgrade(wss, TEST_SECRET, req, sock, Buffer.alloc(0), {
                 agentRegistry: registry as any
@@ -140,7 +142,7 @@ describe('ws.tryHandleUpgrade — namespace gating', { concurrency: 1 }, () => {
     it('returns false (not handled) for non-/ws paths', async () => {
         const wss = new WebSocketServer({ noServer: true })
         try {
-            const registry = makeRegistry({ alice: ['alice-laptop'] })
+            const registry = makeRegistry({ [NS_ALICE]: ['alice-laptop'] })
             const { req, sock } = fakeRequest('/api/something/else')
             const handled = await tryHandleUpgrade(wss, TEST_SECRET, req, sock, Buffer.alloc(0), {
                 agentRegistry: registry as any

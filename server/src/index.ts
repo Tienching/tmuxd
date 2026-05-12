@@ -51,29 +51,12 @@ async function main() {
     setLocalHostEnabled(!config.hubOnly)
     if (config.hubOnly) {
         console.log('[tmuxd] Hub-only mode: local tmux routes are disabled.')
-        if (config.agentTokens.length === 0) {
-            // A hub with no registered agents can't serve any tmux sessions
-            // (local is disabled, no remote bindings). Warn so that the
-            // operator notices before users do.
-            console.warn(
-                '[tmuxd] WARN: hub-only mode with no agent bindings configured. ' +
-                'Set TMUXD_AGENT_TOKENS=<ns>/<hostId>=<token>,... so agents can ' +
-                'register, otherwise /api/hosts will be empty for every user.'
-            )
-        }
-    }
-    // Confirmation log for operators: who's pre-bound? Lists the count and
-    // the unique namespaces. No tokens or hostIds are printed; the number
-    // of bindings + namespace names is enough to verify "the hub loaded
-    // what I thought it loaded" without exposing any secret material.
-    if (config.agentTokens.length > 0) {
-        const namespaces = [...new Set(config.agentTokens.map((b) => b.namespace))].sort()
         console.log(
-            `[tmuxd] Loaded ${config.agentTokens.length} agent binding(s) across ` +
-            `${namespaces.length} namespace(s): ${namespaces.join(', ')}`
+            '[tmuxd] Hub is open to anyone with TMUXD_SERVER_TOKEN; each user is ' +
+            'identified by their personal TMUXD_USER_TOKEN. See docs/identity-model.md.'
         )
     }
-    const agentRegistry = new AgentRegistry(config.agentTokens)
+    const agentRegistry = new AgentRegistry(config.serverToken)
     const actionStore = TmuxActionStore.inDataDir(config.dataDir)
 
     const app = new Hono()
@@ -91,12 +74,10 @@ async function main() {
     app.route(
         '/api',
         createAuthRoutes({
-            token: config.token,
+            serverToken: config.serverToken,
             jwtSecret: config.jwtSecret,
             // Test-only knob to force a short JWT TTL for the expired-JWT
             // path. Never document this; never set it in production.
-            // The CLI's e2e suite uses `1` (one second) to verify whoami
-            // and authenticated requests behave correctly post-expiry.
             jwtTtlSeconds: parseTestTtl(process.env.TMUXD_JWT_TTL_SECONDS_FOR_TEST)
         })
     )

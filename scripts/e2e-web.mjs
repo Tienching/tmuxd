@@ -43,7 +43,7 @@ async function main() {
         {
             env: {
                 ...process.env,
-                TMUXD_TOKEN: TOKEN,
+                TMUXD_SERVER_TOKEN: TOKEN,
                 PORT: String(PORT),
                 HOST: '127.0.0.1',
                 TMUXD_HOME: '/tmp/tmuxd-web-smoke'
@@ -100,8 +100,8 @@ async function main() {
                 ],
                 { timeout: 30000, maxBuffer: 10 * 1024 * 1024 }
             )
-            const renders = /tmuxd/.test(stdout) && /Access token/i.test(stdout) && /Sign in/i.test(stdout)
-            log('Chrome renders /login (Sign in + Access token label)', renders)
+            const renders = /tmuxd/.test(stdout) && /Server token/i.test(stdout) && /User token/i.test(stdout) && /Sign in/i.test(stdout)
+            log('Chrome renders /login (Sign in + token labels)', renders)
         } catch (err) {
             log('Chrome renders /login', false, err.message.slice(0, 120))
         }

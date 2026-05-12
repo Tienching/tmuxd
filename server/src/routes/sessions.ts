@@ -8,7 +8,6 @@ import { join } from 'node:path'
 import { ZodError } from 'zod'
 import { verifyJwt } from '../auth.js'
 import {
-    DEFAULT_NAMESPACE,
     createSessionSchema,
     paneCaptureQuerySchema,
     sendKeysRequestSchema,
@@ -72,10 +71,10 @@ function bearerAuth(jwtSecret: Uint8Array) {
             })
             return c.json({ error: 'invalid_token' }, 401)
         }
-        // Stash the caller's namespace for downstream handlers. See
-        // `requireNamespace()` (Task #24) for the read side; plumbing only
-        // here so behavior is unchanged until filtering lands.
-        c.set('ns', payload.ns ?? DEFAULT_NAMESPACE)
+        // Stash the caller's namespace for downstream handlers. The JWT
+        // verifier already enforces ns being a valid 16-hex namespace, so
+        // by the time we get here `payload.ns` is guaranteed present.
+        c.set('ns', payload.ns)
         await next()
     }
 }

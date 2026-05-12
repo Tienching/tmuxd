@@ -2,7 +2,15 @@
 /**
  * E2E: real `tmuxd` hub + two real `tmuxd agent` processes, proving
  * cross-namespace isolation through the entire stack — actual websocket
- * frames, actual `node-pty`-free hello path, actual JWT issuance.
+ * frames, actual `node-pty`-free hello path, actual JWT issuance —
+ * under the new two-token trust model.
+ *
+ * Trust model recap (see docs/identity-model.md):
+ *   - hub holds a single TMUXD_SERVER_TOKEN
+ *   - every agent connects with (serverToken, userToken) on the WS query
+ *   - hub computes namespace = sha256(userToken).slice(0, 16) and stamps
+ *     the agent into that namespace's host map
+ *   - hub never persistently stores user tokens or per-agent identities
  *
  * Topology:
  *
@@ -17,9 +25,12 @@
  * Asserts:
  *   - Alice's HTTP client sees only `alice-laptop` in /api/hosts.
  *   - Bob's HTTP client sees only `bob-desktop`.
- *   - Cross-namespace probe (Alice asking for /hosts/bob-desktop/sessions) → 404.
- *   - Spawning a third agent with Alice's token but namespace=eve fails
- *     hard with exit code 2 (hub closes WS with 4401).
+ *   - Cross-namespace probe (Alice asking for /hosts/desktop/sessions) → 404,
+ *     and the same for every mutation vector (send-text, send-keys,
+ *     kill-session, create-session, ws-ticket).
+ *   - An agent that connects with the wrong serverToken is rejected at
+ *     upgrade time with HTTP 401 → the agent process exits with code 2
+ *     (FatalConfigError path in agent.ts).
  *
  * Used by: npm run e2e:hub-agents
  */
@@ -27,13 +38,21 @@
 import { spawn } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 
 const HOST = '127.0.0.1'
 const PORT = Number(process.env.TMUXD_E2E_PORT || 17688)
-const BASE = 'real-agent-base-secret-' + Math.random().toString(36).slice(2)
-const ALICE_TOKEN = 'alice-real-agent-token-' + Math.random().toString(36).slice(2)
-const BOB_TOKEN = 'bob-real-agent-token-' + Math.random().toString(36).slice(2)
+const SERVER_TOKEN = 'real-agent-server-token-' + Math.random().toString(36).slice(2)
+const ALICE_USER_TOKEN = 'alice-real-agent-' + Math.random().toString(36).slice(2)
+const BOB_USER_TOKEN = 'bob-real-agent-' + Math.random().toString(36).slice(2)
 const TMUXD_HOME = `/tmp/tmuxd-e2e-real-agents-${process.pid}`
+
+/** Mirror of shared/src/identity.ts#computeNamespace — see e2e-hub.mjs. */
+function computeNamespace(userToken) {
+    const trimmed = String(userToken).trim()
+    if (!trimmed) throw new Error('userToken must not be empty')
+    return createHash('sha256').update(trimmed, 'utf8').digest('hex').slice(0, 16)
+}
 
 const passes = []
 const fails = []
@@ -78,14 +97,17 @@ async function postJson(path, body, headers = {}) {
     })
 }
 
-async function login(ns) {
-    const r = await postJson('/api/auth', { token: `${BASE}:${ns}` })
-    if (r.status !== 200) throw new Error(`login as ${ns} failed: ${r.status}`)
+async function login(userToken) {
+    const r = await postJson('/api/auth', {
+        serverToken: SERVER_TOKEN,
+        userToken
+    })
+    if (r.status !== 200) throw new Error(`login failed: ${r.status}`)
     const body = await r.json()
     return body.token
 }
 
-function spawnAgent({ token, namespace, id, name }) {
+function spawnAgent({ userToken, hostId, hostName, serverToken = SERVER_TOKEN }) {
     return spawn(
         'node',
         ['node_modules/.bin/tsx', 'server/src/agent.ts'],
@@ -93,13 +115,13 @@ function spawnAgent({ token, namespace, id, name }) {
             env: {
                 ...process.env,
                 TMUXD_HUB_URL: `http://${HOST}:${PORT}`,
-                TMUXD_AGENT_TOKEN: token,
-                TMUXD_AGENT_NAMESPACE: namespace,
-                TMUXD_AGENT_ID: id,
-                TMUXD_AGENT_NAME: name,
+                TMUXD_SERVER_TOKEN: serverToken,
+                TMUXD_USER_TOKEN: userToken,
+                TMUXD_HOST_ID: hostId,
+                TMUXD_HOST_NAME: hostName,
                 TMUXD_AUDIT_DISABLE: '1',
                 // No HOME-dir tmux state needed; agent only opens a WS.
-                TMUXD_HOME: `${TMUXD_HOME}-agent-${id}`
+                TMUXD_HOME: `${TMUXD_HOME}-agent-${hostId}`
             },
             stdio: ['ignore', 'pipe', 'pipe']
         }
@@ -128,9 +150,8 @@ async function main() {
         {
             env: {
                 ...process.env,
-                TMUXD_TOKEN: BASE,
+                TMUXD_SERVER_TOKEN: SERVER_TOKEN,
                 TMUXD_HUB_ONLY: '1',
-                TMUXD_AGENT_TOKENS: `alice/laptop=${ALICE_TOKEN},bob/desktop=${BOB_TOKEN}`,
                 TMUXD_HOME,
                 TMUXD_AUDIT_DISABLE: '1',
                 HOST,
@@ -144,32 +165,33 @@ async function main() {
     try {
         await waitUp(PORT)
 
-        const aliceJwt = await login('alice')
-        const bobJwt = await login('bob')
+        const aliceJwt = await login(ALICE_USER_TOKEN)
+        const bobJwt = await login(BOB_USER_TOKEN)
+        const aliceNs = computeNamespace(ALICE_USER_TOKEN)
+        const bobNs = computeNamespace(BOB_USER_TOKEN)
+        if (aliceNs === bobNs) throw new Error('hashed namespaces collided unexpectedly')
 
         // ── 1. Spawn Alice's agent
         const aliceAgent = spawnAgent({
-            token: ALICE_TOKEN,
-            namespace: 'alice',
-            id: 'laptop',
-            name: 'Alice Laptop'
+            userToken: ALICE_USER_TOKEN,
+            hostId: 'laptop',
+            hostName: 'Alice Laptop'
         })
         agents.push(aliceAgent)
 
         // ── 2. Spawn Bob's agent
         const bobAgent = spawnAgent({
-            token: BOB_TOKEN,
-            namespace: 'bob',
-            id: 'desktop',
-            name: 'Bob Desktop'
+            userToken: BOB_USER_TOKEN,
+            hostId: 'desktop',
+            hostName: 'Bob Desktop'
         })
         agents.push(bobAgent)
 
         // ── 3. Wait for both to register
-        await check('Alice agent registers under namespace=alice', async () => {
+        await check("Alice agent registers under Alice's hashed namespace", async () => {
             await waitForHostId(aliceJwt, 'laptop')
         })
-        await check('Bob agent registers under namespace=bob', async () => {
+        await check("Bob agent registers under Bob's hashed namespace", async () => {
             await waitForHostId(bobJwt, 'desktop')
         })
 
@@ -193,18 +215,7 @@ async function main() {
             }
         })
 
-        // ── 6. Same hostId in two namespaces would coexist (we'll prove
-        //    this by spawning a third agent with hostId=laptop in bob's
-        //    namespace and confirming it lands without conflict).
-        //
-        // (Alice's `laptop` is already registered. Now register Bob's
-        // own `laptop` — same hostId string, distinct namespace, must
-        // both exist.)
-        // Skipping this for now; it would require a 3rd token binding
-        // we didn't pre-configure. The unit test in agentRegistry.test.ts
-        // already proves the keying via map mechanics.
-
-        // ── 7. Alice cannot probe Bob's host
+        // ── 6. Cross-namespace READ probes — Alice cannot read Bob's host
         await check("Alice cannot list Bob's host sessions (404)", async () => {
             const r = await get('/api/hosts/desktop/sessions', { authorization: `Bearer ${aliceJwt}` })
             if (r.status !== 404) throw new Error(`status ${r.status}`)
@@ -214,11 +225,9 @@ async function main() {
             if (r.status !== 404) throw new Error(`status ${r.status}`)
         })
 
-        // ── 7b. Cross-namespace MUTATION isolation. Listing Bob's host as
+        // ── 6b. Cross-namespace MUTATION isolation. Listing Bob's host as
         //    Alice is a read leak; sending input to Bob's pane is a code-
-        //    execution boundary leak. Both must return 404 from /api/hosts.
-        //    Each test below targets a different mutation vector, all
-        //    under the same Alice→Bob attempt.
+        //    execution boundary leak. Both must return 404.
         await check("Alice cannot send text to Bob's pane (404)", async () => {
             const r = await postJson(
                 '/api/hosts/desktop/panes/main:0.0/input',
@@ -259,14 +268,14 @@ async function main() {
             if (r.status !== 404) throw new Error(`status ${r.status}`)
         })
 
-        // ── 8. Spawn a rogue agent: Alice's token but namespace=eve.
-        //    Hub must close the WS with 4401, agent must exit with code 2.
-        await check('rogue agent (alice token + eve namespace) exits with code 2', async () => {
+        // ── 7. Rogue agent: bad serverToken. Hub must reject the WS upgrade
+        //    with HTTP 401, agent.ts must catch it and exit 2 (FatalConfigError).
+        await check('rogue agent (wrong serverToken) exits with code 2', async () => {
             const rogue = spawnAgent({
-                token: ALICE_TOKEN,
-                namespace: 'eve',
-                id: 'laptop',
-                name: 'Eve Disguised'
+                userToken: ALICE_USER_TOKEN,
+                hostId: 'laptop',
+                hostName: 'Eve Disguised',
+                serverToken: 'this-is-not-the-server-token'
             })
             const exitCode = await new Promise((resolve) => {
                 const t = setTimeout(() => {
@@ -281,7 +290,7 @@ async function main() {
             if (exitCode !== 2) throw new Error(`expected exit code 2, got ${exitCode}`)
         })
 
-        // ── 9. After rogue dies, alice/bob isolation still intact
+        // ── 8. After rogue dies, alice/bob isolation still intact
         await check("after rogue probe, Alice's /hosts unchanged", async () => {
             const r = await get('/api/hosts', { authorization: `Bearer ${aliceJwt}` })
             const body = await r.json()
@@ -291,7 +300,7 @@ async function main() {
             }
         })
 
-        // ── 10. /agent/snapshot is also namespace-filtered
+        // ── 9. /agent/snapshot is also namespace-filtered
         await check('Alice /agent/snapshot has only her host', async () => {
             const r = await get('/api/agent/snapshot', { authorization: `Bearer ${aliceJwt}` })
             const body = await r.json()

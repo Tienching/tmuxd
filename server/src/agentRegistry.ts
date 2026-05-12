@@ -4,10 +4,9 @@ import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { WebSocket, WebSocketServer } from 'ws'
 import { z } from 'zod'
 import {
-    DEFAULT_NAMESPACE,
     LOCAL_HOST_ID,
+    computeNamespace,
     hostIdSchema,
-    namespaceSchema,
     sessionNameSchema,
     sessionTargetNameSchema,
     tmuxKeySchema,
@@ -39,11 +38,7 @@ const MAX_REMOTE_STRING = 4096
  * The pane / input APIs are *intentionally* missing here: a pre-pane-API
  * agent must not silently start claiming new APIs after the server is
  * upgraded. Modern agents always advertise their full capability set in
- * the hello frame and pick up panes/input that way (see
- * `server/src/agent.ts`'s `Agent.start`).
- *
- * This is asserted by the e2e test "agent: legacy no-capabilities host
- * does not claim pane APIs" in scripts/e2e.mjs.
+ * the hello frame.
  */
 const DEFAULT_CAPABILITIES: HostCapability[] = ['list', 'create', 'kill', 'capture', 'attach']
 const tmuxResultStringSchema = z.string().min(1).max(2048)
@@ -57,21 +52,13 @@ const remotePaneCaptureTextSchema = z.string().refine(
     'pane capture text too large'
 )
 
-export interface AgentTokenBinding {
-    /**
-     * Namespace this token binds into. See `DEFAULT_NAMESPACE` for the
-     * legacy single-user meaning.
-     */
+/**
+ * The auth context attached to a WS upgrade after we verify the server
+ * token and compute the namespace from the user token. Stored against
+ * the `WebSocket` so the hello handler can pick it up.
+ */
+interface AgentAuthContext {
     namespace: string
-    /**
-     * When present, this token can only register the matching hostId.
-     * A null hostId is the legacy shared-token mode (any hostId).
-     *
-     * Host ids are scoped per-namespace: `alice/laptop` and `bob/laptop`
-     * are distinct records once the registry is rekeyed (see Task #18).
-     */
-    hostId: string | null
-    token: string
 }
 
 const tmuxSessionSchema = z
@@ -152,11 +139,17 @@ export class AgentRegistry {
      */
     private readonly agents = new Map<string, Map<string, RemoteHostConnection>>()
     /** Per-WS auth context captured at upgrade time and consumed at hello. */
-    private readonly authenticatedBindings = new WeakMap<WebSocket, AgentTokenBinding | null>()
-    private readonly agentTokens: AgentTokenBinding[]
+    private readonly authenticatedContexts = new WeakMap<WebSocket, AgentAuthContext>()
+    private readonly serverToken: string
 
-    constructor(agentTokens: AgentTokenBinding[] | string | null) {
-        this.agentTokens = normalizeAgentTokens(agentTokens)
+    /**
+     * @param serverToken Shared trust-circle token that every agent must
+     *   present on the WS upgrade query string. Agents derive their
+     *   namespace from a separate user token; the hub never stores user
+     *   tokens.
+     */
+    constructor(serverToken: string) {
+        this.serverToken = serverToken
         this.wss.on('connection', (ws, request) => this.acceptAgent(ws, request))
     }
 
@@ -164,23 +157,44 @@ export class AgentRegistry {
         return this.wss
     }
 
+    /**
+     * Authenticate and accept a `/agent/connect` WS upgrade.
+     *
+     * Required query params:
+     *   - `serverToken`: must equal the hub's TMUXD_SERVER_TOKEN
+     *   - `userToken`:   personal token; namespace = sha256(userToken).slice(0,16)
+     *
+     * We pass tokens via query string (not Authorization header) because
+     * intermediate proxies sometimes strip Authorization on `Upgrade`
+     * requests. The connection is upgraded immediately to TLS-protected
+     * WebSocket frames; the URL is not durably logged by tmuxd itself
+     * (operators are responsible for not pointing reverse-proxy
+     * access-logs at the upgrade path).
+     */
     async tryHandleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): Promise<boolean> {
         const url = new URL(request.url || '', 'http://localhost')
         if (url.pathname !== '/agent/connect') return false
 
-        if (this.agentTokens.length === 0) {
-            writeHttp(socket, 404, 'Not Found')
+        const serverToken = url.searchParams.get('serverToken') || ''
+        const userToken = url.searchParams.get('userToken') || ''
+        if (!serverToken || !userToken) {
+            writeHttp(socket, 401, 'Unauthorized')
             return true
         }
-
-        const auth = this.matchToken(readBearerToken(request) || '')
-        if (!auth) {
+        if (!sameSecret(serverToken, this.serverToken)) {
+            writeHttp(socket, 401, 'Unauthorized')
+            return true
+        }
+        let namespace: string
+        try {
+            namespace = await computeNamespace(userToken)
+        } catch {
             writeHttp(socket, 401, 'Unauthorized')
             return true
         }
 
         this.wss.handleUpgrade(request, socket, head, (ws) => {
-            this.authenticatedBindings.set(ws, auth)
+            this.authenticatedContexts.set(ws, { namespace })
             this.wss.emit('connection', ws, request)
         })
         return true
@@ -333,36 +347,13 @@ export class AgentRegistry {
                 return
             }
             clearTimeout(timer)
-            const binding = this.authenticatedBindings.get(ws) ?? null
-            this.authenticatedBindings.delete(ws)
+            const ctx = this.authenticatedContexts.get(ws) ?? null
+            this.authenticatedContexts.delete(ws)
             try {
-                if (!binding) throw new AgentError('not_authenticated')
+                if (!ctx) throw new AgentError('not_authenticated')
 
-                // Namespace match. Legacy agents (no namespace field) are
-                // treated as DEFAULT_NAMESPACE and therefore only accepted
-                // against bindings pinned to DEFAULT_NAMESPACE. Mismatch
-                // closes with a machine-readable 4401 so the agent CLI can
-                // exit with code 2 (configuration error) instead of
-                // retrying forever on a network-blip assumption.
-                const claimedNs = msg.namespace ?? DEFAULT_NAMESPACE
-                if (claimedNs !== binding.namespace) {
-                    ws.close(4401, `agent_namespace_mismatch: binding=${binding.namespace} hello=${claimedNs}`)
-                    // Audit the rejection so operators see when an agent
-                    // showed up trying to claim the wrong namespace —
-                    // either misconfiguration or active probing.
-                    logAudit({
-                        event: 'agent_rejected',
-                        namespace: claimedNs,
-                        hostId: typeof msg.id === 'string' ? msg.id : undefined,
-                        name: typeof msg.name === 'string' ? msg.name : undefined,
-                        remoteAddr,
-                        reason: `namespace_mismatch: binding=${binding.namespace}`
-                    })
-                    return
-                }
-
-                const hostId = resolveHostId(msg, binding.hostId)
-                const namespace = binding.namespace
+                const namespace = ctx.namespace
+                const hostId = resolveHostId(msg)
                 const inner = this.agents.get(namespace) ?? new Map<string, RemoteHostConnection>()
                 if (inner.has(hostId)) throw new AgentError('host_already_connected')
 
@@ -378,9 +369,6 @@ export class AgentRegistry {
                 accepted = conn
                 ws.off('message', onFirstMessage)
                 conn.start()
-                // Audit: structured single-line JSON for grep-ability.
-                // Phase-1 minimum from the design doc — does not include
-                // payloads, just the registration event keyed on namespace.
                 logAudit({
                     event: 'agent_register',
                     namespace,
@@ -391,14 +379,9 @@ export class AgentRegistry {
             } catch (err) {
                 const reason = err instanceof Error ? err.message : 'invalid_hello'
                 ws.close(1008, reason)
-                // Best-effort namespace: prefer the binding's namespace if
-                // we authenticated, else the hello's claim. Catches
-                // not_authenticated and host_already_connected, both of
-                // which are operator-relevant.
-                const claimedNs = msg.namespace ?? DEFAULT_NAMESPACE
                 logAudit({
                     event: 'agent_rejected',
-                    namespace: binding?.namespace ?? claimedNs,
+                    namespace: ctx?.namespace ?? '',
                     hostId: typeof msg.id === 'string' ? msg.id : undefined,
                     name: typeof msg.name === 'string' ? msg.name : undefined,
                     remoteAddr,
@@ -416,14 +399,6 @@ export class AgentRegistry {
         const agent = this.agents.get(namespace)?.get(hostId)
         if (!agent) throw new AgentError('host_not_found')
         return agent
-    }
-
-    private matchToken(token: string): AgentTokenBinding | null {
-        if (!token) return null
-        for (const binding of this.agentTokens) {
-            if (sameSecret(token, binding.token)) return binding
-        }
-        return null
     }
 }
 
@@ -601,11 +576,6 @@ class RemoteHostConnection {
         }
         this.streams.clear()
         this.onClose()
-        // Audit: pair every agent_register with an agent_disconnect so
-        // operators can answer "when did Bob's agent die last night?"
-        // without correlating multiple log streams. `reason` is the
-        // string we passed to cleanup() — typically `agent_disconnected`,
-        // `agent_error`, or `agent_hello_timeout`.
         logAudit({
             event: 'agent_disconnect',
             namespace: this.namespace,
@@ -754,11 +724,7 @@ function parseAgentMessage(raw: Buffer): AgentClientMessage | null {
     }
 }
 
-function resolveHostId(hello: AgentHelloMessage, boundHostId: string | null): string {
-    if (boundHostId) {
-        if (hello.id && hello.id !== boundHostId) throw new Error('host_id_token_mismatch')
-        return boundHostId
-    }
+function resolveHostId(hello: AgentHelloMessage): string {
     const candidate = hello.id ?? slugHostId(hello.name)
     const parsed = hostIdSchema.safeParse(candidate)
     if (!parsed.success || parsed.data === LOCAL_HOST_ID) throw new Error('invalid_host_id')
@@ -774,35 +740,10 @@ function slugHostId(name: string): string {
     return cleaned || 'agent'
 }
 
-function readBearerToken(request: IncomingMessage): string | null {
-    const header = request.headers.authorization || ''
-    const value = Array.isArray(header) ? header[0] : header
-    const match = /^Bearer\s+(.+)$/i.exec(value)
-    return match ? match[1] : null
-}
-
 function sameSecret(a: string, b: string): boolean {
     const left = Buffer.from(a)
     const right = Buffer.from(b)
     return left.length === right.length && timingSafeEqual(left, right)
-}
-
-function normalizeAgentTokens(agentTokens: AgentTokenBinding[] | string | null): AgentTokenBinding[] {
-    if (!agentTokens) return []
-    if (typeof agentTokens === 'string') {
-        const token = agentTokens.trim()
-        return token ? [{ namespace: DEFAULT_NAMESPACE, hostId: null, token }] : []
-    }
-    const out: AgentTokenBinding[] = []
-    for (const binding of agentTokens) {
-        const token = binding.token.trim()
-        if (!token) continue
-        const hostId = binding.hostId === null ? null : hostIdSchema.parse(binding.hostId)
-        if (hostId === LOCAL_HOST_ID) throw new Error('invalid_agent_token_host_id')
-        const namespace = namespaceSchema.parse(binding.namespace ?? DEFAULT_NAMESPACE)
-        out.push({ namespace, hostId, token })
-    }
-    return out
 }
 
 function writeHttp(socket: Duplex, status: number, text: string): void {

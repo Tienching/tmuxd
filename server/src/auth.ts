@@ -1,14 +1,9 @@
 import { SignJWT, jwtVerify } from 'jose'
-import { DEFAULT_NAMESPACE, namespaceSchema } from '@tmuxd/shared'
-
-// Re-export so existing call sites (`import { parseAccessToken } from '../auth.js'`)
-// keep working. Canonical definition lives in @tmuxd/shared because both the
-// CLI and the server need the exact same parsing rule.
-export { parseAccessToken, type ParsedAccessToken } from '@tmuxd/shared'
+import { namespaceSchema } from '@tmuxd/shared'
 
 export interface JwtPayload {
     sub: 'web'
-    /** Namespace this JWT is scoped to. See DEFAULT_NAMESPACE. */
+    /** Namespace this JWT is scoped to. Derived from sha256(userToken). */
     ns: string
     iat: number
     exp: number
@@ -17,10 +12,18 @@ export interface JwtPayload {
 const ALG = 'HS256'
 const DEFAULT_TTL_SECONDS = 12 * 60 * 60 // 12h
 
+/**
+ * Sign a JWT scoped to `namespace`.
+ *
+ * Callers pass the already-computed namespace (via `computeNamespace` in
+ * `@tmuxd/shared`). This function does NOT accept a raw user-token — it
+ * would be too easy to forget to hash and accidentally leak secrets
+ * into JWT payloads.
+ */
 export async function issueToken(
     secret: Uint8Array,
-    ttlSeconds: number = DEFAULT_TTL_SECONDS,
-    namespace: string = DEFAULT_NAMESPACE
+    namespace: string,
+    ttlSeconds: number = DEFAULT_TTL_SECONDS
 ): Promise<{ token: string; expiresAt: number }> {
     const parsedNs = namespaceSchema.safeParse(namespace)
     if (!parsedNs.success) {
@@ -43,29 +46,11 @@ export async function verifyJwt(secret: Uint8Array, token: string): Promise<JwtP
         if (payload.sub !== 'web' || typeof payload.iat !== 'number' || typeof payload.exp !== 'number') {
             return null
         }
-        // Backwards compatibility: tokens issued before the ns claim existed are
-        // still accepted and default to DEFAULT_NAMESPACE. New tokens always
-        // carry ns. Invalid ns values are rejected.
-        let ns: string = DEFAULT_NAMESPACE
-        if (typeof payload.ns === 'string') {
-            const parsed = namespaceSchema.safeParse(payload.ns)
-            if (!parsed.success) return null
-            ns = parsed.data
-        } else if (payload.ns !== undefined) {
-            return null
-        }
-        return { sub: 'web', ns, iat: payload.iat, exp: payload.exp }
+        if (typeof payload.ns !== 'string') return null
+        const parsed = namespaceSchema.safeParse(payload.ns)
+        if (!parsed.success) return null
+        return { sub: 'web', ns: parsed.data, iat: payload.iat, exp: payload.exp }
     } catch {
         return null
     }
 }
-
-/**
- * Parse an access token of the form `<baseToken>:<namespace>`.
- *
- * Re-exported from `@tmuxd/shared/accessToken` — see that module for
- * the canonical definition. Kept here as a re-export so server imports
- * (`import { parseAccessToken } from '../auth.js'`) don't need to
- * change.
- */
-export type { ParsedAccessToken as ParsedAccessTokenLegacy } from '@tmuxd/shared'

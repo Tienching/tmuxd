@@ -25,8 +25,14 @@ const execFileP = promisify(execFile)
 
 const HOST = process.env.HOST ?? '127.0.0.1'
 const PORT = Number(process.env.PORT ?? 17683)
-const TOKEN = process.env.TMUXD_TOKEN ?? 'e2e-test-token-123'
-const AGENT_TOKEN = process.env.TMUXD_AGENT_TOKEN ?? ''
+const SERVER_TOKEN = process.env.TMUXD_SERVER_TOKEN ?? 'e2e-test-token-123'
+// Anyone with the server token plus their own user token is "in".
+// e2e uses a fixed user token so we can re-auth deterministically.
+const USER_TOKEN = process.env.TMUXD_USER_TOKEN ?? 'e2e-test-user-token'
+// In the trust-model design there's no static binding — agents just
+// self-declare. We keep the AGENT_HOST_BOUND flag because it gates the
+// e2e block that spawns a real outbound agent, which only runs when the
+// caller signals "we set up an agent fixture". Set TMUXD_E2E_AGENT_HOST_BOUND=1.
 const AGENT_HOST_BOUND = process.env.TMUXD_E2E_AGENT_HOST_BOUND === '1'
 const ORIGIN = `http://${HOST}:${PORT}`
 const BASE = ORIGIN
@@ -181,11 +187,13 @@ async function waitForHostGone(hostId, token, maxMs = 5000) {
     throw new Error(`host ${hostId} did not disconnect in time`)
 }
 
-function agentHelloOnce(hostId, token) {
+function agentHelloOnce(hostId, userToken) {
     return new Promise((resolve, reject) => {
-        const ws = new WebSocket(`ws://${HOST}:${PORT}/agent/connect`, {
-            headers: { authorization: `Bearer ${token}` }
-        })
+        const url =
+            `ws://${HOST}:${PORT}/agent/connect` +
+            `?serverToken=${encodeURIComponent(SERVER_TOKEN)}` +
+            `&userToken=${encodeURIComponent(userToken)}`
+        const ws = new WebSocket(url)
         const to = setTimeout(() => {
             ws.close()
             reject(new Error('agent hello timeout'))
@@ -215,11 +223,13 @@ function agentHelloOnce(hostId, token) {
     })
 }
 
-function connectLegacyAgent(hostId, token) {
+function connectLegacyAgent(hostId, userToken) {
     return new Promise((resolve, reject) => {
-        const ws = new WebSocket(`ws://${HOST}:${PORT}/agent/connect`, {
-            headers: { authorization: `Bearer ${token}` }
-        })
+        const url =
+            `ws://${HOST}:${PORT}/agent/connect` +
+            `?serverToken=${encodeURIComponent(SERVER_TOKEN)}` +
+            `&userToken=${encodeURIComponent(userToken)}`
+        const ws = new WebSocket(url)
         const to = setTimeout(() => {
             ws.close()
             reject(new Error('legacy agent hello timeout'))
@@ -252,14 +262,15 @@ function connectLegacyAgent(hostId, token) {
     })
 }
 
-function startAgentProcess(hostId, token) {
+function startAgentProcess(hostId, userToken) {
     return spawn('node', ['node_modules/.bin/tsx', 'server/src/agent.ts'], {
         env: {
             ...process.env,
             TMUXD_HUB_URL: BASE,
-            TMUXD_AGENT_TOKEN: token,
-            TMUXD_AGENT_ID: hostId,
-            TMUXD_AGENT_NAME: 'E2E Agent',
+            TMUXD_SERVER_TOKEN: SERVER_TOKEN,
+            TMUXD_USER_TOKEN: userToken,
+            TMUXD_HOST_ID: hostId,
+            TMUXD_HOST_NAME: 'E2E Agent',
             TMUXD_HOME: '/tmp/tmuxd-e2e-agent'
         },
         stdio: ['ignore', 'inherit', 'inherit']
@@ -287,11 +298,11 @@ async function main() {
         return r.status === 200 && r.body?.ok === true
     })
 
-    await check('auth: wrong token → 401', async () => {
+    await check('auth: wrong server token → 401', async () => {
         const r = await http('/api/auth', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ token: 'definitely-wrong' })
+            body: JSON.stringify({ serverToken: 'definitely-wrong', userToken: USER_TOKEN })
         })
         return r.status === 401 && r.body?.error === 'invalid_token'
     })
@@ -302,11 +313,11 @@ async function main() {
     })
 
     let token = null
-    await check('auth: correct token → 200 {token}', async () => {
+    await check('auth: correct tokens → 200 {token}', async () => {
         const r = await http('/api/auth', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ token: TOKEN })
+            body: JSON.stringify({ serverToken: SERVER_TOKEN, userToken: USER_TOKEN })
         })
         if (r.status !== 200) return false
         if (typeof r.body?.token !== 'string' || r.body.token.length < 32) return false
@@ -836,29 +847,31 @@ async function main() {
     })
 
     let agentProc = null
-    if (AGENT_TOKEN) {
+    if (AGENT_HOST_BOUND) {
         const AGENT_HOST = 'e2e-agent'
+        // Use the SAME user token as the API client. Under the trust model
+        // every connection (agent WS + API client) hashes its userToken into
+        // a namespace; the agent must register in the SAME namespace that the
+        // client's JWT is scoped to, otherwise the API client won't see the
+        // agent's host. Using two different user tokens here was the
+        // pre-trust-model bug — under the static-token whitelist that
+        // wasn't an issue because host-namespace bindings were configured
+        // server-side, but now the agent IS its namespace.
+        const AGENT_USER_TOKEN = USER_TOKEN
         const AGENT_SESSION = 'tmuxd-e2e-agent'
         await killIfPresent(AGENT_SESSION)
 
-        await check('agent: query token is rejected', async () => {
+        await check('agent: missing tokens on /agent/connect → 401', async () => {
             try {
-                await wsConnect(`ws://${HOST}:${PORT}/agent/connect?token=${encodeURIComponent(AGENT_TOKEN)}`)
+                await wsConnect(`ws://${HOST}:${PORT}/agent/connect`)
                 return false
             } catch (err) {
                 return /401/.test(err.message)
             }
         })
 
-        if (AGENT_HOST_BOUND) {
-            await check('agent: bound token rejects mismatched host id', async () => {
-                const closed = await agentHelloOnce('wrong-e2e-agent', AGENT_TOKEN)
-                return closed.code === 1008 && /host_id_token_mismatch/.test(closed.reason)
-            })
-        }
-
         await check('agent: legacy no-capabilities host does not claim pane APIs', async () => {
-            const legacyWs = await connectLegacyAgent(AGENT_HOST, AGENT_TOKEN)
+            const legacyWs = await connectLegacyAgent(AGENT_HOST, AGENT_USER_TOKEN)
             try {
                 await waitForHost(AGENT_HOST, token)
                 const hosts = await http('/api/hosts', { headers: { authorization: `Bearer ${token}` } })
@@ -916,7 +929,7 @@ async function main() {
         })
 
         await check('agent: outbound client connects to hub', async () => {
-            agentProc = startAgentProcess(AGENT_HOST, AGENT_TOKEN)
+            agentProc = startAgentProcess(AGENT_HOST, AGENT_USER_TOKEN)
             agentProc.on('exit', (code, signal) => {
                 if (code !== null && code !== 0) console.error(`[agent] exited ${code}`)
                 else if (signal) console.error(`[agent] exited by ${signal}`)
@@ -925,7 +938,7 @@ async function main() {
         })
 
         await check('agent: duplicate host id is rejected without replacing original', async () => {
-            const closed = await agentHelloOnce(AGENT_HOST, AGENT_TOKEN)
+            const closed = await agentHelloOnce(AGENT_HOST, AGENT_USER_TOKEN)
             if (closed.code !== 1008 || !/host_already_connected/.test(closed.reason)) return false
             const r = await http('/api/hosts', { headers: { authorization: `Bearer ${token}` } })
             return r.status === 200 && r.body?.hosts?.some((h) => h.id === AGENT_HOST && h.status === 'online')

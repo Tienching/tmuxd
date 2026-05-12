@@ -34,7 +34,7 @@ async function main() {
         {
             env: {
                 ...process.env,
-                TMUXD_TOKEN: TOKEN,
+                TMUXD_SERVER_TOKEN: TOKEN,
                 PORT: String(PORT),
                 HOST: '127.0.0.1',
                 TMUXD_HOME: '/tmp/tmuxd-shutdown-home'
@@ -60,7 +60,7 @@ async function main() {
     const login = await fetch(`http://127.0.0.1:${PORT}/api/auth`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ token: TOKEN })
+        body: JSON.stringify({ serverToken: TOKEN, userToken: 'shutdown-user-token' })
     }).then((r) => r.json())
     const token = login.token
     if (!token) throw new Error('no token')

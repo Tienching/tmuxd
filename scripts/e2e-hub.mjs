@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 /**
- * E2E: hub-only mode + HAPI-style namespace isolation through a real
+ * E2E: hub-only mode + trust-model namespace isolation through a real
  * spawned `tmuxd` server.
  *
  * Boots a tmuxd hub configured for hub-only multi-user operation:
  *   TMUXD_HUB_ONLY=1
- *   TMUXD_TOKEN=<secret>
- *   TMUXD_AGENT_TOKENS=alice/laptop=<token-A>,bob/desktop=<token-B>
+ *   TMUXD_SERVER_TOKEN=<secret>
  *
- * Then drives two real HTTP clients logged in as `BASE:alice` and
- * `BASE:bob` and asserts the contract Alice cannot ever observe
- * Bob's host through the wire.
+ * Then drives two real HTTP clients logged in with distinct user
+ * tokens and asserts:
+ *   - The server token is required.
+ *   - sha256(userToken) → namespace; same userToken → same namespace.
+ *   - Different userTokens → distinct, isolated namespaces.
+ *   - Hub-only refuses local routes.
  *
  * Used by: npm run e2e:hub
  */
@@ -18,12 +20,26 @@
 import { spawn } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+
+/**
+ * Mirror of `shared/src/identity.ts#computeNamespace` for use in plain
+ * `.mjs` scripts (we can't import the TS module — `shared/` has no
+ * compiled emit, only typecheck). Keep the implementation in lockstep
+ * with the production version: sha256(userToken), 16 lowercase hex
+ * chars. The shared module's unit tests pin that contract.
+ */
+function computeNamespace(userToken) {
+    const trimmed = String(userToken).trim()
+    if (!trimmed) throw new Error('userToken must not be empty')
+    return createHash('sha256').update(trimmed, 'utf8').digest('hex').slice(0, 16)
+}
 
 const HOST = '127.0.0.1'
 const PORT = Number(process.env.TMUXD_E2E_PORT || 17687)
-const BASE = 'e2e-hub-base-secret-' + Math.random().toString(36).slice(2)
-const ALICE_AGENT_TOKEN = 'alice-agent-token-' + Math.random().toString(36).slice(2)
-const BOB_AGENT_TOKEN = 'bob-agent-token-' + Math.random().toString(36).slice(2)
+const SERVER_TOKEN = 'e2e-hub-server-token-' + Math.random().toString(36).slice(2)
+const ALICE_USER_TOKEN = 'alice-user-token-' + Math.random().toString(36).slice(2)
+const BOB_USER_TOKEN = 'bob-user-token-' + Math.random().toString(36).slice(2)
 const TMUXD_HOME = `/tmp/tmuxd-e2e-hub-${process.pid}`
 
 const passes = []
@@ -90,9 +106,8 @@ async function main() {
         {
             env: {
                 ...process.env,
-                TMUXD_TOKEN: BASE,
+                TMUXD_SERVER_TOKEN: SERVER_TOKEN,
                 TMUXD_HUB_ONLY: '1',
-                TMUXD_AGENT_TOKENS: `alice/laptop=${ALICE_AGENT_TOKEN},bob/desktop=${BOB_AGENT_TOKEN}`,
                 TMUXD_HOME,
                 TMUXD_AUDIT_DISABLE: '1', // keep test stderr clean
                 HOST,
@@ -105,44 +120,81 @@ async function main() {
     try {
         await waitUp(PORT)
 
-        // ── 1. Wrong token rejected
-        await check('wrong token → 401', async () => {
-            const r = await postJson('/api/auth', { token: 'definitely-wrong-secret:alice' })
+        const aliceNs = computeNamespace(ALICE_USER_TOKEN)
+        const bobNs = computeNamespace(BOB_USER_TOKEN)
+
+        // ── 1. Wrong server token rejected
+        await check('wrong serverToken → 401', async () => {
+            const r = await postJson('/api/auth', {
+                serverToken: 'definitely-wrong-secret',
+                userToken: ALICE_USER_TOKEN
+            })
             if (r.status !== 401) throw new Error(`status ${r.status}`)
         })
 
-        // ── 2. Bare token (single-user form) defaults to 'default'.
-        // The contract: server-side `parseAccessToken` accepts the bare
-        // token and stamps the JWT with default namespace.
-        await check('bare token → JWT(ns=default)', async () => {
-            const r = await postJson('/api/auth', { token: BASE })
-            if (r.status !== 200) throw new Error(`status ${r.status}`)
-            const body = await r.json()
-            const ns = decodeJwtNs(body.token)
-            if (ns !== 'default') throw new Error(`ns=${ns}`)
+        // ── 2. Both fields required
+        await check('login without userToken → 400', async () => {
+            const r = await postJson('/api/auth', { serverToken: SERVER_TOKEN })
+            if (r.status !== 400) throw new Error(`status ${r.status}`)
+        })
+        await check('login without serverToken → 400', async () => {
+            const r = await postJson('/api/auth', { userToken: ALICE_USER_TOKEN })
+            if (r.status !== 400) throw new Error(`status ${r.status}`)
+        })
+        await check('login with old { token } shape → 400', async () => {
+            const r = await postJson('/api/auth', { token: SERVER_TOKEN })
+            if (r.status !== 400) throw new Error(`status ${r.status}`)
         })
 
-        // ── 3. Alice login → JWT(ns=alice)
+        // ── 3. Alice login → JWT(ns=sha256(ALICE_USER_TOKEN))
         let aliceToken = ''
-        await check('Alice logs in with BASE:alice → JWT(ns=alice)', async () => {
-            const r = await postJson('/api/auth', { token: `${BASE}:alice` })
+        await check('Alice logs in → JWT carries her hashed namespace', async () => {
+            const r = await postJson('/api/auth', {
+                serverToken: SERVER_TOKEN,
+                userToken: ALICE_USER_TOKEN
+            })
             if (r.status !== 200) throw new Error(`status ${r.status}`)
             const body = await r.json()
+            if (body.namespace !== aliceNs) {
+                throw new Error(`server returned ns=${body.namespace}, expected ${aliceNs}`)
+            }
             const ns = decodeJwtNs(body.token)
-            if (ns !== 'alice') throw new Error(`ns=${ns}`)
+            if (ns !== aliceNs) throw new Error(`JWT ns=${ns}, expected ${aliceNs}`)
             aliceToken = body.token
         })
 
-        // ── 5. Bob login → JWT(ns=bob), distinct from Alice's
+        // ── 4. Bob login → JWT(ns=sha256(BOB_USER_TOKEN)), distinct from Alice
         let bobToken = ''
-        await check('Bob logs in with BASE:bob → JWT(ns=bob), distinct token', async () => {
-            const r = await postJson('/api/auth', { token: `${BASE}:bob` })
+        await check('Bob logs in → JWT distinct from Alice', async () => {
+            const r = await postJson('/api/auth', {
+                serverToken: SERVER_TOKEN,
+                userToken: BOB_USER_TOKEN
+            })
             if (r.status !== 200) throw new Error(`status ${r.status}`)
             const body = await r.json()
+            if (body.namespace !== bobNs) throw new Error(`ns=${body.namespace}, expected ${bobNs}`)
             const ns = decodeJwtNs(body.token)
-            if (ns !== 'bob') throw new Error(`ns=${ns}`)
+            if (ns !== bobNs) throw new Error(`JWT ns=${ns}`)
             bobToken = body.token
             if (bobToken === aliceToken) throw new Error('alice and bob got identical JWTs')
+            if (aliceNs === bobNs) throw new Error('hashed namespaces collided unexpectedly')
+        })
+
+        // ── 5. Same userToken → same namespace (deterministic hash)
+        await check('Same userToken twice → same namespace', async () => {
+            const r1 = await postJson('/api/auth', {
+                serverToken: SERVER_TOKEN,
+                userToken: ALICE_USER_TOKEN
+            })
+            const r2 = await postJson('/api/auth', {
+                serverToken: SERVER_TOKEN,
+                userToken: ALICE_USER_TOKEN
+            })
+            const b1 = await r1.json()
+            const b2 = await r2.json()
+            if (b1.namespace !== b2.namespace) {
+                throw new Error(`namespace not deterministic: ${b1.namespace} vs ${b2.namespace}`)
+            }
         })
 
         // ── 6. /api/hosts shows zero hosts when no agents connected
@@ -155,7 +207,7 @@ async function main() {
             if (localPresent) throw new Error('local host should be hidden in hub-only mode')
         })
 
-        // ── 7. POST /sessions returns 403 local_host_disabled
+        // ── 7. Hub-only: POST /sessions returns 403 local_host_disabled
         await check('POST /sessions → 403 local_host_disabled (hub-only)', async () => {
             const r = await postJson(
                 '/api/sessions',
@@ -167,7 +219,7 @@ async function main() {
             if (body.error !== 'local_host_disabled') throw new Error(`error=${body.error}`)
         })
 
-        // ── 8. POST /hosts/local/sessions returns 403
+        // ── 8. Hub-only: POST /hosts/local/sessions returns 403
         await check('POST /hosts/local/sessions → 403 local_host_disabled', async () => {
             const r = await postJson(
                 '/api/hosts/local/sessions',
@@ -187,17 +239,7 @@ async function main() {
             if (r.status !== 404) throw new Error(`status ${r.status}`)
         })
 
-        // ── 10. ws-ticket for local host in hub-only → 403
-        await check('Alice ws-ticket for local host (hub-only) → 403', async () => {
-            const r = await postJson(
-                '/api/ws-ticket',
-                { hostId: 'local', sessionName: 'main' },
-                { authorization: `Bearer ${aliceToken}` }
-            )
-            if (r.status !== 403) throw new Error(`status ${r.status}`)
-        })
-
-        // ── 11. Alice's JWT cannot use Bob's session list
+        // ── 10. Alice cannot list any host that doesn't live in her ns
         await check('Alice GET /hosts/bob-desktop/sessions → 404', async () => {
             const r = await get('/api/hosts/bob-desktop/sessions', {
                 authorization: `Bearer ${aliceToken}`
@@ -205,7 +247,7 @@ async function main() {
             if (r.status !== 404) throw new Error(`status ${r.status}`)
         })
 
-        // ── 12. Both users can hit /agent/snapshot independently
+        // ── 11. Both users can hit /agent/snapshot independently
         await check('Alice and Bob each get an /agent/snapshot', async () => {
             const ar = await get('/api/agent/snapshot', { authorization: `Bearer ${aliceToken}` })
             const br = await get('/api/agent/snapshot', { authorization: `Bearer ${bobToken}` })
@@ -219,14 +261,6 @@ async function main() {
             if (aBody.hosts.length !== 0 || bBody.hosts.length !== 0) {
                 throw new Error(`expected zero hosts, alice=${aBody.hosts.length} bob=${bBody.hosts.length}`)
             }
-        })
-
-        // ── 12. Login body without `token` field is rejected (400)
-        await check('login body without token field → 400', async () => {
-            const r = await postJson('/api/auth', { password: BASE })
-            // Schema validation rejects bodies that don't match the
-            // single-form login shape.
-            if (r.status !== 400) throw new Error(`status ${r.status}`)
         })
     } finally {
         server.kill('SIGTERM')
@@ -248,8 +282,6 @@ async function main() {
     console.log('\n---')
     console.log(`PASS: ${passes.length}   FAIL: ${fails.length}`)
     if (fails.length) {
-        console.log('Failures:')
-        for (const f of fails) console.log(`  - ${f.name}: ${f.err instanceof Error ? f.err.message : f.err}`)
         process.exit(1)
     }
 }

@@ -15,19 +15,23 @@
  *
  * Plus three CLI-only verbs:
  *
- *   tmuxd login   --hub URL --access-token TOKEN[:NAMESPACE]
+ *   tmuxd login   --hub URL --server-token SECRET --user-token SECRET
  *   tmuxd whoami
  *   tmuxd logout  [--hub URL]
  *   tmuxd list-hosts
  *   tmuxd snapshot [--capture] [--limit N]
  *
- * The `--access-token` flag is deliberate. tmux's `-t` is reserved for
- * `--target`, and a soft visual collision between `-t laptop:main` and
- * `--token …` on the same line is jarring. `--access-token` mirrors the
- * web UI's "Access token" label and only appears on `tmuxd login`; every
- * other subcommand reads the JWT from `~/.tmuxd/cli/credentials.json`.
+ * The two-token model:
+ *   - `--server-token` (env: TMUXD_SERVER_TOKEN) is the shared trust-circle
+ *     token that authorizes you to use this hub at all.
+ *   - `--user-token` (env: TMUXD_USER_TOKEN) is *your* personal token. The
+ *     hub derives `namespace = sha256(userToken).slice(0, 16)` from it.
  *
- * Auth precedence (login only): `--access-token` flag > `TMUXD_TOKEN` env.
+ * `--user-token-generate` flag prints a fresh random token (32 random
+ * bytes hex) for first-time setup, so users don't have to invent their
+ * own entropy.
+ *
+ * See docs/identity-model.md.
  */
 import { readFile, lstat } from 'node:fs/promises'
 import {
@@ -38,8 +42,8 @@ import {
     type SavedCred
 } from './cliCredentials.js'
 import {
-    parseAccessToken,
     authResponseSchema,
+    generateUserToken,
     hostsResponseSchema,
     sessionsResponseSchema,
     hostScopedSessionsResponseSchema,
@@ -78,7 +82,7 @@ interface ParsedArgs {
  * boolean", because that path silently swallows legitimate dash-prefixed
  * values like `--text -draft`.
  */
-const BOOLEAN_FLAGS = new Set(['help', 'enter', 'json', 'capture', 'version'])
+const BOOLEAN_FLAGS = new Set(['help', 'enter', 'json', 'capture', 'version', 'user-token-generate'])
 
 /**
  * Short-flag → long-flag mapping for value-taking single-letter flags.
@@ -263,7 +267,7 @@ Usage:
   tmuxd <subcommand> [flags] [args]
 
 Auth (one-time):
-  tmuxd login   --hub <url> --access-token <secret>[:<namespace>]
+  tmuxd login   --hub <url> --server-token <secret> --user-token <secret>
   tmuxd whoami
   tmuxd logout  [--hub <url>]
 
@@ -290,13 +294,16 @@ Common flags:
   --                    End-of-options sentinel; everything after is
                         positional even if it starts with \`-\`.
 
-Auth precedence on \`tmuxd login\`:
-  --access-token <value>      Highest priority. Visible in \`ps\` — avoid
-                              on shared hosts.
-  --access-token-file <path>  Read token from a file (mode-restricted).
-  TMUXD_TOKEN env var         Fallback if neither flag set. Procfs env
-                              is mode 0600, safer than argv on multi-user
-                              boxes.
+Two-token auth (login only):
+  --server-token <value>      Shared trust-circle token (= TMUXD_SERVER_TOKEN
+                              on the hub). Get this from your hub admin.
+  --user-token <value>        Your personal token. The hub derives
+                              namespace = sha256(userToken).slice(0, 16).
+                              Use --user-token-generate to make a fresh one.
+  --server-token-file <path>  Read server token from a 0600 file.
+  --user-token-file <path>    Read user token from a 0600 file.
+  TMUXD_SERVER_TOKEN env      Fallback if --server-token absent.
+  TMUXD_USER_TOKEN env        Fallback if --user-token absent.
 
 Other subcommands read the JWT from ~/.tmuxd/cli/credentials.json.
 
@@ -307,14 +314,18 @@ Exit codes:
   3   target not found (host/session/pane 404)
 
 Examples:
-  tmuxd login --hub https://hub.example.com --access-token "$TMUXD_TOKEN:alice"
+  # First-time login: hub admin gave you SERVER_TOKEN; you make a user token.
+  tmuxd login --hub https://hub.example.com \\
+              --server-token "$SERVER_TOKEN" --user-token-generate
+
+  # Daily use:
   tmuxd list-hosts
   tmuxd list-sessions -t laptop
   tmuxd capture-pane -t laptop:main:0.0 --lines 100
   tmuxd send-text -t laptop:main:0.0 --enter '/status'
   tmuxd send-keys -t laptop:main:0.0 C-c
 
-See README.md and docs/hub-mode.md for end-to-end recipes.
+See README.md and docs/identity-model.md for the trust model.
 `)
 }
 
@@ -327,20 +338,32 @@ const SUBCOMMAND_HELP: Record<string, string> = {
     login: `tmuxd login — authenticate to a tmuxd hub
 
 Usage:
-  tmuxd login --hub <url> --access-token <secret>[:<namespace>]
+  tmuxd login --hub <url> --server-token <secret> --user-token <secret>
+  tmuxd login --hub <url> --server-token <secret> --user-token-generate
 
 Required:
-  --hub <url>                 Hub base URL, e.g. https://hub.example.com
-  --access-token <value>      Access token. Bare = single-user; <secret>:<ns>
-                              = multi-user. Visible in ps; on shared hosts
-                              prefer --access-token-file or TMUXD_TOKEN env.
+  --hub <url>                Hub base URL, e.g. https://hub.example.com
+  --server-token <value>     Shared trust-circle token (= TMUXD_SERVER_TOKEN
+                             on the hub). Get this from your hub admin.
+  --user-token <value>       Your personal identity. The hub derives
+                             namespace = sha256(userToken).slice(0, 16).
+                             OR --user-token-generate to make a fresh one
+                             on first login.
 
-Optional:
-  --access-token-file <path>  Read token from file (full contents trimmed).
-                              File must be mode 0600 (or stricter); otherwise
-                              the CLI refuses to load it.
+Optional (alternatives to the flags above):
+  --server-token-file <path> Read server token from a 0600 file.
+  --user-token-file <path>   Read user token from a 0600 file.
+  --user-token-generate      Generate a fresh random user token (printed
+                             once to stderr) and use it. Save the printed
+                             value somewhere safe — it IS your identity;
+                             whoever has it can act as you.
 
-The JWT is saved to ~/.tmuxd/cli/credentials.json (mode 0600).
+Env-var fallbacks:
+  TMUXD_SERVER_TOKEN         Fallback for --server-token.
+  TMUXD_USER_TOKEN           Fallback for --user-token.
+
+The JWT (and the two tokens, for re-login on JWT expiry) are saved to
+~/.tmuxd/cli/credentials.json (mode 0600).
 `,
     logout: `tmuxd logout — clear stored credentials
 
@@ -552,7 +575,7 @@ async function api<T>(cred: SavedCred, path: string, opts: ApiOptions<T> = {}): 
             : code)
         if (res.status === 401) {
             throw new AuthError(
-                `JWT rejected (${code}). Run \`tmuxd login --hub ${cred.hubUrl} --access-token ...\` again.`
+                `JWT rejected (${code}). Run \`tmuxd login --hub ${cred.hubUrl} --server-token ... --user-token ...\` again.`
             )
         }
         if (res.status === 404 && opts.treat404AsNotFound) {
@@ -591,15 +614,15 @@ async function requireCred(hubUrl?: string): Promise<SavedCred> {
     if (!cred) {
         throw new AuthError(
             hubUrl
-                ? `no credentials for ${hubUrl}. Run \`tmuxd login --hub ${hubUrl} --access-token ...\` first.`
-                : `no credentials saved. Run \`tmuxd login --hub <url> --access-token ...\` first.`
+                ? `no credentials for ${hubUrl}. Run \`tmuxd login --hub ${hubUrl} --server-token ... --user-token ...\` first.`
+                : `no credentials saved. Run \`tmuxd login --hub <url> --server-token ... --user-token ...\` first.`
         )
     }
     const now = Math.floor(Date.now() / 1000)
     if (cred.expiresAt <= now) {
         throw new AuthError(
             `JWT for ${cred.hubUrl} expired ${now - cred.expiresAt}s ago. ` +
-                `Run \`tmuxd login --hub ${cred.hubUrl} --access-token ...\` to renew.`
+                `Run \`tmuxd login --hub ${cred.hubUrl} --server-token ... --user-token ...\` to renew.`
         )
     }
     return cred
@@ -642,48 +665,56 @@ type PaneInfo = TargetPane
 type CaptureResponse = TmuxPaneCapture
 type PaneStatusResponse = TmuxPaneStatus
 
-async function readTokenInputOrEnv(flags: Record<string, string>): Promise<string | null> {
-    if (flags['access-token']) return flags['access-token']
-    const file = flags['access-token-file']
+/**
+ * Resolve a token (server or user) from one of:
+ *   1. --<name> flag value
+ *   2. --<name>-file <path>: file mode-checked the same way credentials.json is
+ *   3. <env-var-name> env var
+ *
+ * Returns null if no source is set; throws if a configured source is
+ * unreadable / mode-leaky.
+ */
+async function readSecretInput(
+    flags: Record<string, string>,
+    flagName: string,
+    fileFlagName: string,
+    envName: string
+): Promise<string | null> {
+    if (flags[flagName]) return flags[flagName]
+    const file = flags[fileFlagName]
     if (file) {
-        // Refuse to load a token file that's group/world readable. The whole
-        // point of the file form (vs --access-token in argv) is keeping the
-        // secret out of `ps` output; if the file itself is readable by other
-        // users the secret is even more exposed than the argv form. Mirror
-        // the cliCredentials.ts mode-0600 stance so users get one consistent
-        // hardening story across everything that touches secrets.
-        //
-        // lstat (not stat) so a symlinked token file with a permissive
-        // target gets caught — same TOCTOU-ish defense the credentials
-        // loader uses.
+        // Refuse to load a token file that's group/world readable. Mirror
+        // the cliCredentials.ts mode-0600 stance so users get one
+        // consistent hardening story across everything that touches
+        // secrets.
         let st
         try {
             st = await lstat(file)
         } catch (err) {
             const reason = err instanceof Error ? err.message : String(err)
-            throw usageError(`cannot read --access-token-file ${file}: ${reason}`)
+            throw usageError(`cannot read --${fileFlagName} ${file}: ${reason}`)
         }
         if (st.isSymbolicLink()) {
             throw usageError(
-                `--access-token-file ${file} is a symlink. Refusing to follow ` +
-                    `(point --access-token-file at the real file).`
+                `--${fileFlagName} ${file} is a symlink. Refusing to follow ` +
+                    `(point at the real file).`
             )
         }
         if (!st.isFile()) {
-            throw usageError(`--access-token-file ${file} is not a regular file.`)
+            throw usageError(`--${fileFlagName} ${file} is not a regular file.`)
         }
         const mode = st.mode & 0o777
         if ((mode & 0o077) !== 0) {
             const got = mode.toString(8).padStart(3, '0')
             throw usageError(
-                `--access-token-file ${file} mode is ${got}, must be 0600 (or stricter). ` +
+                `--${fileFlagName} ${file} mode is ${got}, must be 0600 (or stricter). ` +
                     `Run: chmod 600 ${file}`
             )
         }
         const raw = await readFile(file, 'utf8')
         return raw.replace(/\r?\n$/, '')
     }
-    const env = process.env.TMUXD_TOKEN?.trim()
+    const env = process.env[envName]?.trim()
     if (env) return env
     return null
 }
@@ -693,18 +724,41 @@ async function cmdLogin(args: ParsedArgs): Promise<number> {
     if (!hubUrl) {
         throw usageError('login requires --hub <url>')
     }
-    const accessToken = await readTokenInputOrEnv(args.flags)
-    if (!accessToken) {
+    const serverToken = await readSecretInput(
+        args.flags,
+        'server-token',
+        'server-token-file',
+        'TMUXD_SERVER_TOKEN'
+    )
+    if (!serverToken) {
         throw usageError(
-            'login requires --access-token <secret>[:<ns>] (or TMUXD_TOKEN env, or --access-token-file <path>).'
+            'login requires --server-token <secret> ' +
+                '(or --server-token-file <path>, or TMUXD_SERVER_TOKEN env). ' +
+                'This is the shared team token from your hub admin.'
         )
     }
-    const parsed = parseAccessToken(accessToken)
-    if (!parsed) {
-        throw usageError(
-            'access token format invalid. Use "<secret>" for single-user, "<secret>:<namespace>" for multi-user.'
+    let userToken = await readSecretInput(
+        args.flags,
+        'user-token',
+        'user-token-file',
+        'TMUXD_USER_TOKEN'
+    )
+    if (!userToken && args.flags['user-token-generate']) {
+        userToken = generateUserToken()
+        process.stderr.write(
+            `tmuxd: generated user token (save this somewhere safe — it IS your identity):\n` +
+                `  ${userToken}\n` +
+                `Re-use it via TMUXD_USER_TOKEN or --user-token / --user-token-file on later logins.\n`
         )
     }
+    if (!userToken) {
+        throw usageError(
+            'login requires --user-token <secret> (or --user-token-file <path>, ' +
+                'or TMUXD_USER_TOKEN env, or --user-token-generate to make one). ' +
+                'This is your personal token; the hub uses sha256(userToken) as your namespace.'
+        )
+    }
+
     // Warn if the user is sending a JWT-bearing request over plain http://
     // to a non-loopback host. Refusing outright is too aggressive for
     // labs/internal-network deployments, but every operator should know
@@ -717,14 +771,14 @@ async function cmdLogin(args: ParsedArgs): Promise<number> {
         res = await fetch(url, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ token: accessToken })
+            body: JSON.stringify({ serverToken, userToken })
         })
     } catch (err) {
         const reason = err instanceof Error ? err.message : String(err)
         throw new ApiError(0, 'network_error', `failed to reach ${url}: ${reason}`)
     }
     const text = await res.text()
-    let body: { token?: string; expiresAt?: number; error?: string } = {}
+    let body: { token?: string; expiresAt?: number; namespace?: string; error?: string } = {}
     if (text) {
         try {
             body = JSON.parse(text)
@@ -734,22 +788,27 @@ async function cmdLogin(args: ParsedArgs): Promise<number> {
     }
     if (!res.ok) {
         if (res.status === 401) {
-            throw new AuthError(`hub rejected the access token (${body.error ?? `http_${res.status}`}).`)
+            throw new AuthError(`hub rejected the tokens (${body.error ?? `http_${res.status}`}).`)
         }
         throw new ApiError(res.status, body.error ?? `http_${res.status}`, `login failed: ${text || res.statusText}`)
     }
-    if (!body.token || !body.expiresAt) {
-        throw new ApiError(res.status, 'invalid_response', 'login response missing token or expiresAt')
+    if (!body.token || !body.expiresAt || !body.namespace) {
+        throw new ApiError(res.status, 'invalid_response', 'login response missing token / expiresAt / namespace')
     }
     await saveCredentials({
         hubUrl,
         jwt: body.token,
         expiresAt: body.expiresAt,
-        namespace: parsed.namespace
+        namespace: body.namespace,
+        // Persist the user/server tokens so we can re-login automatically
+        // when the JWT expires. They're already in ~/.tmuxd/cli/credentials.json
+        // (mode 0600) — same threat model as the JWT itself.
+        serverToken,
+        userToken
     })
     const ttl = body.expiresAt - Math.floor(Date.now() / 1000)
     process.stdout.write(
-        `logged in to ${hubUrl} as namespace=${parsed.namespace}; JWT TTL ${formatDuration(ttl)}\n` +
+        `logged in to ${hubUrl} as namespace=${body.namespace}; JWT TTL ${formatDuration(ttl)}\n` +
             `credentials saved to ${credentialsPath()} (mode 0600)\n`
     )
     return 0
@@ -775,8 +834,8 @@ async function cmdWhoami(args: ParsedArgs): Promise<number> {
         // see from `tmuxd list-hosts` etc. when they've never logged in.
         throw new AuthError(
             args.flags.hub
-                ? `not logged in to ${args.flags.hub}. Run \`tmuxd login --hub ${args.flags.hub} --access-token ...\`.`
-                : 'not logged in. Run `tmuxd login --hub <url> --access-token ...`.'
+                ? `not logged in to ${args.flags.hub}. Run \`tmuxd login --hub ${args.flags.hub} --server-token ... --user-token ...\`.`
+                : 'not logged in. Run `tmuxd login --hub <url> --server-token ... --user-token ...`.'
         )
     }
     const ttl = cred.expiresAt - Math.floor(Date.now() / 1000)

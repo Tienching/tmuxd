@@ -29,8 +29,16 @@ export interface SavedCred {
     jwt: string
     /** Unix seconds — matches `AuthResponse.expiresAt`. */
     expiresAt: number
-    /** `'default'` for single-user; named ns for multi-user. */
+    /** 16-hex namespace derived from userToken; what the JWT is scoped to. */
     namespace: string
+    /**
+     * The two tokens used to obtain this JWT. Persisted so the CLI can
+     * silently refresh the JWT when it expires (12h) without forcing the
+     * user to retype the user-token. Both are 0600-protected together
+     * with the JWT — same threat model.
+     */
+    serverToken: string
+    userToken: string
 }
 
 interface CredFile {
@@ -213,7 +221,9 @@ export async function saveCredentials(cred: SavedCred): Promise<void> {
     file.servers[cred.hubUrl] = {
         jwt: cred.jwt,
         expiresAt: cred.expiresAt,
-        namespace: cred.namespace
+        namespace: cred.namespace,
+        serverToken: cred.serverToken,
+        userToken: cred.userToken
     }
     file.default = cred.hubUrl
     await writeCredentialsFile(file)

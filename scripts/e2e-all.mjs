@@ -10,7 +10,6 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 const PORT = 17686
 const TOKEN = 'e2e-all-token'
-const AGENT_TOKEN = 'e2e-agent-token'
 
 async function waitUp(port, maxMs = 10000) {
     const deadline = Date.now() + maxMs
@@ -39,11 +38,10 @@ async function main() {
         {
             env: {
                 ...process.env,
-                TMUXD_TOKEN: TOKEN,
+                TMUXD_SERVER_TOKEN: TOKEN,
                 PORT: String(PORT),
                 HOST: '127.0.0.1',
-                TMUXD_HOME: '/tmp/tmuxd-e2e-all',
-                TMUXD_AGENT_TOKENS: `e2e-agent=${AGENT_TOKEN}`
+                TMUXD_HOME: '/tmp/tmuxd-e2e-all'
             },
             stdio: ['ignore', 'inherit', 'inherit']
         }
@@ -57,9 +55,8 @@ async function main() {
         try {
             await run('scripts/e2e.mjs', {
                 PORT: String(PORT),
-                TMUXD_TOKEN: TOKEN,
+                TMUXD_SERVER_TOKEN: TOKEN,
                 HOST: '127.0.0.1',
-                TMUXD_AGENT_TOKEN: AGENT_TOKEN,
                 TMUXD_E2E_AGENT_HOST_BOUND: '1'
             })
         } catch (e) {
