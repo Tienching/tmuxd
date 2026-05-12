@@ -9,6 +9,7 @@ import { createAuthRoutes } from './routes/auth.js'
 import { createSessionsRoutes } from './routes/sessions.js'
 import { createHealthRoutes } from './routes/health.js'
 import { createWsServer, tryHandleUpgrade } from './ws.js'
+import { setLocalHostEnabled } from './hosts.js'
 import { AgentRegistry } from './agentRegistry.js'
 import { TmuxActionStore } from './actions.js'
 
@@ -25,8 +26,53 @@ function resolveWebDist(): string | null {
     return null
 }
 
+/**
+ * Parse the test-only TMUXD_JWT_TTL_SECONDS_FOR_TEST env var. Empty/
+ * absent → undefined (issueToken's 12h default applies). Any positive
+ * integer → use that. Garbage → undefined + warn so a typo isn't
+ * silently shipped to a production deploy that somehow set the var.
+ */
+function parseTestTtl(raw: string | undefined): number | undefined {
+    if (!raw) return undefined
+    const n = Number.parseInt(raw, 10)
+    if (!Number.isFinite(n) || n <= 0) {
+        console.warn(`[tmuxd] ignoring invalid TMUXD_JWT_TTL_SECONDS_FOR_TEST=${raw}`)
+        return undefined
+    }
+    console.warn(
+        `[tmuxd] WARNING: TMUXD_JWT_TTL_SECONDS_FOR_TEST=${n} is set — JWTs will expire in ${n}s. ` +
+            'This is a TEST-ONLY knob; do not use in production.'
+    )
+    return n
+}
+
 async function main() {
     const config = loadConfig()
+    setLocalHostEnabled(!config.hubOnly)
+    if (config.hubOnly) {
+        console.log('[tmuxd] Hub-only mode: local tmux routes are disabled.')
+        if (config.agentTokens.length === 0) {
+            // A hub with no registered agents can't serve any tmux sessions
+            // (local is disabled, no remote bindings). Warn so that the
+            // operator notices before users do.
+            console.warn(
+                '[tmuxd] WARN: hub-only mode with no agent bindings configured. ' +
+                'Set TMUXD_AGENT_TOKENS=<ns>/<hostId>=<token>,... so agents can ' +
+                'register, otherwise /api/hosts will be empty for every user.'
+            )
+        }
+    }
+    // Confirmation log for operators: who's pre-bound? Lists the count and
+    // the unique namespaces. No tokens or hostIds are printed; the number
+    // of bindings + namespace names is enough to verify "the hub loaded
+    // what I thought it loaded" without exposing any secret material.
+    if (config.agentTokens.length > 0) {
+        const namespaces = [...new Set(config.agentTokens.map((b) => b.namespace))].sort()
+        console.log(
+            `[tmuxd] Loaded ${config.agentTokens.length} agent binding(s) across ` +
+            `${namespaces.length} namespace(s): ${namespaces.join(', ')}`
+        )
+    }
     const agentRegistry = new AgentRegistry(config.agentTokens)
     const actionStore = TmuxActionStore.inDataDir(config.dataDir)
 
@@ -42,7 +88,18 @@ async function main() {
     })
 
     app.route('/', createHealthRoutes())
-    app.route('/api', createAuthRoutes(config.password, config.jwtSecret))
+    app.route(
+        '/api',
+        createAuthRoutes({
+            token: config.token,
+            jwtSecret: config.jwtSecret,
+            // Test-only knob to force a short JWT TTL for the expired-JWT
+            // path. Never document this; never set it in production.
+            // The CLI's e2e suite uses `1` (one second) to verify whoami
+            // and authenticated requests behave correctly post-expiry.
+            jwtTtlSeconds: parseTestTtl(process.env.TMUXD_JWT_TTL_SECONDS_FOR_TEST)
+        })
+    )
     app.route('/api', createSessionsRoutes(config.jwtSecret, agentRegistry, actionStore))
 
     const webDist = resolveWebDist()

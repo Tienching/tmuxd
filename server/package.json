@@ -10,7 +10,9 @@
         "start": "tsx src/index.ts",
         "typecheck": "tsc -p tsconfig.json --noEmit",
         "test": "node --test --import tsx --test-reporter spec 'src/**/*.test.ts'",
-        "agent": "tsx src/agent.ts"
+        "agent": "tsx src/agent.ts",
+        "cli": "tsx src/cli.ts",
+        "cli": "tsx src/cli.ts"
     },
     "dependencies": {
         "@tmuxd/shared": "*",

@@ -2,7 +2,8 @@ import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocketServer, WebSocket } from 'ws'
 import { verifyJwt } from './auth.js'
-import { isLocalHost } from './hosts.js'
+import { isLocalHost, localHostEnabled } from './hosts.js'
+import { logAudit } from './audit.js'
 import { attachTmuxPty, type PtyBridge } from './ptyManager.js'
 import { consumeWsTicket } from './wsTickets.js'
 import { clientWsMessageSchema, LOCAL_HOST_ID, type ServerWsMessage } from '@tmuxd/shared'
@@ -25,6 +26,11 @@ interface BrowserWsContext {
     session: string
     cols: number
     rows: number
+    /**
+     * Namespace this WS connection is scoped to. Stamped at upgrade time
+     * from either the consumed ticket or the validated JWT.
+     */
+    namespace: string
 }
 
 interface TerminalBridge {
@@ -223,10 +229,11 @@ export function createWsServer(deps: WsDeps): WebSocketServer {
 
 async function attachTarget(context: BrowserWsContext, agentRegistry?: AgentRegistry): Promise<TerminalBridge> {
     if (isLocalHost(context.hostId)) {
+        if (!localHostEnabled()) throw new Error('local_host_disabled')
         return wrapLocalBridge(attachTmuxPty(context.session, context.cols, context.rows))
     }
     if (!agentRegistry) throw new Error('host_not_found')
-    const remote = await agentRegistry.attach(context.hostId, context.session, context.cols, context.rows)
+    const remote = await agentRegistry.attach(context.namespace, context.hostId, context.session, context.cols, context.rows)
     return {
         session: remote.session,
         cols: remote.cols,
@@ -325,21 +332,41 @@ export async function tryHandleUpgrade(
         }
     }
 
-    const authorized = ticket ? consumeWsTicket(ticket, { hostId, sessionName: session }) : !!(await verifyJwt(jwtSecret, token))
-    if (!authorized) {
+    const ticketResult = ticket ? consumeWsTicket(ticket, { hostId, sessionName: session }) : null
+    let namespace: string | null = null
+    if (ticketResult) {
+        namespace = ticketResult.namespace
+    } else if (token) {
+        const jwt = await verifyJwt(jwtSecret, token)
+        if (jwt) namespace = jwt.ns
+    }
+    if (!namespace) {
         socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
         socket.destroy()
         return true
     }
 
-    if (!isLocalHost(hostId) && !opts?.agentRegistry?.hasHost(hostId)) {
+    if (isLocalHost(hostId)) {
+        if (!localHostEnabled()) {
+            socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+            socket.destroy()
+            return true
+        }
+    } else if (!opts?.agentRegistry?.hasHost(namespace, hostId)) {
         socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n')
         socket.destroy()
         return true
     }
 
     wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit('connection', ws, request, { hostId, session, cols, rows })
+        wss.emit('connection', ws, request, { hostId, session, cols, rows, namespace })
+    })
+    logAudit({
+        event: 'ws_attach',
+        namespace,
+        hostId,
+        sessionName: session,
+        remoteAddr: request.socket?.remoteAddress
     })
     return true
 }

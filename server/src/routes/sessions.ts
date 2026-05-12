@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { ZodError } from 'zod'
 import { verifyJwt } from '../auth.js'
 import {
+    DEFAULT_NAMESPACE,
     createSessionSchema,
     paneCaptureQuerySchema,
     sendKeysRequestSchema,
@@ -24,7 +25,8 @@ import {
     type TmuxPane,
     type TmuxSession
 } from '@tmuxd/shared'
-import { getLocalHost, isLocalHost } from '../hosts.js'
+import { getLocalHost, isLocalHost, localHostEnabled } from '../hosts.js'
+import { logAudit } from '../audit.js'
 import {
     capturePane,
     captureSession,
@@ -47,11 +49,82 @@ function bearerAuth(jwtSecret: Uint8Array) {
     return async (c: Context, next: Next) => {
         const header = c.req.header('authorization') || ''
         const match = /^Bearer\s+(\S+)$/i.exec(header)
-        if (!match) return c.json({ error: 'missing_token' }, 401)
+        if (!match) {
+            // Audit attempts at API surface that don't even carry a
+            // bearer header — distinguishes "missing creds" from
+            // "tampered token" and gives forensic visibility on
+            // /api/* probing.
+            logAudit({
+                event: 'auth_failure',
+                namespace: '',
+                remoteAddr: clientIpFromRequest(c),
+                reason: 'missing_token'
+            })
+            return c.json({ error: 'missing_token' }, 401)
+        }
         const payload = await verifyJwt(jwtSecret, match[1])
-        if (!payload) return c.json({ error: 'invalid_token' }, 401)
+        if (!payload) {
+            logAudit({
+                event: 'auth_failure',
+                namespace: '',
+                remoteAddr: clientIpFromRequest(c),
+                reason: 'invalid_jwt'
+            })
+            return c.json({ error: 'invalid_token' }, 401)
+        }
+        // Stash the caller's namespace for downstream handlers. See
+        // `requireNamespace()` (Task #24) for the read side; plumbing only
+        // here so behavior is unchanged until filtering lands.
+        c.set('ns', payload.ns ?? DEFAULT_NAMESPACE)
         await next()
     }
+}
+
+/**
+ * Best-effort client IP for audit logging. Reads CF / X-Forwarded-For
+ * headers when present (common when fronted by a proxy), then falls
+ * through to the raw socket peer address (for direct connections in
+ * development or single-box deployments). Returns the literal string
+ * `'unknown'` only when neither path yields anything — this is the
+ * signal that the proxy chain is misconfigured.
+ */
+function clientIpFromRequest(c: Context): string {
+    const fromHeader =
+        c.req.header('cf-connecting-ip') ||
+        c.req.header('x-real-ip') ||
+        c.req.header('x-forwarded-for')?.split(',')[0]?.trim()
+    if (fromHeader) return fromHeader
+    // Hono node-server exposes the raw IncomingMessage as c.env.incoming.
+    // Fall back gracefully if the runtime doesn't expose it (e.g. in
+    // tests using app.request()).
+    const incoming = (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)?.incoming
+    return incoming?.socket?.remoteAddress || 'unknown'
+}
+
+/**
+ * Read the namespace stamped on the authenticated request by `bearerAuth`.
+ *
+ * Throws `MissingNamespaceError` if no `ns` is present on the context.
+ * The route handler treats this as a 500 (server_misconfigured) rather
+ * than silently routing to `default` — a route reaching this helper
+ * without `bearerAuth` having populated `ns` is a programmer error
+ * (route mounted under the wrong app or someone forgot to chain auth),
+ * and falling back to `default` would hand attacker-controlled input
+ * to the default namespace's resources. Fail loud, fail closed.
+ */
+class MissingNamespaceError extends Error {
+    constructor() {
+        super('namespace_missing_on_context')
+        this.name = 'MissingNamespaceError'
+    }
+}
+
+function requireNamespace(c: Context): string {
+    const ns = c.get('ns')
+    if (typeof ns !== 'string' || ns.length === 0) {
+        throw new MissingNamespaceError()
+    }
+    return ns
 }
 
 const MAX_CLIPBOARD_IMAGE_BYTES = 20 * 1024 * 1024
@@ -68,17 +141,33 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     const app = new Hono()
     app.use('*', bearerAuth(jwtSecret))
 
+    // Fail-closed handler. If `requireNamespace` (or any other
+    // chokepoint helper) throws a `MissingNamespaceError`, surface it
+    // as 500 server_misconfigured rather than letting the request fall
+    // through to a default-namespace shadow read. This is defense in
+    // depth — under normal flow `bearerAuth` always populates `ns`.
+    app.onError((err, c) => {
+        if (err instanceof MissingNamespaceError) {
+            console.error('[tmuxd] route reached without ns on context — bearerAuth missing or wired wrong')
+            return c.json({ error: 'server_misconfigured' }, 500)
+        }
+        throw err
+    })
+
     app.get('/hosts', (c) => {
-        return c.json({ hosts: [getLocalHost(), ...(agentRegistry?.listHosts() ?? [])] })
+        const ns = requireNamespace(c)
+        const local = localHostEnabled() ? [getLocalHost()] : []
+        return c.json({ hosts: [...local, ...(agentRegistry?.listHosts(ns) ?? [])] })
     })
 
     app.get('/agent/snapshot', async (c) => {
         const query = snapshotQuerySchema.safeParse(readCaptureQuery(c, ['capture', 'captureLimit']))
         if (!query.success) return c.json({ error: 'invalid_query' }, 400)
-        return c.json(await buildAgentSnapshot(agentRegistry, query.data))
+        return c.json(await buildAgentSnapshot(agentRegistry, requireNamespace(c), query.data))
     })
 
     app.get('/sessions', async (c) => {
+        if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
         try {
             const list = await listSessions()
             return c.json({ sessions: list })
@@ -89,14 +178,16 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
 
     app.get('/hosts/:hostId/sessions', async (c) => {
         const hostId = c.req.param('hostId')
+        const ns = requireNamespace(c)
         if (!isLocalHost(hostId)) {
-            if (!agentRegistry?.hasHost(hostId)) return c.json({ error: 'host_not_found' }, 404)
+            if (!agentRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
             try {
-                return c.json({ sessions: await agentRegistry.listSessions(hostId) })
+                return c.json({ sessions: await agentRegistry.listSessions(ns, hostId) })
             } catch (err) {
                 return agentRouteError(c, err)
             }
         }
+        if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
         try {
             const host = getLocalHost()
             const list = await listSessions()
@@ -107,6 +198,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     })
 
     app.post('/sessions', async (c) => {
+        if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
         const body = await c.req.json().catch(() => null)
         const parsed = createSessionSchema.safeParse(body)
         if (!parsed.success) return c.json({ error: 'invalid_body' }, 400)
@@ -122,18 +214,20 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
 
     app.post('/hosts/:hostId/sessions', async (c) => {
         const hostId = c.req.param('hostId')
+        const ns = requireNamespace(c)
         const body = await c.req.json().catch(() => null)
         const parsed = createSessionSchema.safeParse(body)
         if (!parsed.success) return c.json({ error: 'invalid_body' }, 400)
         if (!isLocalHost(hostId)) {
-            if (!agentRegistry?.hasHost(hostId)) return c.json({ error: 'host_not_found' }, 404)
+            if (!agentRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
             try {
-                await agentRegistry.createSession(hostId, parsed.data.name)
+                await agentRegistry.createSession(ns, hostId, parsed.data.name)
                 return c.json({ ok: true }, 201)
             } catch (err) {
                 return agentRouteError(c, err)
             }
         }
+        if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
         try {
             await createSession(parsed.data.name)
             return c.json({ ok: true }, 201)
@@ -190,6 +284,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     })
 
     app.get('/sessions/:name/panes', async (c) => {
+        if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
         const name = c.req.param('name')
         try {
             const host = getLocalHost()
@@ -205,7 +300,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     app.get('/hosts/:hostId/panes', async (c) => {
         const hostId = c.req.param('hostId')
         const session = c.req.query('session') || undefined
-        const result = await listPanesForHost(hostId, session, agentRegistry)
+        const result = await listPanesForHost(requireNamespace(c), hostId, session, agentRegistry)
         if ('response' in result) return result.response
         return c.json({ panes: result.panes })
     })
@@ -213,7 +308,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     app.get('/hosts/:hostId/sessions/:name/panes', async (c) => {
         const hostId = c.req.param('hostId')
         const name = c.req.param('name')
-        const result = await listPanesForHost(hostId, name, agentRegistry)
+        const result = await listPanesForHost(requireNamespace(c), hostId, name, agentRegistry)
         if ('response' in result) return result.response
         return c.json({ panes: result.panes })
     })
@@ -221,16 +316,18 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     app.get('/hosts/:hostId/panes/:target/capture', async (c) => {
         const hostId = c.req.param('hostId')
         const target = c.req.param('target')
+        const ns = requireNamespace(c)
         const query = paneCaptureQuerySchema.safeParse(readCaptureQuery(c))
         if (!query.success) return c.json({ error: 'invalid_query' }, 400)
         if (!isLocalHost(hostId)) {
-            if (!agentRegistry?.hasHost(hostId)) return c.json({ error: 'host_not_found' }, 404)
+            if (!agentRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
             try {
-                return c.json(await agentRegistry.capturePane(hostId, target, query.data.lines, query.data.maxBytes))
+                return c.json(await agentRegistry.capturePane(ns, hostId, target, query.data.lines, query.data.maxBytes))
             } catch (err) {
                 return agentRouteError(c, err)
             }
         }
+        if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
         try {
             return c.json(await capturePane(target, { lines: query.data.lines, maxBytes: query.data.maxBytes }))
         } catch (err) {
@@ -243,19 +340,21 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     app.get('/hosts/:hostId/panes/:target/status', async (c) => {
         const hostId = c.req.param('hostId')
         const target = c.req.param('target')
+        const ns = requireNamespace(c)
         const query = paneCaptureQuerySchema.safeParse(readCaptureQuery(c))
         if (!query.success) return c.json({ error: 'invalid_query' }, 400)
         if (!isLocalHost(hostId)) {
-            if (!agentRegistry?.hasHost(hostId)) return c.json({ error: 'host_not_found' }, 404)
+            if (!agentRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
             try {
-                const panes = await agentRegistry.listPanes(hostId)
-                const capture = await agentRegistry.capturePane(hostId, target, query.data.lines, query.data.maxBytes)
+                const panes = await agentRegistry.listPanes(ns, hostId)
+                const capture = await agentRegistry.capturePane(ns, hostId, target, query.data.lines, query.data.maxBytes)
                 const pane = findPaneForTarget(panes, target)
                 return c.json(classifyPaneStatus({ target, pane, capture, activity: trackPaneActivity({ hostId, target, pane, capture }) }))
             } catch (err) {
                 return agentRouteError(c, err)
             }
         }
+        if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
         try {
             const panes = await listPanes()
             const capture = await capturePane(target, { lines: query.data.lines, maxBytes: query.data.maxBytes })
@@ -271,7 +370,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     app.post('/hosts/:hostId/panes/:target/activity/read', async (c) => {
         const hostId = c.req.param('hostId')
         const target = c.req.param('target')
-        const result = await markPaneReadForHost(hostId, target, agentRegistry)
+        const result = await markPaneReadForHost(requireNamespace(c), hostId, target, agentRegistry)
         if ('response' in result) return result.response
         return c.json({ ok: true, activity: result.activity })
     })
@@ -282,7 +381,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
         if (!parsed.success) return c.json({ error: 'invalid_body' }, 400)
         const hostId = c.req.param('hostId')
         const target = c.req.param('target')
-        const result = await sendInputToHost(hostId, target, parsed.data, agentRegistry)
+        const result = await sendInputToHost(requireNamespace(c), hostId, target, parsed.data, agentRegistry)
         if ('response' in result) return result.response
         return c.json({ ok: true })
     })
@@ -293,7 +392,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
         if (!parsed.success) return c.json({ error: 'invalid_body' }, 400)
         const hostId = c.req.param('hostId')
         const target = c.req.param('target')
-        const result = await sendKeysToHost(hostId, target, parsed.data.keys, agentRegistry)
+        const result = await sendKeysToHost(requireNamespace(c), hostId, target, parsed.data.keys, agentRegistry)
         if ('response' in result) return result.response
         return c.json({ ok: true })
     })
@@ -302,12 +401,13 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
         const hostId = c.req.param('hostId')
         const target = c.req.param('target')
         const actionId = c.req.param('actionId')
+        const ns = requireNamespace(c)
         const parsedActionId = tmuxActionIdSchema.safeParse(actionId)
         if (!parsedActionId.success) return c.json({ error: 'invalid_action_id' }, 400)
         const action = await actionStore.get(parsedActionId.data)
         if (!action) return c.json({ error: 'action_not_found' }, 404)
         const startedAt = Date.now()
-        const result = await runActionOnHost(hostId, target, action, agentRegistry)
+        const result = await runActionOnHost(ns, hostId, target, action, agentRegistry)
         if ('response' in result) {
             await recordActionRun(actionStore, action, hostId, target, false, startedAt, `http_${result.response.status}`)
             return result.response
@@ -317,13 +417,48 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     })
 
     app.post('/uploads/clipboard-image', async (c) => {
+        if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
         const result = await saveClipboardImage(c)
         if ('response' in result) return result.response
         return c.json(result.upload, 201)
     })
 
     app.post('/sessions/:name/uploads/clipboard-image', async (c) => {
+        if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
         const sessionName = c.req.param('name')
+        let safe: string
+        try {
+            safe = validateSessionTargetName(sessionName)
+        } catch {
+            return c.json({ error: 'invalid_session_name' }, 400)
+        }
+
+        const result = await saveClipboardImage(c)
+        if ('response' in result) return result.response
+
+        try {
+            await sendTextToSession(safe, `${shellQuote(result.upload.path)} `)
+        } catch (err) {
+            await rm(result.upload.path, { force: true }).catch(() => undefined)
+            return c.json({ error: 'tmux_error', message: errMsg(err) }, 400)
+        }
+        return c.json(result.upload, 201)
+    })
+
+    app.post('/hosts/:hostId/sessions/:name/uploads/clipboard-image', async (c) => {
+        const hostId = c.req.param('hostId')
+        const sessionName = c.req.param('name')
+        const ns = requireNamespace(c)
+        if (!isLocalHost(hostId)) {
+            // Remote clipboard-image paste is not supported today: the save
+            // writes to the HUB's filesystem, and the agent's shell runs on
+            // a different machine, so the path we'd paste wouldn't exist
+            // there. Refuse explicitly rather than silently succeeding.
+            if (!agentRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
+            return c.json({ error: 'clipboard_image_remote_unsupported' }, 501)
+        }
+        if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
+
         let safe: string
         try {
             safe = validateSessionTargetName(sessionName)
@@ -346,14 +481,16 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     app.get('/hosts/:hostId/sessions/:name/capture', async (c) => {
         const hostId = c.req.param('hostId')
         const name = c.req.param('name')
+        const ns = requireNamespace(c)
         if (!isLocalHost(hostId)) {
-            if (!agentRegistry?.hasHost(hostId)) return c.json({ error: 'host_not_found' }, 404)
+            if (!agentRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
             try {
-                return c.json(await agentRegistry.captureSession(hostId, name))
+                return c.json(await agentRegistry.captureSession(ns, hostId, name))
             } catch (err) {
                 return agentRouteError(c, err)
             }
         }
+        if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
         try {
             const capture = await captureSession(name)
             return c.json(capture)
@@ -369,15 +506,17 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     app.delete('/hosts/:hostId/sessions/:name', async (c) => {
         const hostId = c.req.param('hostId')
         const name = c.req.param('name')
+        const ns = requireNamespace(c)
         if (!isLocalHost(hostId)) {
-            if (!agentRegistry?.hasHost(hostId)) return c.json({ error: 'host_not_found' }, 404)
+            if (!agentRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
             try {
-                await agentRegistry.killSession(hostId, name)
+                await agentRegistry.killSession(ns, hostId, name)
                 return c.body(null, 204)
             } catch (err) {
                 return agentRouteError(c, err)
             }
         }
+        if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
         try {
             const safe = validateSessionTargetName(name)
             await killSession(safe)
@@ -388,6 +527,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     })
 
     app.get('/sessions/:name/capture', async (c) => {
+        if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
         const name = c.req.param('name')
         try {
             const capture = await captureSession(name)
@@ -402,6 +542,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     })
 
     app.delete('/sessions/:name', async (c) => {
+        if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
         const name = c.req.param('name')
         try {
             const safe = validateSessionTargetName(name)
@@ -434,36 +575,40 @@ function readOptionalInt(value: string | undefined, min: number, max: number): n
 
 async function buildAgentSnapshot(
     agentRegistry: AgentRegistry | undefined,
+    namespace: string,
     query: { lines?: number; maxBytes?: number; capture?: string; captureLimit?: number }
 ): Promise<TmuxSnapshot> {
     const generatedAt = Date.now()
     const local = getLocalHost()
-    const remoteHosts = agentRegistry?.listHosts() ?? []
-    const hosts = [local, ...remoteHosts]
+    const remoteHosts = agentRegistry?.listHosts(namespace) ?? []
+    const localIncluded = localHostEnabled()
+    const hosts = localIncluded ? [local, ...remoteHosts] : [...remoteHosts]
     const sessions: ReturnType<typeof toTargetSessions> = []
     const panes: ReturnType<typeof toTargetPanes> = []
     const statuses: TmuxPaneStatus[] = []
     const errors: TmuxSnapshotError[] = []
 
-    try {
-        sessions.push(...toTargetSessions(await listSessions(), local.id, local.name))
-    } catch (err) {
-        errors.push(snapshotError(local.id, 'list_sessions', err))
-    }
-    try {
-        panes.push(...toTargetPanes(await listPanes(), local.id, local.name))
-    } catch (err) {
-        errors.push(snapshotError(local.id, 'list_panes', err))
+    if (localIncluded) {
+        try {
+            sessions.push(...toTargetSessions(await listSessions(), local.id, local.name))
+        } catch (err) {
+            errors.push(snapshotError(local.id, 'list_sessions', err))
+        }
+        try {
+            panes.push(...toTargetPanes(await listPanes(), local.id, local.name))
+        } catch (err) {
+            errors.push(snapshotError(local.id, 'list_panes', err))
+        }
     }
 
     for (const host of remoteHosts) {
         try {
-            sessions.push(...(await agentRegistry!.listSessions(host.id)))
+            sessions.push(...(await agentRegistry!.listSessions(namespace, host.id)))
         } catch (err) {
             errors.push(snapshotError(host.id, 'list_sessions', err))
         }
         try {
-            panes.push(...toTargetPanes(await agentRegistry!.listPanes(host.id), host.id, host.name))
+            panes.push(...toTargetPanes(await agentRegistry!.listPanes(namespace, host.id), host.id, host.name))
         } catch (err) {
             errors.push(snapshotError(host.id, 'list_panes', err))
         }
@@ -479,7 +624,7 @@ async function buildAgentSnapshot(
                 try {
                     const capture = isLocalHost(pane.hostId)
                         ? await capturePane(pane.target, { lines: query.lines, maxBytes: query.maxBytes })
-                        : await agentRegistry!.capturePane(pane.hostId, pane.target, query.lines, query.maxBytes)
+                        : await agentRegistry!.capturePane(namespace, pane.hostId, pane.target, query.lines, query.maxBytes)
                     return {
                         status: classifyPaneStatus({
                             target: pane.target,
@@ -608,26 +753,40 @@ async function issueTargetWsTicket(c: Context, agentRegistry?: AgentRegistry) {
     const parsed = wsTicketRequestSchema.safeParse(body)
     if (!parsed.success) return c.json({ error: 'invalid_body' }, 400)
     const { hostId, sessionName } = parsed.data
-    if (!isLocalHost(hostId) && !agentRegistry?.hasHost(hostId)) return c.json({ error: 'host_not_found' }, 404)
-    return c.json(issueWsTicket({ hostId: isLocalHost(hostId) ? getLocalHost().id : hostId, sessionName }))
+    const ns = requireNamespace(c)
+    if (isLocalHost(hostId) && !localHostEnabled()) {
+        return c.json({ error: 'local_host_disabled' }, 403)
+    }
+    if (!isLocalHost(hostId) && !agentRegistry?.hasHost(ns, hostId)) {
+        return c.json({ error: 'host_not_found' }, 404)
+    }
+    return c.json(
+        issueWsTicket({
+            hostId: isLocalHost(hostId) ? getLocalHost().id : hostId,
+            sessionName,
+            namespace: ns
+        })
+    )
 }
 
 async function listPanesForHost(
+    namespace: string,
     hostId: string,
     session: string | undefined,
     agentRegistry?: AgentRegistry
 ): Promise<{ panes: ReturnType<typeof toTargetPanes> } | { response: Response }> {
     if (!isLocalHost(hostId)) {
         if (!agentRegistry) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
-        const host = agentRegistry.listHosts().find((candidate) => candidate.id === hostId)
+        const host = agentRegistry.listHosts(namespace).find((candidate) => candidate.id === hostId)
         if (!host) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
         try {
-            const panes = await agentRegistry.listPanes(hostId, session)
+            const panes = await agentRegistry.listPanes(namespace, hostId, session)
             return { panes: toTargetPanes(panes, host.id, host.name) }
         } catch (err) {
             return { response: await agentErrorResponse(err) }
         }
     }
+    if (!localHostEnabled()) return { response: jsonResponse({ error: 'local_host_disabled' }, 403) }
     try {
         const host = getLocalHost()
         const panes = await listPanes(session)
@@ -665,20 +824,22 @@ function actionRouteError(c: Context, err: unknown) {
 }
 
 async function sendInputToHost(
+    namespace: string,
     hostId: string,
     target: string,
     input: { text: string; enter?: boolean },
     agentRegistry?: AgentRegistry
 ): Promise<{ ok: true } | { response: Response }> {
     if (!isLocalHost(hostId)) {
-        if (!agentRegistry?.hasHost(hostId)) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
+        if (!agentRegistry?.hasHost(namespace, hostId)) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
         try {
-            await agentRegistry.sendText(hostId, target, input.text, input.enter)
+            await agentRegistry.sendText(namespace, hostId, target, input.text, input.enter)
             return { ok: true }
         } catch (err) {
             return { response: await agentErrorResponse(err) }
         }
     }
+    if (!localHostEnabled()) return { response: jsonResponse({ error: 'local_host_disabled' }, 403) }
     try {
         await sendTextToTarget(target, input.text, input.enter)
         return { ok: true }
@@ -688,20 +849,22 @@ async function sendInputToHost(
 }
 
 async function sendKeysToHost(
+    namespace: string,
     hostId: string,
     target: string,
     keys: string[],
     agentRegistry?: AgentRegistry
 ): Promise<{ ok: true } | { response: Response }> {
     if (!isLocalHost(hostId)) {
-        if (!agentRegistry?.hasHost(hostId)) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
+        if (!agentRegistry?.hasHost(namespace, hostId)) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
         try {
-            await agentRegistry.sendKeys(hostId, target, keys)
+            await agentRegistry.sendKeys(namespace, hostId, target, keys)
             return { ok: true }
         } catch (err) {
             return { response: await agentErrorResponse(err) }
         }
     }
+    if (!localHostEnabled()) return { response: jsonResponse({ error: 'local_host_disabled' }, 403) }
     try {
         await sendKeysToTarget(target, keys)
         return { ok: true }
@@ -711,23 +874,25 @@ async function sendKeysToHost(
 }
 
 async function markPaneReadForHost(
+    namespace: string,
     hostId: string,
     target: string,
     agentRegistry?: AgentRegistry
 ): Promise<{ activity: ReturnType<typeof markPaneActivityRead> } | { response: Response }> {
     const readCaptureOptions = { lines: 120, maxBytes: 65_536 }
     if (!isLocalHost(hostId)) {
-        if (!agentRegistry?.hasHost(hostId)) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
+        if (!agentRegistry?.hasHost(namespace, hostId)) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
         try {
-            const panes = await agentRegistry.listPanes(hostId)
+            const panes = await agentRegistry.listPanes(namespace, hostId)
             const pane = findPaneForTarget(panes, target)
-            const capture = await agentRegistry.capturePane(hostId, target, readCaptureOptions.lines, readCaptureOptions.maxBytes)
+            const capture = await agentRegistry.capturePane(namespace, hostId, target, readCaptureOptions.lines, readCaptureOptions.maxBytes)
             trackPaneActivity({ hostId, target, pane, capture })
             return { activity: markPaneActivityRead({ hostId, target, pane }) }
         } catch (err) {
             return { response: await agentErrorResponse(err) }
         }
     }
+    if (!localHostEnabled()) return { response: jsonResponse({ error: 'local_host_disabled' }, 403) }
     try {
         const panes = await listPanes()
         const pane = findPaneForTarget(panes, target)
@@ -743,15 +908,16 @@ async function markPaneReadForHost(
 }
 
 async function runActionOnHost(
+    namespace: string,
     hostId: string,
     target: string,
     action: TmuxAction,
     agentRegistry?: AgentRegistry
 ): Promise<{ ok: true } | { response: Response }> {
     if (action.kind === 'send-keys') {
-        return sendKeysToHost(hostId, target, action.keys ?? [], agentRegistry)
+        return sendKeysToHost(namespace, hostId, target, action.keys ?? [], agentRegistry)
     }
-    return sendInputToHost(hostId, target, { text: action.payload ?? '', enter: action.enter }, agentRegistry)
+    return sendInputToHost(namespace, hostId, target, { text: action.payload ?? '', enter: action.enter }, agentRegistry)
 }
 
 async function agentErrorResponse(err: unknown): Promise<Response> {

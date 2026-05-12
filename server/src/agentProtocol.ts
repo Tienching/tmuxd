@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { hostIdSchema, sessionNameSchema, sessionTargetNameSchema, tmuxKeySchema, tmuxPaneTargetSchema } from '@tmuxd/shared'
+import { hostIdSchema, namespaceSchema, sessionNameSchema, sessionTargetNameSchema, tmuxKeySchema, tmuxPaneTargetSchema } from '@tmuxd/shared'
 
 const capabilitySchema = z.enum(['list', 'create', 'kill', 'capture', 'attach', 'panes', 'input'])
 const requestIdSchema = z.string().min(1).max(128)
@@ -14,7 +14,14 @@ export const agentHelloSchema = z.object({
     id: hostIdSchema.optional(),
     name: z.string().min(1).max(64),
     version: z.string().min(1).max(64).optional(),
-    capabilities: z.array(capabilitySchema).max(8).optional()
+    capabilities: z.array(capabilitySchema).max(8).optional(),
+    /**
+     * Namespace this agent claims. When absent, the hub treats the agent
+     * as legacy (default namespace). The hub verifies this matches the
+     * namespace pinned on the token binding and closes the socket with
+     * code 4401 `agent_namespace_mismatch` on mismatch.
+     */
+    namespace: namespaceSchema.optional()
 })
 
 const agentResultSchema = z.union([

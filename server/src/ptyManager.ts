@@ -27,7 +27,13 @@ export function attachTmuxPty(session: string, cols: number, rows: number): PtyB
     const args = ['attach-session', '-t', safe]
 
     // Strip sensitive env vars from the shell the user will interact with.
+    // The hub's auth/agent secrets must not leak into PTY children where a
+    // shell user could `env | grep TMUXD`. Strip every variant we accept
+    // — including the deprecated aliases — so a half-migrated `.env` is
+    // still safe.
     const {
+        TMUXD_TOKEN: _tt,
+        TMUXD_BASE_TOKEN: _tbt,
         TMUXD_PASSWORD: _tp,
         TMUXD_AGENT_TOKEN: _tat,
         TMUXD_AGENT_TOKENS: _tats,

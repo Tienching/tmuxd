@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+    isEmptyTmuxWorld,
     parseCaptureMetadata,
     parseListOutput,
     parsePaneListOutput,
@@ -218,3 +219,75 @@ function assertNoUnpairedSurrogates(value: string): void {
         }
     }
 }
+
+describe('isEmptyTmuxWorld', () => {
+    it('treats "no server running" as empty', () => {
+        assert.equal(isEmptyTmuxWorld(new Error('no server running on /tmp/tmux-1000/default')), true)
+    })
+
+    it('treats "no sessions" as empty', () => {
+        assert.equal(isEmptyTmuxWorld(new Error('no sessions')), true)
+    })
+
+    it('treats socket-missing as empty (No such file or directory)', () => {
+        // This is the failure mode that bit e2e-cli on a fresh TMUX_TMPDIR.
+        const msg = 'Command failed: tmux list-sessions\nerror connecting to /tmp/tmux-500/default (No such file or directory)\n'
+        assert.equal(isEmptyTmuxWorld(new Error(msg)), true)
+    })
+
+    it('does NOT swallow socket-permission errors', () => {
+        // A genuine permission error means the operator misconfigured the
+        // socket — surfacing it as 500 is correct, swallowing it as []
+        // would silently mask the misconfiguration. This is the
+        // negative-mutation test the security review asked for.
+        const msg = 'Command failed: tmux list-sessions\nerror connecting to /tmp/tmux-1000/default (Permission denied)\n'
+        assert.equal(isEmptyTmuxWorld(new Error(msg)), false)
+    })
+
+    it('does NOT swallow generic execFile failures', () => {
+        assert.equal(isEmptyTmuxWorld(new Error('ENOENT: no such file: tmux')), false)
+        assert.equal(isEmptyTmuxWorld(new Error('Command failed: tmux foo: unknown command')), false)
+    })
+
+    it('handles non-Error throws defensively', () => {
+        assert.equal(isEmptyTmuxWorld('no server running'), true)
+        assert.equal(isEmptyTmuxWorld(undefined), false)
+        assert.equal(isEmptyTmuxWorld(null), false)
+    })
+})
+
+describe('isEmptyTmuxWorld', () => {
+    it('treats "no server running" as empty', () => {
+        assert.equal(isEmptyTmuxWorld(new Error('no server running on /tmp/tmux-1000/default')), true)
+    })
+
+    it('treats "no sessions" as empty', () => {
+        assert.equal(isEmptyTmuxWorld(new Error('no sessions')), true)
+    })
+
+    it('treats socket-missing as empty (No such file or directory)', () => {
+        // This is the failure mode that bit e2e-cli on a fresh TMUX_TMPDIR.
+        const msg = 'Command failed: tmux list-sessions\nerror connecting to /tmp/tmux-500/default (No such file or directory)\n'
+        assert.equal(isEmptyTmuxWorld(new Error(msg)), true)
+    })
+
+    it('does NOT swallow socket-permission errors', () => {
+        // A genuine permission error means the operator misconfigured the
+        // socket — surfacing it as 500 is correct, swallowing it as []
+        // would silently mask the misconfiguration. This is the
+        // negative-mutation test the security review asked for.
+        const msg = 'Command failed: tmux list-sessions\nerror connecting to /tmp/tmux-1000/default (Permission denied)\n'
+        assert.equal(isEmptyTmuxWorld(new Error(msg)), false)
+    })
+
+    it('does NOT swallow generic execFile failures', () => {
+        assert.equal(isEmptyTmuxWorld(new Error('ENOENT: no such file: tmux')), false)
+        assert.equal(isEmptyTmuxWorld(new Error('Command failed: tmux foo: unknown command')), false)
+    })
+
+    it('handles non-Error throws defensively', () => {
+        assert.equal(isEmptyTmuxWorld('no server running'), true)
+        assert.equal(isEmptyTmuxWorld(undefined), false)
+        assert.equal(isEmptyTmuxWorld(null), false)
+    })
+})

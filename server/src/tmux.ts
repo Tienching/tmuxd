@@ -65,11 +65,20 @@ export async function listSessions(): Promise<TmuxSession[]> {
         })
         return parseListOutput(stdout)
     } catch (err: unknown) {
-        // tmux exits with code 1 and prints "no server running" when there are no sessions.
-        const msg = err instanceof Error ? err.message : String(err)
-        if (/no server running/i.test(msg) || /no sessions/i.test(msg)) {
-            return []
-        }
+        // tmux exits with code 1 in three "empty world" cases:
+        //   * "no server running on …"     — server was never started
+        //   * "no sessions"                — server is up but every session was killed
+        //   * "error connecting to … (No such file or directory)"
+        //                                  — the per-user socket file under
+        //                                    TMUX_TMPDIR doesn't exist yet
+        // All three are equivalent to "list is empty" from the API's POV.
+        // CRITICALLY: a permission error on the socket (e.g.
+        // `error connecting to /tmp/tmux-1000/default (Permission denied)`)
+        // is NOT empty-world — surfacing it as 500 is the correct
+        // observability behavior so the operator can spot a misconfigured
+        // socket. Hence we anchor on the trailing "(No such file or
+        // directory)" parenthetical and let everything else propagate.
+        if (isEmptyTmuxWorld(err)) return []
         throw err
     }
 }
@@ -166,12 +175,25 @@ export async function listPanes(sessionName?: string): Promise<TmuxPane[]> {
         const { stdout } = await execFileAsync('tmux', args, { encoding: 'utf8' })
         return parsePaneListOutput(stdout)
     } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err)
-        if (/no server running/i.test(msg) || /no sessions/i.test(msg)) {
-            return []
-        }
+        // Same empty-world taxonomy as listSessions — see the comment there.
+        if (isEmptyTmuxWorld(err)) return []
         throw err
     }
+}
+
+/**
+ * Recognize tmux exit-code-1 messages that genuinely mean "no sessions
+ * to list" so we can return `[]` instead of 500. Anything else
+ * (including socket permission errors) propagates so the operator
+ * sees the misconfiguration. Exported for tests.
+ */
+export function isEmptyTmuxWorld(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/no server running/i.test(msg)) return true
+    if (/no sessions/i.test(msg)) return true
+    // Socket-missing is empty-world; socket-permission-denied is NOT.
+    if (/error connecting to .*\(No such file or directory\)/i.test(msg)) return true
+    return false
 }
 
 export function parsePaneListOutput(output: string): TmuxPane[] {

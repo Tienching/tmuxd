@@ -4,8 +4,10 @@ import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { WebSocket, WebSocketServer } from 'ws'
 import { z } from 'zod'
 import {
+    DEFAULT_NAMESPACE,
     LOCAL_HOST_ID,
     hostIdSchema,
+    namespaceSchema,
     sessionNameSchema,
     sessionTargetNameSchema,
     tmuxKeySchema,
@@ -18,6 +20,7 @@ import {
     type TmuxSession
 } from '@tmuxd/shared'
 import { agentClientMessageSchema, type AgentClientMessage, type AgentHelloMessage, type AgentServerMessage } from './agentProtocol.js'
+import { logAudit } from './audit.js'
 import type { TmuxCapture } from './tmux.js'
 
 const VERSION = '0.1.0'
@@ -30,7 +33,19 @@ const MAX_REMOTE_SESSION_CAPTURE_BYTES = 16 * 1024 * 1024
 const MAX_REMOTE_PANE_CAPTURE_BYTES = 384 * 1024
 const MAX_REMOTE_PANES = 1024
 const MAX_REMOTE_STRING = 4096
-const DEFAULT_CAPABILITIES: HostCapability[] = ['list', 'create', 'kill', 'capture', 'attach', 'panes', 'input']
+/**
+ * Legacy capability set for agents whose hello message omits `capabilities`.
+ *
+ * The pane / input APIs are *intentionally* missing here: a pre-pane-API
+ * agent must not silently start claiming new APIs after the server is
+ * upgraded. Modern agents always advertise their full capability set in
+ * the hello frame and pick up panes/input that way (see
+ * `server/src/agent.ts`'s `Agent.start`).
+ *
+ * This is asserted by the e2e test "agent: legacy no-capabilities host
+ * does not claim pane APIs" in scripts/e2e.mjs.
+ */
+const DEFAULT_CAPABILITIES: HostCapability[] = ['list', 'create', 'kill', 'capture', 'attach']
 const tmuxResultStringSchema = z.string().min(1).max(2048)
 const tmuxOptionalStringSchema = z.string().max(MAX_REMOTE_STRING)
 const remoteSessionCaptureTextSchema = z.string().refine(
@@ -44,8 +59,16 @@ const remotePaneCaptureTextSchema = z.string().refine(
 
 export interface AgentTokenBinding {
     /**
+     * Namespace this token binds into. See `DEFAULT_NAMESPACE` for the
+     * legacy single-user meaning.
+     */
+    namespace: string
+    /**
      * When present, this token can only register the matching hostId.
-     * A null hostId is the legacy shared-token mode.
+     * A null hostId is the legacy shared-token mode (any hostId).
+     *
+     * Host ids are scoped per-namespace: `alice/laptop` and `bob/laptop`
+     * are distinct records once the registry is rekeyed (see Task #18).
      */
     hostId: string | null
     token: string
@@ -122,8 +145,14 @@ export interface RemoteStreamBridge {
 
 export class AgentRegistry {
     private readonly wss = new WebSocketServer({ noServer: true, maxPayload: MAX_AGENT_PAYLOAD })
-    private readonly agents = new Map<string, RemoteHostConnection>()
-    private readonly authenticatedHostIds = new WeakMap<WebSocket, string | null>()
+    /**
+     * Nested map: namespace → hostId → agent connection. Same hostId in two
+     * namespaces yields two distinct records; reads from one namespace
+     * never see the other.
+     */
+    private readonly agents = new Map<string, Map<string, RemoteHostConnection>>()
+    /** Per-WS auth context captured at upgrade time and consumed at hello. */
+    private readonly authenticatedBindings = new WeakMap<WebSocket, AgentTokenBinding | null>()
     private readonly agentTokens: AgentTokenBinding[]
 
     constructor(agentTokens: AgentTokenBinding[] | string | null) {
@@ -151,22 +180,30 @@ export class AgentRegistry {
         }
 
         this.wss.handleUpgrade(request, socket, head, (ws) => {
-            this.authenticatedHostIds.set(ws, auth.hostId)
+            this.authenticatedBindings.set(ws, auth)
             this.wss.emit('connection', ws, request)
         })
         return true
     }
 
-    listHosts(): HostInfo[] {
-        return [...this.agents.values()].map((agent) => agent.hostInfo())
+    /**
+     * List all hosts visible to a namespace.
+     *
+     * The registry only ever returns hosts stamped with the requested
+     * namespace; cross-namespace leakage is impossible at this layer.
+     */
+    listHosts(namespace: string): HostInfo[] {
+        const inner = this.agents.get(namespace)
+        if (!inner) return []
+        return [...inner.values()].map((agent) => agent.hostInfo())
     }
 
-    hasHost(hostId: string): boolean {
-        return this.agents.has(hostId)
+    hasHost(namespace: string, hostId: string): boolean {
+        return this.agents.get(namespace)?.has(hostId) ?? false
     }
 
-    async listSessions(hostId: string): Promise<TargetSession[]> {
-        const agent = this.requireAgent(hostId)
+    async listSessions(namespace: string, hostId: string): Promise<TargetSession[]> {
+        const agent = this.requireAgent(namespace, hostId)
         agent.requireCapability('list')
         const body = await agent.request('list_sessions', {})
         const parsed = listSessionsResultSchema.parse(body)
@@ -174,38 +211,44 @@ export class AgentRegistry {
         return parsed.sessions.map((session) => toTargetSession(session, host))
     }
 
-    async createSession(hostId: string, name: string): Promise<void> {
-        const agent = this.requireAgent(hostId)
+    async createSession(namespace: string, hostId: string, name: string): Promise<void> {
+        const agent = this.requireAgent(namespace, hostId)
         agent.requireCapability('create')
         const safe = sessionNameSchema.parse(name)
         await agent.request('create_session', { name: safe })
     }
 
-    async killSession(hostId: string, name: string): Promise<void> {
-        const agent = this.requireAgent(hostId)
+    async killSession(namespace: string, hostId: string, name: string): Promise<void> {
+        const agent = this.requireAgent(namespace, hostId)
         agent.requireCapability('kill')
         const safe = sessionTargetNameSchema.parse(name)
         await agent.request('kill_session', { name: safe })
     }
 
-    async captureSession(hostId: string, name: string): Promise<TmuxCapture> {
-        const agent = this.requireAgent(hostId)
+    async captureSession(namespace: string, hostId: string, name: string): Promise<TmuxCapture> {
+        const agent = this.requireAgent(namespace, hostId)
         agent.requireCapability('capture')
         const safe = sessionTargetNameSchema.parse(name)
         const body = await agent.request('capture_session', { name: safe })
         return captureResultSchema.parse(body)
     }
 
-    async listPanes(hostId: string, session?: string): Promise<TmuxPane[]> {
-        const agent = this.requireAgent(hostId)
+    async listPanes(namespace: string, hostId: string, session?: string): Promise<TmuxPane[]> {
+        const agent = this.requireAgent(namespace, hostId)
         agent.requireCapability('panes')
         const safeSession = session ? sessionTargetNameSchema.parse(session) : undefined
         const body = await agent.request('list_panes', safeSession ? { session: safeSession } : {})
         return listPanesResultSchema.parse(body).panes
     }
 
-    async capturePane(hostId: string, target: string, lines?: number, maxBytes?: number): Promise<TmuxPaneCapture> {
-        const agent = this.requireAgent(hostId)
+    async capturePane(
+        namespace: string,
+        hostId: string,
+        target: string,
+        lines?: number,
+        maxBytes?: number
+    ): Promise<TmuxPaneCapture> {
+        const agent = this.requireAgent(namespace, hostId)
         agent.requireCapability('panes')
         const safe = tmuxPaneTargetSchema.parse(target)
         const body = await agent.request('capture_pane', {
@@ -216,63 +259,151 @@ export class AgentRegistry {
         return paneCaptureResultSchema.parse(body)
     }
 
-    async sendText(hostId: string, target: string, text: string, enter?: boolean): Promise<void> {
-        const agent = this.requireAgent(hostId)
+    async sendText(
+        namespace: string,
+        hostId: string,
+        target: string,
+        text: string,
+        enter?: boolean
+    ): Promise<void> {
+        const agent = this.requireAgent(namespace, hostId)
         agent.requireCapability('input')
         const safe = tmuxPaneTargetSchema.parse(target)
         await agent.request('send_text', { target: safe, text, enter })
     }
 
-    async sendKeys(hostId: string, target: string, keys: string[]): Promise<void> {
-        const agent = this.requireAgent(hostId)
+    async sendKeys(namespace: string, hostId: string, target: string, keys: string[]): Promise<void> {
+        const agent = this.requireAgent(namespace, hostId)
         agent.requireCapability('input')
         const safe = tmuxPaneTargetSchema.parse(target)
         const safeKeys = keys.map((key) => tmuxKeySchema.parse(key))
         await agent.request('send_keys', { target: safe, keys: safeKeys })
     }
 
-    async attach(hostId: string, session: string, cols: number, rows: number): Promise<RemoteStreamBridge> {
-        const agent = this.requireAgent(hostId)
+    async attach(
+        namespace: string,
+        hostId: string,
+        session: string,
+        cols: number,
+        rows: number
+    ): Promise<RemoteStreamBridge> {
+        const agent = this.requireAgent(namespace, hostId)
         agent.requireCapability('attach')
         const safe = sessionTargetNameSchema.parse(session)
         return agent.attach(safe, cols, rows)
     }
 
     close(): void {
-        for (const agent of this.agents.values()) agent.close(1001, 'server_shutdown')
+        for (const inner of this.agents.values()) {
+            for (const agent of inner.values()) agent.close(1001, 'server_shutdown')
+        }
         this.agents.clear()
         this.wss.close()
     }
 
-    private acceptAgent(ws: WebSocket, _request: IncomingMessage): void {
+    private acceptAgent(ws: WebSocket, request: IncomingMessage): void {
         let accepted: RemoteHostConnection | null = null
+        // Captured at upgrade time so all reject paths can attribute
+        // attempts to a source IP. WS upgrades come straight off the
+        // raw socket (no Hono context), so we only have the peer
+        // address — no proxy header trust chain.
+        const remoteAddr = request.socket?.remoteAddress || 'unknown'
         const timer = setTimeout(() => {
-            if (!accepted) ws.close(1008, 'missing_hello')
+            if (!accepted) {
+                ws.close(1008, 'missing_hello')
+                logAudit({
+                    event: 'agent_rejected',
+                    namespace: '',
+                    remoteAddr,
+                    reason: 'missing_hello'
+                })
+            }
         }, HELLO_TIMEOUT_MS)
 
         const onFirstMessage = (raw: Buffer) => {
             const msg = parseAgentMessage(raw)
             if (!msg || msg.type !== 'hello') {
                 ws.close(1008, 'invalid_hello')
+                logAudit({
+                    event: 'agent_rejected',
+                    namespace: '',
+                    remoteAddr,
+                    reason: 'invalid_hello'
+                })
                 return
             }
             clearTimeout(timer)
+            const binding = this.authenticatedBindings.get(ws) ?? null
+            this.authenticatedBindings.delete(ws)
             try {
-                const boundHostId = this.authenticatedHostIds.get(ws) ?? null
-                this.authenticatedHostIds.delete(ws)
-                const hostId = resolveHostId(msg, boundHostId)
-                const existing = this.agents.get(hostId)
-                if (existing) throw new AgentError('host_already_connected')
+                if (!binding) throw new AgentError('not_authenticated')
 
-                const conn = new RemoteHostConnection(ws, msg, hostId, () => {
-                    if (this.agents.get(hostId) === conn) this.agents.delete(hostId)
+                // Namespace match. Legacy agents (no namespace field) are
+                // treated as DEFAULT_NAMESPACE and therefore only accepted
+                // against bindings pinned to DEFAULT_NAMESPACE. Mismatch
+                // closes with a machine-readable 4401 so the agent CLI can
+                // exit with code 2 (configuration error) instead of
+                // retrying forever on a network-blip assumption.
+                const claimedNs = msg.namespace ?? DEFAULT_NAMESPACE
+                if (claimedNs !== binding.namespace) {
+                    ws.close(4401, `agent_namespace_mismatch: binding=${binding.namespace} hello=${claimedNs}`)
+                    // Audit the rejection so operators see when an agent
+                    // showed up trying to claim the wrong namespace —
+                    // either misconfiguration or active probing.
+                    logAudit({
+                        event: 'agent_rejected',
+                        namespace: claimedNs,
+                        hostId: typeof msg.id === 'string' ? msg.id : undefined,
+                        name: typeof msg.name === 'string' ? msg.name : undefined,
+                        remoteAddr,
+                        reason: `namespace_mismatch: binding=${binding.namespace}`
+                    })
+                    return
+                }
+
+                const hostId = resolveHostId(msg, binding.hostId)
+                const namespace = binding.namespace
+                const inner = this.agents.get(namespace) ?? new Map<string, RemoteHostConnection>()
+                if (inner.has(hostId)) throw new AgentError('host_already_connected')
+
+                const conn = new RemoteHostConnection(ws, msg, hostId, namespace, () => {
+                    const slot = this.agents.get(namespace)
+                    if (slot?.get(hostId) === conn) {
+                        slot.delete(hostId)
+                        if (slot.size === 0) this.agents.delete(namespace)
+                    }
                 })
-                this.agents.set(hostId, conn)
+                inner.set(hostId, conn)
+                this.agents.set(namespace, inner)
                 accepted = conn
                 ws.off('message', onFirstMessage)
                 conn.start()
+                // Audit: structured single-line JSON for grep-ability.
+                // Phase-1 minimum from the design doc — does not include
+                // payloads, just the registration event keyed on namespace.
+                logAudit({
+                    event: 'agent_register',
+                    namespace,
+                    hostId,
+                    name: msg.name,
+                    remoteAddr
+                })
             } catch (err) {
-                ws.close(1008, err instanceof Error ? err.message : 'invalid_hello')
+                const reason = err instanceof Error ? err.message : 'invalid_hello'
+                ws.close(1008, reason)
+                // Best-effort namespace: prefer the binding's namespace if
+                // we authenticated, else the hello's claim. Catches
+                // not_authenticated and host_already_connected, both of
+                // which are operator-relevant.
+                const claimedNs = msg.namespace ?? DEFAULT_NAMESPACE
+                logAudit({
+                    event: 'agent_rejected',
+                    namespace: binding?.namespace ?? claimedNs,
+                    hostId: typeof msg.id === 'string' ? msg.id : undefined,
+                    name: typeof msg.name === 'string' ? msg.name : undefined,
+                    remoteAddr,
+                    reason
+                })
             }
         }
 
@@ -281,8 +412,8 @@ export class AgentRegistry {
         ws.on('error', () => clearTimeout(timer))
     }
 
-    private requireAgent(hostId: string): RemoteHostConnection {
-        const agent = this.agents.get(hostId)
+    private requireAgent(namespace: string, hostId: string): RemoteHostConnection {
+        const agent = this.agents.get(namespace)?.get(hostId)
         if (!agent) throw new AgentError('host_not_found')
         return agent
     }
@@ -316,6 +447,7 @@ class RemoteHostConnection {
         private readonly ws: WebSocket,
         hello: AgentHelloMessage,
         hostId: string,
+        private readonly namespace: string,
         private readonly onClose: () => void
     ) {
         this.host = {
@@ -469,6 +601,17 @@ class RemoteHostConnection {
         }
         this.streams.clear()
         this.onClose()
+        // Audit: pair every agent_register with an agent_disconnect so
+        // operators can answer "when did Bob's agent die last night?"
+        // without correlating multiple log streams. `reason` is the
+        // string we passed to cleanup() — typically `agent_disconnected`,
+        // `agent_error`, or `agent_hello_timeout`.
+        logAudit({
+            event: 'agent_disconnect',
+            namespace: this.namespace,
+            hostId: this.host.id,
+            reason
+        })
     }
 }
 
@@ -648,7 +791,7 @@ function normalizeAgentTokens(agentTokens: AgentTokenBinding[] | string | null):
     if (!agentTokens) return []
     if (typeof agentTokens === 'string') {
         const token = agentTokens.trim()
-        return token ? [{ hostId: null, token }] : []
+        return token ? [{ namespace: DEFAULT_NAMESPACE, hostId: null, token }] : []
     }
     const out: AgentTokenBinding[] = []
     for (const binding of agentTokens) {
@@ -656,7 +799,8 @@ function normalizeAgentTokens(agentTokens: AgentTokenBinding[] | string | null):
         if (!token) continue
         const hostId = binding.hostId === null ? null : hostIdSchema.parse(binding.hostId)
         if (hostId === LOCAL_HOST_ID) throw new Error('invalid_agent_token_host_id')
-        out.push({ hostId, token })
+        const namespace = namespaceSchema.parse(binding.namespace ?? DEFAULT_NAMESPACE)
+        out.push({ namespace, hostId, token })
     }
     return out
 }
