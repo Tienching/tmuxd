@@ -19,10 +19,15 @@
         "test": "npm -ws run test --if-present",
         "e2e": "node scripts/e2e-all.mjs",
         "e2e:api": "node scripts/e2e.mjs",
+        "e2e:hub": "node scripts/e2e-hub.mjs",
+        "e2e:hub-agents": "node scripts/e2e-hub-agents.mjs",
+        "e2e:hub-lifecycle": "node scripts/e2e-hub-lifecycle.mjs",
         "e2e:multi": "node scripts/e2e-multi.mjs",
         "e2e:shutdown": "node scripts/e2e-shutdown.mjs",
         "e2e:web": "node scripts/e2e-web.mjs",
-        "agent": "npm -w @tmuxd/server run agent"
+        "e2e:cli": "node scripts/e2e-cli.mjs",
+        "agent": "npm -w @tmuxd/server run agent",
+        "tmuxd": "npm -w @tmuxd/server run cli --"
     },
     "devDependencies": {
         "concurrently": "^9.1.0",

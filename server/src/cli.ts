@@ -1,0 +1,1323 @@
+#!/usr/bin/env node
+/**
+ * tmuxd CLI — first-class HTTP-API client for tmuxd hubs.
+ *
+ * The mental model intentionally mirrors `tmux`:
+ *
+ *   tmuxd list-sessions [-t HOST]
+ *   tmuxd new-session   [-t HOST] [-s NAME]
+ *   tmuxd kill-session  -t HOST:SESSION
+ *   tmuxd list-panes    [-t HOST:SESSION]
+ *   tmuxd capture-pane  -t HOST:TARGET [--lines N] [-B BYTES]
+ *   tmuxd send-keys     -t HOST:TARGET KEY...
+ *   tmuxd send-text     -t HOST:TARGET [--enter] TEXT...
+ *   tmuxd pane-status   -t HOST:TARGET
+ *
+ * Plus three CLI-only verbs:
+ *
+ *   tmuxd login   --hub URL --access-token TOKEN[:NAMESPACE]
+ *   tmuxd whoami
+ *   tmuxd logout  [--hub URL]
+ *   tmuxd list-hosts
+ *   tmuxd snapshot [--capture] [--limit N]
+ *
+ * The `--access-token` flag is deliberate. tmux's `-t` is reserved for
+ * `--target`, and a soft visual collision between `-t laptop:main` and
+ * `--token …` on the same line is jarring. `--access-token` mirrors the
+ * web UI's "Access token" label and only appears on `tmuxd login`; every
+ * other subcommand reads the JWT from `~/.tmuxd/cli/credentials.json`.
+ *
+ * Auth precedence (login only): `--access-token` flag > `TMUXD_TOKEN` env.
+ */
+import { readFile, lstat } from 'node:fs/promises'
+import {
+    clearCredentials,
+    credentialsPath,
+    loadCredentials,
+    saveCredentials,
+    type SavedCred
+} from './cliCredentials.js'
+import {
+    parseAccessToken,
+    authResponseSchema,
+    hostsResponseSchema,
+    sessionsResponseSchema,
+    hostScopedSessionsResponseSchema,
+    panesResponseSchema,
+    hostScopedPanesResponseSchema,
+    tmuxPaneCaptureSchema,
+    tmuxPaneStatusSchema,
+    okResponseSchema,
+    type AuthResponse,
+    type HostInfo as SharedHostInfo,
+    type TargetSession,
+    type TargetPane,
+    type TmuxPaneCapture,
+    type TmuxPaneStatus
+} from '@tmuxd/shared'
+
+const VERSION = '0.1.0'
+
+// ---------------------------------------------------------------------------
+// arg parsing — extends the simple style from server/src/agent.ts
+// ---------------------------------------------------------------------------
+
+interface ParsedArgs {
+    /** Subcommand (e.g. `list-sessions`). */
+    cmd: string | null
+    /** Long flags with values: `--name foo` → `{name: 'foo'}`. Booleans → '1'. */
+    flags: Record<string, string>
+    /** Positional args after the subcommand. */
+    positional: string[]
+}
+
+/**
+ * Long-flag names that don't take a value. Anything else with a `--`
+ * prefix needs an explicit value (next arg or `--key=value`); we never
+ * heuristically treat "next token starts with -" as "the flag is a
+ * boolean", because that path silently swallows legitimate dash-prefixed
+ * values like `--text -draft`.
+ */
+const BOOLEAN_FLAGS = new Set(['help', 'enter', 'json', 'capture', 'version'])
+
+/**
+ * Short-flag → long-flag mapping for value-taking single-letter flags.
+ * Only short flags that map cleanly to tmux's own conventions live here:
+ *   -t target   (tmux: `-t target`)
+ *   -s name     (tmux: `-s session-name` on new-session)
+ *   -B maxBytes (tmuxd-only; we don't reuse tmux's -B which means buffer)
+ *
+ * Note: tmux's `-S` means "start-line" in capture-pane. We previously
+ * mapped it to `--lines` which collided with tmux muscle memory (review
+ * caught it). `--lines` is now the only spelling — no short alias.
+ */
+const SHORT_VALUE_FLAGS: Record<string, string> = {
+    '-t': 'target',
+    '-s': 'name',
+    '-B': 'max-bytes'
+}
+
+function parseArgs(argv: string[]): ParsedArgs {
+    const flags: Record<string, string> = {}
+    const positional: string[] = []
+    let cmd: string | null = null
+    let i = 0
+    // Pull off the subcommand first; flags before it are global (only -h/-V today).
+    while (i < argv.length) {
+        const arg = argv[i]
+        if (arg === '-h' || arg === '--help') {
+            flags.help = '1'
+            i++
+            continue
+        }
+        if (arg === '-V' || arg === '--version') {
+            flags.version = '1'
+            i++
+            continue
+        }
+        if (arg.startsWith('-')) {
+            // No global value-flags currently; ignore until we hit the subcommand.
+            i++
+            continue
+        }
+        cmd = arg
+        i++
+        break
+    }
+    // Once we hit `--` everything after is a positional, even if it
+    // starts with `-`. Mirrors POSIX getopt and tmux.
+    let endOfOptions = false
+    while (i < argv.length) {
+        const arg = argv[i]
+        if (endOfOptions) {
+            positional.push(arg)
+            i++
+            continue
+        }
+        if (arg === '--') {
+            endOfOptions = true
+            i++
+            continue
+        }
+        if (arg === '-h' || arg === '--help') {
+            flags.help = '1'
+            i++
+            continue
+        }
+        // Short value-flags
+        const shortLong = SHORT_VALUE_FLAGS[arg]
+        if (shortLong) {
+            const next = argv[i + 1]
+            if (next === undefined) throw usageError(`flag ${arg} requires a value`)
+            flags[shortLong] = next
+            i += 2
+            continue
+        }
+        // Long flag with explicit `=value`
+        if (arg.startsWith('--') && arg.includes('=')) {
+            const eq = arg.indexOf('=')
+            flags[arg.slice(2, eq)] = arg.slice(eq + 1)
+            i++
+            continue
+        }
+        // Long flag, value-taking or boolean
+        if (arg.startsWith('--')) {
+            const key = arg.slice(2)
+            if (BOOLEAN_FLAGS.has(key)) {
+                flags[key] = '1'
+                i++
+                continue
+            }
+            const next = argv[i + 1]
+            if (next === undefined) {
+                throw usageError(`flag ${arg} requires a value (use --${key}=<value> or quote dash-prefixed values)`)
+            }
+            // Note: we deliberately do NOT skip `next.startsWith('-')` here.
+            // A user passing `--text -draft` should get `text=-draft`, not
+            // `text=true` followed by an unrecognized `-draft`. If they
+            // really want a boolean flag they should use `--key` alone or
+            // `--key=value` syntax — which is unambiguous.
+            flags[key] = next
+            i += 2
+            continue
+        }
+        positional.push(arg)
+        i++
+    }
+    return { cmd, flags, positional }
+}
+
+class UsageError extends Error {
+    constructor(msg: string) {
+        super(msg)
+        this.name = 'UsageError'
+    }
+}
+
+function usageError(msg: string): UsageError {
+    return new UsageError(msg)
+}
+
+// ---------------------------------------------------------------------------
+// target parsing — `host`, `host:session`, `host:session:0.0`, `host:%paneId`
+// ---------------------------------------------------------------------------
+
+interface ParsedTarget {
+    hostId: string
+    sessionName: string | null
+    /** The pane portion: `0.0`, `:0.0`, or `%paneId`. */
+    paneTarget: string | null
+}
+
+/**
+ * Split a `-t` value into its components. tmux pane targets can themselves
+ * contain `:` (`session:0.0`), so we use the *first* `:` as the host
+ * boundary and let the rest re-merge into the pane target string.
+ *
+ *   laptop                       → {host=laptop}
+ *   laptop:main                  → {host=laptop, session=main}
+ *   laptop:main:0.0              → {host=laptop, session=main, pane=main:0.0}
+ *   laptop:%7                    → {host=laptop, pane=%7}
+ *
+ * Note the redundancy on `host:session:pane`: the API endpoint
+ * `/hosts/:hostId/panes/:target` wants the full session-qualified pane,
+ * not just `0.0`, so we build `session:0.0` for the pane field.
+ */
+function parseTarget(raw: string): ParsedTarget {
+    if (!raw) throw usageError('empty target value')
+    const firstColon = raw.indexOf(':')
+    if (firstColon === -1) {
+        return { hostId: raw, sessionName: null, paneTarget: null }
+    }
+    const hostId = raw.slice(0, firstColon)
+    const rest = raw.slice(firstColon + 1)
+    if (!hostId) throw usageError(`target missing host: '${raw}'`)
+    if (!rest) throw usageError(`target trailing colon: '${raw}'`)
+    // Pane-id form: host:%NNN
+    if (rest.startsWith('%')) {
+        return { hostId, sessionName: null, paneTarget: rest }
+    }
+    const secondColon = rest.indexOf(':')
+    if (secondColon === -1) {
+        // host:session
+        return { hostId, sessionName: rest, paneTarget: null }
+    }
+    // host:session:windowOrPane → pane target reuses session prefix
+    const sessionName = rest.slice(0, secondColon)
+    if (!sessionName) throw usageError(`target missing session: '${raw}'`)
+    return {
+        hostId,
+        sessionName,
+        paneTarget: rest // server expects `session:0.0`, which is exactly `rest`
+    }
+}
+
+// ---------------------------------------------------------------------------
+// help text
+// ---------------------------------------------------------------------------
+
+function printRootHelp(): void {
+    process.stdout.write(`tmuxd ${VERSION} — control plane CLI for tmuxd hubs
+
+Usage:
+  tmuxd <subcommand> [flags] [args]
+
+Auth (one-time):
+  tmuxd login   --hub <url> --access-token <secret>[:<namespace>]
+  tmuxd whoami
+  tmuxd logout  [--hub <url>]
+
+Hosts & sessions (mirror tmux verbs):
+  tmuxd list-hosts
+  tmuxd list-sessions    [-t <host>]
+  tmuxd new-session      [-t <host>] [-s <name>]
+  tmuxd kill-session     -t <host>:<session>
+  tmuxd list-panes       [-t <host>:<session>]
+  tmuxd capture-pane     -t <host>:<target> [--lines <n>] [-B <bytes>]
+  tmuxd send-keys        -t <host>:<target> <KEY> [<KEY> ...]
+  tmuxd send-text        -t <host>:<target> [--enter] <TEXT> [<TEXT> ...]
+  tmuxd pane-status      -t <host>:<target>            (state, light, summary)
+  tmuxd attach-session   -t <host>:<session>           (prints web UI URL)
+  tmuxd snapshot         [--capture] [--limit <n>]
+
+Common flags:
+  -t TARGET             tmux-style target. Forms: <host>, <host>:<session>,
+                        <host>:<session>:<window>.<pane>, <host>:%<paneId>.
+  --json                Print raw API JSON (default is human-readable).
+  -h, --help            Print help. Use \`tmuxd <subcommand> --help\` for
+                        subcommand-specific options.
+  -V, --version         Print version and exit.
+  --                    End-of-options sentinel; everything after is
+                        positional even if it starts with \`-\`.
+
+Auth precedence on \`tmuxd login\`:
+  --access-token <value>      Highest priority. Visible in \`ps\` — avoid
+                              on shared hosts.
+  --access-token-file <path>  Read token from a file (mode-restricted).
+  TMUXD_TOKEN env var         Fallback if neither flag set. Procfs env
+                              is mode 0600, safer than argv on multi-user
+                              boxes.
+
+Other subcommands read the JWT from ~/.tmuxd/cli/credentials.json.
+
+Exit codes:
+  0   success
+  1   usage error / network / unexpected
+  2   auth error (no creds, JWT expired, hub rejected)
+  3   target not found (host/session/pane 404)
+
+Examples:
+  tmuxd login --hub https://hub.example.com --access-token "$TMUXD_TOKEN:alice"
+  tmuxd list-hosts
+  tmuxd list-sessions -t laptop
+  tmuxd capture-pane -t laptop:main:0.0 --lines 100
+  tmuxd send-text -t laptop:main:0.0 --enter '/status'
+  tmuxd send-keys -t laptop:main:0.0 C-c
+
+See README.md and docs/hub-mode.md for end-to-end recipes.
+`)
+}
+
+/**
+ * Per-subcommand help. Keyed by subcommand. Each block is short — the
+ * root help is the master reference, but `tmuxd <verb> --help` should
+ * answer "what flags work here" without making the user grep.
+ */
+const SUBCOMMAND_HELP: Record<string, string> = {
+    login: `tmuxd login — authenticate to a tmuxd hub
+
+Usage:
+  tmuxd login --hub <url> --access-token <secret>[:<namespace>]
+
+Required:
+  --hub <url>                 Hub base URL, e.g. https://hub.example.com
+  --access-token <value>      Access token. Bare = single-user; <secret>:<ns>
+                              = multi-user. Visible in ps; on shared hosts
+                              prefer --access-token-file or TMUXD_TOKEN env.
+
+Optional:
+  --access-token-file <path>  Read token from file (full contents trimmed).
+                              File must be mode 0600 (or stricter); otherwise
+                              the CLI refuses to load it.
+
+The JWT is saved to ~/.tmuxd/cli/credentials.json (mode 0600).
+`,
+    logout: `tmuxd logout — clear stored credentials
+
+Usage:
+  tmuxd logout [--hub <url>]
+
+Without --hub, removes the default (last-logged-in) hub's entry.
+`,
+    whoami: `tmuxd whoami — show the current login
+
+Usage:
+  tmuxd whoami [--hub <url>] [--json]
+
+Prints hub URL, namespace, JWT TTL. Exit 0 if valid; exit 2 if no
+credentials are saved or the JWT has expired.
+`,
+    'list-hosts': `tmuxd list-hosts — list hosts visible to this namespace
+
+Usage:
+  tmuxd list-hosts [--json]
+`,
+    'list-sessions': `tmuxd list-sessions — list sessions on one or all hosts
+
+Usage:
+  tmuxd list-sessions [-t <host>] [--json]
+
+Without -t, aggregates across all hosts visible to your namespace.
+`,
+    'new-session': `tmuxd new-session — create a new tmux session
+
+Usage:
+  tmuxd new-session [-t <host>] [-s <name>]
+
+Without -s, the server picks an auto-name (e.g. web-20260512-090507).
+Without -t, creates on the local host (refused on hub-only deployments).
+`,
+    'kill-session': `tmuxd kill-session — kill a tmux session
+
+Usage:
+  tmuxd kill-session -t <host>:<session>
+`,
+    'list-panes': `tmuxd list-panes — list panes on a host or session
+
+Usage:
+  tmuxd list-panes [-t <host>[:<session>]] [--json]
+
+Without -t, aggregates across all hosts.
+`,
+    'capture-pane': `tmuxd capture-pane — read pane scrollback
+
+Usage:
+  tmuxd capture-pane -t <host>:<target> [--lines <n>] [-B <bytes>] [--json]
+
+  --lines <n>          Number of newest lines to capture (default: server-set).
+                       Note: tmux's own \`-S\` means "start-line" with negative
+                       values; tmuxd does not expose \`-S\` to avoid confusion.
+  -B, --max-bytes <n>  Truncate to newest N UTF-8-safe bytes.
+`,
+    'pane-status': `tmuxd pane-status — pane state, activity light, and summary
+
+Usage:
+  tmuxd pane-status -t <host>:<target> [--json]
+
+Reports a one-line classification of the pane (idle / running /
+needs_input / permission_prompt / copy_mode / dead) plus the activity
+light (gray / green / yellow / red) used by the web UI's session list.
+This is what an outside agent should poll to decide whether to send
+input or to leave a pane alone.
+`,
+    'display-message': `tmuxd display-message — DEPRECATED alias for pane-status
+
+The verb is hijacked: in tmux, \`display-message\` formats a status
+string. tmuxd repurposes it for pane-state classification, which is
+confusing. The canonical verb is now \`pane-status\`. This alias still
+works (with a stderr deprecation notice) but will be removed in a
+future release.
+
+Usage:
+  tmuxd display-message -t <host>:<target>      # equivalent to pane-status
+`,
+    'send-keys': `tmuxd send-keys — send tmux key tokens to a pane
+
+Usage:
+  tmuxd send-keys -t <host>:<target> <KEY> [<KEY> ...]
+
+Keys are tmux key names: C-c, C-d, Enter, Escape, Up, Down, etc. Server
+validates each key; arbitrary text is rejected (use \`send-text\`).
+`,
+    'send-text': `tmuxd send-text — send literal text to a pane
+
+Usage:
+  tmuxd send-text -t <host>:<target> [--enter] <TEXT> [<TEXT> ...]
+
+Multiple positionals are joined with a single space. \`--enter\` appends
+a Return after the text. Use \`--\` to pass dash-prefixed text:
+  tmuxd send-text -t laptop:main -- --help
+`,
+    'attach-session': `tmuxd attach-session — print the web UI deep-link for a session
+
+Usage:
+  tmuxd attach-session -t <host>:<session> [--json]
+
+In-CLI raw-TTY attach is not yet implemented (the WebSocket plumbing
+needed for a faithful interactive terminal — SIGWINCH, ping/pong,
+xterm-256color negotiation — is a larger piece of work). For now the
+verb writes a working web-UI URL to stdout so you can pipe it through
+\`xdg-open\` (Linux) or \`open\` (macOS), or paste into a browser that
+is already logged in to the hub.
+
+Examples:
+  open "$(tmuxd attach-session -t laptop:main)"
+  xdg-open "$(tmuxd attach-session -t laptop:main)"
+`,
+    snapshot: `tmuxd snapshot — full inventory across all visible hosts
+
+Usage:
+  tmuxd snapshot [--capture] [--limit <n>] [--lines <n>] [-B <bytes>]
+
+Always emits JSON; pipe to jq for ad-hoc filtering.
+`
+}
+
+function printSubcommandHelp(cmd: string): void {
+    const text = SUBCOMMAND_HELP[cmd]
+    if (text) {
+        process.stdout.write(text)
+    } else {
+        printRootHelp()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP helpers
+// ---------------------------------------------------------------------------
+
+interface ApiOptions<T> {
+    method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
+    body?: unknown
+    /** Set when the caller wants 404 to throw NotFoundError instead of generic ApiError. */
+    treat404AsNotFound?: boolean
+    /**
+     * Optional zod schema validating the success response body. When
+     * provided, parse failures throw ApiError(0, 'wire_contract_violation')
+     * — pointing at the server bug rather than letting the caller crash
+     * on a `.map()` of `null`. When absent, the body is returned as `T`
+     * with no runtime checks (snapshot uses this).
+     */
+    schema?: { safeParse(input: unknown): { success: true; data: T } | { success: false; error: { issues: { path: (string | number)[]; message: string }[] } } }
+}
+
+class ApiError extends Error {
+    constructor(public status: number, public code: string, msg: string) {
+        super(msg)
+        this.name = 'ApiError'
+    }
+}
+
+class AuthError extends Error {
+    constructor(msg: string) {
+        super(msg)
+        this.name = 'AuthError'
+    }
+}
+
+class NotFoundError extends Error {
+    constructor(msg: string) {
+        super(msg)
+        this.name = 'NotFoundError'
+    }
+}
+
+async function api<T>(cred: SavedCred, path: string, opts: ApiOptions<T> = {}): Promise<T> {
+    const method = opts.method ?? 'GET'
+    const url = cred.hubUrl.replace(/\/+$/, '') + path
+    const headers: Record<string, string> = {
+        Authorization: `Bearer ${cred.jwt}`
+    }
+    let body: string | undefined
+    if (opts.body !== undefined) {
+        headers['content-type'] = 'application/json'
+        body = JSON.stringify(opts.body)
+    }
+    let res: Response
+    try {
+        res = await fetch(url, { method, headers, body })
+    } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err)
+        throw new ApiError(0, 'network_error', `failed to reach ${url}: ${reason}`)
+    }
+    if (res.status === 204) {
+        // typed as T to keep the call site simple; caller asks for `void`.
+        return undefined as T
+    }
+    let parsed: unknown = null
+    const text = await res.text()
+    if (text) {
+        try {
+            parsed = JSON.parse(text)
+        } catch {
+            // non-JSON body — keep it as text in the error path
+        }
+    }
+    if (!res.ok) {
+        const code = (parsed && typeof parsed === 'object' && 'error' in (parsed as Record<string, unknown>)
+            ? String((parsed as { error: unknown }).error)
+            : `http_${res.status}`)
+        const msg = (parsed && typeof parsed === 'object' && 'message' in (parsed as Record<string, unknown>)
+            ? String((parsed as { message: unknown }).message)
+            : code)
+        if (res.status === 401) {
+            throw new AuthError(
+                `JWT rejected (${code}). Run \`tmuxd login --hub ${cred.hubUrl} --access-token ...\` again.`
+            )
+        }
+        if (res.status === 404 && opts.treat404AsNotFound) {
+            throw new NotFoundError(`${msg} (${url})`)
+        }
+        throw new ApiError(res.status, code, `${method} ${path} → ${res.status} ${code}: ${msg}`)
+    }
+    if (opts.schema) {
+        const validated = opts.schema.safeParse(parsed)
+        if (!validated.success) {
+            // Hub returned 2xx but the body shape doesn't match what
+            // tmuxd's wire contract documents. Surface this loudly so
+            // a server-side bug doesn't manifest as a confusing
+            // .map()-of-undefined crash 30 lines later in the caller.
+            const detail = validated.error.issues
+                .slice(0, 3)
+                .map((i) => `${i.path.join('.') || '<root>'}: ${i.message}`)
+                .join('; ')
+            throw new ApiError(
+                res.status,
+                'wire_contract_violation',
+                `${method} ${path} returned a body that does not match the expected wire contract: ${detail}`
+            )
+        }
+        return validated.data
+    }
+    return parsed as T
+}
+
+// ---------------------------------------------------------------------------
+// credential loading helper
+// ---------------------------------------------------------------------------
+
+async function requireCred(hubUrl?: string): Promise<SavedCred> {
+    const cred = await loadCredentials(hubUrl)
+    if (!cred) {
+        throw new AuthError(
+            hubUrl
+                ? `no credentials for ${hubUrl}. Run \`tmuxd login --hub ${hubUrl} --access-token ...\` first.`
+                : `no credentials saved. Run \`tmuxd login --hub <url> --access-token ...\` first.`
+        )
+    }
+    const now = Math.floor(Date.now() / 1000)
+    if (cred.expiresAt <= now) {
+        throw new AuthError(
+            `JWT for ${cred.hubUrl} expired ${now - cred.expiresAt}s ago. ` +
+                `Run \`tmuxd login --hub ${cred.hubUrl} --access-token ...\` to renew.`
+        )
+    }
+    return cred
+}
+
+// ---------------------------------------------------------------------------
+// output helpers
+// ---------------------------------------------------------------------------
+
+function printJson(value: unknown): void {
+    process.stdout.write(JSON.stringify(value, null, 2) + '\n')
+}
+
+interface Column<T> {
+    header: string
+    pick: (row: T) => string
+}
+
+function printTable<T>(rows: T[], cols: Column<T>[]): void {
+    if (rows.length === 0) {
+        process.stdout.write('(none)\n')
+        return
+    }
+    const matrix = [cols.map((c) => c.header), ...rows.map((row) => cols.map((c) => c.pick(row)))]
+    const widths = cols.map((_, ci) => Math.max(...matrix.map((row) => row[ci].length)))
+    for (const row of matrix) {
+        const line = row.map((cell, ci) => cell.padEnd(widths[ci])).join('  ').trimEnd()
+        process.stdout.write(line + '\n')
+    }
+}
+
+// ---------------------------------------------------------------------------
+// response shapes — imported from @tmuxd/shared so the CLI fails to compile
+// (rather than silently drifts) when the wire contract changes.
+// ---------------------------------------------------------------------------
+
+type HostInfo = SharedHostInfo
+type SessionInfo = TargetSession
+type PaneInfo = TargetPane
+type CaptureResponse = TmuxPaneCapture
+type PaneStatusResponse = TmuxPaneStatus
+
+async function readTokenInputOrEnv(flags: Record<string, string>): Promise<string | null> {
+    if (flags['access-token']) return flags['access-token']
+    const file = flags['access-token-file']
+    if (file) {
+        // Refuse to load a token file that's group/world readable. The whole
+        // point of the file form (vs --access-token in argv) is keeping the
+        // secret out of `ps` output; if the file itself is readable by other
+        // users the secret is even more exposed than the argv form. Mirror
+        // the cliCredentials.ts mode-0600 stance so users get one consistent
+        // hardening story across everything that touches secrets.
+        //
+        // lstat (not stat) so a symlinked token file with a permissive
+        // target gets caught — same TOCTOU-ish defense the credentials
+        // loader uses.
+        let st
+        try {
+            st = await lstat(file)
+        } catch (err) {
+            const reason = err instanceof Error ? err.message : String(err)
+            throw usageError(`cannot read --access-token-file ${file}: ${reason}`)
+        }
+        if (st.isSymbolicLink()) {
+            throw usageError(
+                `--access-token-file ${file} is a symlink. Refusing to follow ` +
+                    `(point --access-token-file at the real file).`
+            )
+        }
+        if (!st.isFile()) {
+            throw usageError(`--access-token-file ${file} is not a regular file.`)
+        }
+        const mode = st.mode & 0o777
+        if ((mode & 0o077) !== 0) {
+            const got = mode.toString(8).padStart(3, '0')
+            throw usageError(
+                `--access-token-file ${file} mode is ${got}, must be 0600 (or stricter). ` +
+                    `Run: chmod 600 ${file}`
+            )
+        }
+        const raw = await readFile(file, 'utf8')
+        return raw.replace(/\r?\n$/, '')
+    }
+    const env = process.env.TMUXD_TOKEN?.trim()
+    if (env) return env
+    return null
+}
+
+async function cmdLogin(args: ParsedArgs): Promise<number> {
+    const hubUrl = args.flags.hub?.replace(/\/+$/, '')
+    if (!hubUrl) {
+        throw usageError('login requires --hub <url>')
+    }
+    const accessToken = await readTokenInputOrEnv(args.flags)
+    if (!accessToken) {
+        throw usageError(
+            'login requires --access-token <secret>[:<ns>] (or TMUXD_TOKEN env, or --access-token-file <path>).'
+        )
+    }
+    const parsed = parseAccessToken(accessToken)
+    if (!parsed) {
+        throw usageError(
+            'access token format invalid. Use "<secret>" for single-user, "<secret>:<namespace>" for multi-user.'
+        )
+    }
+    // Warn if the user is sending a JWT-bearing request over plain http://
+    // to a non-loopback host. Refusing outright is too aggressive for
+    // labs/internal-network deployments, but every operator should know
+    // their JWT is sniffable on the path. Localhost stays silent because
+    // the only attacker who can sniff loopback already owns the box.
+    warnInsecureHubScheme(hubUrl)
+    const url = hubUrl + '/api/auth'
+    let res: Response
+    try {
+        res = await fetch(url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ token: accessToken })
+        })
+    } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err)
+        throw new ApiError(0, 'network_error', `failed to reach ${url}: ${reason}`)
+    }
+    const text = await res.text()
+    let body: { token?: string; expiresAt?: number; error?: string } = {}
+    if (text) {
+        try {
+            body = JSON.parse(text)
+        } catch {
+            body = {}
+        }
+    }
+    if (!res.ok) {
+        if (res.status === 401) {
+            throw new AuthError(`hub rejected the access token (${body.error ?? `http_${res.status}`}).`)
+        }
+        throw new ApiError(res.status, body.error ?? `http_${res.status}`, `login failed: ${text || res.statusText}`)
+    }
+    if (!body.token || !body.expiresAt) {
+        throw new ApiError(res.status, 'invalid_response', 'login response missing token or expiresAt')
+    }
+    await saveCredentials({
+        hubUrl,
+        jwt: body.token,
+        expiresAt: body.expiresAt,
+        namespace: parsed.namespace
+    })
+    const ttl = body.expiresAt - Math.floor(Date.now() / 1000)
+    process.stdout.write(
+        `logged in to ${hubUrl} as namespace=${parsed.namespace}; JWT TTL ${formatDuration(ttl)}\n` +
+            `credentials saved to ${credentialsPath()} (mode 0600)\n`
+    )
+    return 0
+}
+
+async function cmdLogout(args: ParsedArgs): Promise<number> {
+    const cred = await loadCredentials(args.flags.hub)
+    if (!cred) {
+        process.stdout.write('no credentials to clear\n')
+        return 0
+    }
+    await clearCredentials(cred.hubUrl)
+    process.stdout.write(`cleared credentials for ${cred.hubUrl}\n`)
+    return 0
+}
+
+async function cmdWhoami(args: ParsedArgs): Promise<number> {
+    const cred = await loadCredentials(args.flags.hub)
+    if (!cred) {
+        // Per the documented exit-code contract, "no credentials" is an auth
+        // error → exit 2. Routing through AuthError keeps the message style
+        // consistent with the rest of the auth surface and matches what users
+        // see from `tmuxd list-hosts` etc. when they've never logged in.
+        throw new AuthError(
+            args.flags.hub
+                ? `not logged in to ${args.flags.hub}. Run \`tmuxd login --hub ${args.flags.hub} --access-token ...\`.`
+                : 'not logged in. Run `tmuxd login --hub <url> --access-token ...`.'
+        )
+    }
+    const ttl = cred.expiresAt - Math.floor(Date.now() / 1000)
+    if (args.flags.json) {
+        printJson({
+            hubUrl: cred.hubUrl,
+            namespace: cred.namespace,
+            expiresAt: cred.expiresAt,
+            ttlSeconds: ttl,
+            credentialsPath: credentialsPath()
+        })
+        return 0
+    }
+    process.stdout.write(
+        `hub:        ${cred.hubUrl}\n` +
+            `namespace:  ${cred.namespace}\n` +
+            `JWT TTL:    ${formatDuration(ttl)}${ttl < 1800 ? ' (re-login soon)' : ''}\n` +
+            `creds file: ${credentialsPath()}\n`
+    )
+    // Expired JWT → still prints the diagnostic above but exits 2 so scripts
+    // can detect the condition without parsing stdout.
+    if (ttl <= 0) {
+        throw new AuthError(`JWT for ${cred.hubUrl} has expired. Run \`tmuxd login\` again.`)
+    }
+    return 0
+}
+
+async function cmdListHosts(args: ParsedArgs): Promise<number> {
+    const cred = await requireCred(args.flags.hub)
+    const { hosts } = await api(cred, '/api/hosts', { schema: hostsResponseSchema })
+    if (args.flags.json) {
+        printJson(hosts)
+        return 0
+    }
+    printTable(hosts, [
+        { header: 'HOST', pick: (h) => h.id },
+        { header: 'NAME', pick: (h) => h.name },
+        { header: 'STATUS', pick: (h) => h.status },
+        { header: 'KIND', pick: (h) => (h.isLocal ? 'local' : 'agent') },
+        { header: 'CAPS', pick: (h) => (h.capabilities ?? []).join(',') }
+    ])
+    return 0
+}
+
+async function cmdListSessions(args: ParsedArgs): Promise<number> {
+    const cred = await requireCred(args.flags.hub)
+    const target = args.flags.target ? parseTarget(args.flags.target) : null
+    let sessions: SessionInfo[]
+    if (target) {
+        const { sessions: list } = await api(
+            cred,
+            `/api/hosts/${encodeURIComponent(target.hostId)}/sessions`,
+            { treat404AsNotFound: true, schema: hostScopedSessionsResponseSchema }
+        )
+        sessions = list
+    } else {
+        // No -t: aggregate across all hosts. We deliberately tolerate per-host
+        // failures so that one offline agent doesn't blank-out the whole
+        // table — but every error other than "host disappeared between
+        // /api/hosts and the per-host call" gets a stderr warning so the
+        // operator can see they're looking at a partial result.
+        const { hosts } = await api(cred, '/api/hosts', { schema: hostsResponseSchema })
+        sessions = []
+        for (const host of hosts) {
+            try {
+                const { sessions: list } = await api(
+                    cred,
+                    `/api/hosts/${encodeURIComponent(host.id)}/sessions`,
+                    { treat404AsNotFound: true, schema: hostScopedSessionsResponseSchema }
+                )
+                sessions.push(...list.map((s) => ({ ...s, hostId: host.id, hostName: host.name })))
+            } catch (err) {
+                warnAggregateHostFailure('list-sessions', host.id, err)
+            }
+        }
+    }
+    if (args.flags.json) {
+        printJson(sessions)
+        return 0
+    }
+    printTable(sessions, [
+        { header: 'HOST', pick: (s) => s.hostId ?? '?' },
+        { header: 'SESSION', pick: (s) => s.name },
+        { header: 'WINDOWS', pick: (s) => String(s.windows) },
+        { header: 'ATTACHED', pick: (s) => (s.attached ? `yes (${s.attachedClients})` : 'no') },
+        { header: 'ACTIVITY', pick: (s) => formatRelative(s.activity) }
+    ])
+    return 0
+}
+
+async function cmdNewSession(args: ParsedArgs): Promise<number> {
+    const cred = await requireCred(args.flags.hub)
+    const targetHost = args.flags.target ? parseTarget(args.flags.target).hostId : null
+    const name = args.flags.name
+    const body: { name?: string } = name ? { name } : {}
+    const path = targetHost
+        ? `/api/hosts/${encodeURIComponent(targetHost)}/sessions`
+        : '/api/sessions'
+    let result: { session?: SessionInfo; ok?: boolean }
+    try {
+        result = await api<{ session?: SessionInfo; ok?: boolean }>(cred, path, {
+            method: 'POST',
+            body,
+            treat404AsNotFound: true
+        })
+    } catch (err) {
+        // 409 from `/sessions` always means name collision. The generic
+        // ApiError message ("POST /api/.../sessions → 409 session_exists")
+        // tells you the wire result; this rewrite tells you what to *do*.
+        // Both end up at exit 1, but the operator-visible string is the
+        // difference between "what does that even mean" and "rename it".
+        if (err instanceof ApiError && err.status === 409) {
+            const where = targetHost ? `${targetHost}` : 'local'
+            const hint = name
+                ? ` Pick a different -s <name> or run \`tmuxd kill-session -t ${where}:${name}\` first.`
+                : ` Pick a different -s <name>.`
+            throw new ApiError(
+                409,
+                'session_exists',
+                `session ${name ?? '(unnamed)'} already exists on ${where}.${hint}`
+            )
+        }
+        throw err
+    }
+    if (args.flags.json) {
+        printJson(result)
+        return 0
+    }
+    const session = result.session
+    if (session) {
+        process.stdout.write(`created ${targetHost ?? 'local'}:${session.name}\n`)
+    } else {
+        process.stdout.write(`created session on ${targetHost ?? 'local'}\n`)
+    }
+    return 0
+}
+
+async function cmdKillSession(args: ParsedArgs): Promise<number> {
+    const target = requireTarget(args, 'kill-session', 'expected -t <host>:<session>')
+    if (!target.sessionName) throw usageError('kill-session requires -t <host>:<session>')
+    const cred = await requireCred(args.flags.hub)
+    await api<void>(
+        cred,
+        `/api/hosts/${encodeURIComponent(target.hostId)}/sessions/${encodeURIComponent(target.sessionName)}`,
+        { method: 'DELETE', treat404AsNotFound: true }
+    )
+    if (!args.flags.json) {
+        process.stdout.write(`killed ${target.hostId}:${target.sessionName}\n`)
+    }
+    return 0
+}
+
+async function cmdListPanes(args: ParsedArgs): Promise<number> {
+    const cred = await requireCred(args.flags.hub)
+    const target = args.flags.target ? parseTarget(args.flags.target) : null
+    let panes: PaneInfo[]
+    if (target) {
+        let path = `/api/hosts/${encodeURIComponent(target.hostId)}/panes`
+        if (target.sessionName) {
+            path += `?session=${encodeURIComponent(target.sessionName)}`
+        }
+        const { panes: list } = await api(cred, path, {
+            treat404AsNotFound: true,
+            schema: hostScopedPanesResponseSchema
+        })
+        panes = list
+    } else {
+        // Same per-host tolerance as cmdListSessions: one host's failure
+        // shouldn't blank the table; warn instead.
+        const { hosts } = await api(cred, '/api/hosts', { schema: hostsResponseSchema })
+        panes = []
+        for (const host of hosts) {
+            try {
+                const { panes: list } = await api(
+                    cred,
+                    `/api/hosts/${encodeURIComponent(host.id)}/panes`,
+                    { treat404AsNotFound: true, schema: hostScopedPanesResponseSchema }
+                )
+                panes.push(...list)
+            } catch (err) {
+                warnAggregateHostFailure('list-panes', host.id, err)
+            }
+        }
+    }
+    if (args.flags.json) {
+        printJson(panes)
+        return 0
+    }
+    printTable(panes, [
+        { header: 'HOST', pick: (p) => p.hostId ?? '?' },
+        { header: 'TARGET', pick: (p) => p.target },
+        { header: 'PANE', pick: (p) => p.paneId },
+        { header: 'CMD', pick: (p) => p.currentCommand ?? '' },
+        { header: 'PATH', pick: (p) => p.currentPath ?? '' },
+        { header: 'SIZE', pick: (p) => p.width && p.height ? `${p.width}x${p.height}` : '' }
+    ])
+    return 0
+}
+
+async function cmdCapturePane(args: ParsedArgs): Promise<number> {
+    const target = requireTarget(args, 'capture-pane', 'expected -t <host>:<target>')
+    if (!target.paneTarget && !target.sessionName) {
+        throw usageError('capture-pane requires a pane target like -t laptop:main:0.0 or -t laptop:%7')
+    }
+    const cred = await requireCred(args.flags.hub)
+    const paneTarget = target.paneTarget ?? `${target.sessionName}:0.0`
+    const params = new URLSearchParams()
+    if (args.flags.lines) params.set('lines', args.flags.lines)
+    if (args.flags['max-bytes']) params.set('maxBytes', args.flags['max-bytes'])
+    const qs = params.toString()
+    const path = `/api/hosts/${encodeURIComponent(target.hostId)}/panes/${encodeURIComponent(paneTarget)}/capture${qs ? '?' + qs : ''}`
+    const cap = await api(cred, path, { treat404AsNotFound: true, schema: tmuxPaneCaptureSchema })
+    if (args.flags.json) {
+        printJson(cap)
+        return 0
+    }
+    process.stdout.write(cap.text)
+    if (!cap.text.endsWith('\n')) process.stdout.write('\n')
+    if (cap.truncated) {
+        process.stderr.write(`(capture truncated to newest ${cap.maxBytes} bytes)\n`)
+    }
+    return 0
+}
+
+async function cmdPaneStatus(args: ParsedArgs): Promise<number> {
+    // The `display-message` alias is also routed here for backwards
+    // compatibility; we surface the same verb name in the error
+    // strings either way (callers see the verb they typed).
+    const verb = args.cmd ?? 'pane-status'
+    const target = requireTarget(args, verb, `expected -t <host>:<target>`)
+    if (!target.paneTarget && !target.sessionName) {
+        throw usageError(`${verb} requires a pane target`)
+    }
+    const cred = await requireCred(args.flags.hub)
+    const paneTarget = target.paneTarget ?? `${target.sessionName}:0.0`
+    const params = new URLSearchParams()
+    if (args.flags.lines) params.set('lines', args.flags.lines)
+    if (args.flags['max-bytes']) params.set('maxBytes', args.flags['max-bytes'])
+    const qs = params.toString()
+    const path = `/api/hosts/${encodeURIComponent(target.hostId)}/panes/${encodeURIComponent(paneTarget)}/status${qs ? '?' + qs : ''}`
+    const status = await api(cred, path, { treat404AsNotFound: true, schema: tmuxPaneStatusSchema })
+    if (args.flags.json) {
+        printJson(status)
+        return 0
+    }
+    process.stdout.write(
+        `target:   ${status.target}\n` +
+            `state:    ${status.state}\n` +
+            `light:    ${status.activity?.light ?? 'gray'}\n` +
+            (status.summary ? `summary:  ${status.summary}\n` : '')
+    )
+    return 0
+}
+
+/**
+ * Deprecated alias. Existing scripts and the original docs called this
+ * `display-message`, but in tmux that verb formats a status string —
+ * the semantic mismatch was the #1 UX-review finding. The canonical
+ * verb is now `pane-status`. We keep this alias so old scripts keep
+ * working; consider removing in a future major release.
+ */
+async function cmdDisplayMessage(args: ParsedArgs): Promise<number> {
+    process.stderr.write(
+        'tmuxd: warning: `display-message` is a deprecated alias for `pane-status`. ' +
+            'Update your scripts; this alias will be removed in a future release.\n'
+    )
+    return cmdPaneStatus(args)
+}
+
+async function cmdSendKeys(args: ParsedArgs): Promise<number> {
+    const target = requireTarget(args, 'send-keys', 'expected -t <host>:<target>')
+    if (!target.paneTarget && !target.sessionName) {
+        throw usageError('send-keys requires a pane target')
+    }
+    if (args.positional.length === 0) {
+        throw usageError('send-keys requires at least one key')
+    }
+    const cred = await requireCred(args.flags.hub)
+    const paneTarget = target.paneTarget ?? target.sessionName!
+    const path = `/api/hosts/${encodeURIComponent(target.hostId)}/panes/${encodeURIComponent(paneTarget)}/keys`
+    await api(cred, path, {
+        method: 'POST',
+        body: { keys: args.positional },
+        treat404AsNotFound: true,
+        schema: okResponseSchema
+    })
+    if (!args.flags.json) {
+        process.stdout.write(`sent ${args.positional.length} key(s) to ${target.hostId}:${paneTarget}\n`)
+    }
+    return 0
+}
+
+async function cmdSendText(args: ParsedArgs): Promise<number> {
+    const target = requireTarget(args, 'send-text', 'expected -t <host>:<target>')
+    if (!target.paneTarget && !target.sessionName) {
+        throw usageError('send-text requires a pane target')
+    }
+    if (args.positional.length === 0) {
+        throw usageError('send-text requires text to send')
+    }
+    const cred = await requireCred(args.flags.hub)
+    const paneTarget = target.paneTarget ?? target.sessionName!
+    const path = `/api/hosts/${encodeURIComponent(target.hostId)}/panes/${encodeURIComponent(paneTarget)}/input`
+    const text = args.positional.join(' ')
+    await api(cred, path, {
+        method: 'POST',
+        body: { text, enter: !!args.flags.enter },
+        treat404AsNotFound: true,
+        schema: okResponseSchema
+    })
+    if (!args.flags.json) {
+        process.stdout.write(`sent ${text.length} char(s) to ${target.hostId}:${paneTarget}\n`)
+    }
+    return 0
+}
+
+async function cmdSnapshot(args: ParsedArgs): Promise<number> {
+    const cred = await requireCred(args.flags.hub)
+    const params = new URLSearchParams()
+    if (args.flags.capture) params.set('capture', '1')
+    if (args.flags.limit) params.set('captureLimit', args.flags.limit)
+    if (args.flags.lines) params.set('lines', args.flags.lines)
+    if (args.flags['max-bytes']) params.set('maxBytes', args.flags['max-bytes'])
+    const qs = params.toString()
+    const path = `/api/agent/snapshot${qs ? '?' + qs : ''}`
+    const snap = await api<unknown>(cred, path)
+    printJson(snap)
+    return 0
+}
+
+/**
+ * Stub — `attach-session` over the wire is non-trivial: WebSocket,
+ * raw-TTY mode, SIGWINCH propagation, ping/pong, ticket consumption.
+ * We don't ship that today, but listing the verb in --help with a 404
+ * mental model is worse than this stub which points the user at the
+ * web UI deep-link instead. The web UI does the real attach over the
+ * exact same WebSocket the CLI would use, just rendered in xterm.js.
+ *
+ * Two failure modes to be specific about:
+ *   - No creds → AuthError (exit 2). Same as every other verb.
+ *   - Target missing → UsageError (exit 1). Tell them what -t expects.
+ *
+ * On success, exit 0 and write the URL to stdout (so a script can
+ * pipe it into `xdg-open`/`open`). The URL format is what the web
+ * UI uses today; if the web UI's URL scheme changes, this will
+ * follow.
+ */
+async function cmdAttachSession(args: ParsedArgs): Promise<number> {
+    const target = requireTarget(args, 'attach-session', 'expected -t <host>:<session>')
+    if (!target.sessionName) {
+        throw usageError('attach-session requires -t <host>:<session>')
+    }
+    const cred = await requireCred(args.flags.hub)
+    // The web UI exposes attach as `/attach/<host>/<session>` for non-local
+    // hosts and `/attach/<session>` for local. We always emit the
+    // host-qualified form because the CLI reaches a hub whose `local`
+    // (if any) is just one host among many.
+    const url = `${cred.hubUrl.replace(/\/+$/, '')}/attach/${encodeURIComponent(target.hostId)}/${encodeURIComponent(target.sessionName)}`
+    if (args.flags.json) {
+        printJson({ attachUrl: url, hostId: target.hostId, sessionName: target.sessionName })
+        return 0
+    }
+    process.stderr.write(
+        'tmuxd: in-CLI attach is not yet implemented — opening the session\n' +
+            'in the web UI is the supported path. The URL below is a working\n' +
+            'deep-link; pipe through `xdg-open` (Linux) or `open` (macOS), or\n' +
+            'paste into a browser already logged in to the hub.\n'
+    )
+    process.stdout.write(url + '\n')
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// shared helpers
+// ---------------------------------------------------------------------------
+
+function requireTarget(args: ParsedArgs, _cmd: string, hint: string): ParsedTarget {
+    if (!args.flags.target) throw usageError(hint)
+    return parseTarget(args.flags.target)
+}
+
+/**
+ * Stderr-warn when the operator is about to ship a JWT over plain
+ * http:// to a non-loopback host. Localhost is fine because the only
+ * attacker who can sniff loopback already owns the box. Anything else
+ * — including private RFC1918 ranges — gets the warning, because
+ * "private network" is rarely as private as people think (Wi-Fi
+ * coffeeshop, shared VPC, container-host bridge, etc).
+ *
+ * Set TMUXD_INSECURE_HTTP=1 to silence the warning if the operator
+ * has read this comment, accepted the risk, and wants quiet logs.
+ */
+export function warnInsecureHubScheme(hubUrl: string): void {
+    if (process.env.TMUXD_INSECURE_HTTP === '1') return
+    let parsed: URL
+    try {
+        parsed = new URL(hubUrl)
+    } catch {
+        // Malformed URL — fetch will fail soon and surface a real error.
+        return
+    }
+    if (parsed.protocol !== 'http:') return
+    // URL parsing returns IPv6 hostnames bracketed (`[::1]`); strip
+    // brackets so the loopback comparison works for both `127.0.0.1`
+    // and `::1`.
+    const host = parsed.hostname.replace(/^\[|\]$/g, '')
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.localhost')) {
+        return
+    }
+    process.stderr.write(
+        `tmuxd: warning: --hub uses plain http:// to ${host}. ` +
+            `The JWT issued by /api/auth will be sent in cleartext on every subsequent ` +
+            `request and is sniffable by anyone on the network path. ` +
+            `Use https:// or an SSH tunnel for production.\n` +
+            `(Set TMUXD_INSECURE_HTTP=1 to silence this warning.)\n`
+    )
+}
+
+/**
+ * Stderr-warn that one host failed during an aggregate query and was
+ * dropped from the result. Suppressed when stdout is being piped to JSON
+ * — the operator is presumably scripting, and we don't want stderr
+ * scribbles polluting their tooling. They get the same observability
+ * by re-running with -t HOSTID for the offending host.
+ *
+ * 404 (NotFoundError) is silent: it only fires when /api/hosts and the
+ * per-host call disagree, which is normal during agent disconnects.
+ */
+function warnAggregateHostFailure(verb: string, hostId: string, err: unknown): void {
+    if (err instanceof NotFoundError) return
+    const reason = err instanceof Error ? err.message : String(err)
+    process.stderr.write(`tmuxd: warning: ${verb} skipped host ${hostId}: ${reason}\n`)
+}
+
+function formatDuration(seconds: number): string {
+    if (seconds <= 0) return 'expired'
+    const h = Math.floor(seconds / 3600)
+    const m = Math.floor((seconds % 3600) / 60)
+    const s = seconds % 60
+    if (h > 0) return `${h}h${m}m`
+    if (m > 0) return `${m}m${s}s`
+    return `${s}s`
+}
+
+function formatRelative(epochSeconds: number): string {
+    const diff = Math.floor(Date.now() / 1000) - epochSeconds
+    if (diff < 60) return `${diff}s ago`
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+    return `${Math.floor(diff / 86400)}d ago`
+}
+
+// ---------------------------------------------------------------------------
+// dispatch
+// ---------------------------------------------------------------------------
+
+const SUBCOMMANDS: Record<string, (a: ParsedArgs) => Promise<number>> = {
+    login: cmdLogin,
+    logout: cmdLogout,
+    whoami: cmdWhoami,
+    'list-hosts': cmdListHosts,
+    'list-sessions': cmdListSessions,
+    'new-session': cmdNewSession,
+    'kill-session': cmdKillSession,
+    'list-panes': cmdListPanes,
+    'capture-pane': cmdCapturePane,
+    'pane-status': cmdPaneStatus,
+    // Deprecated alias kept for backwards compat — see cmdDisplayMessage.
+    'display-message': cmdDisplayMessage,
+    'send-keys': cmdSendKeys,
+    'send-text': cmdSendText,
+    'attach-session': cmdAttachSession,
+    snapshot: cmdSnapshot
+}
+
+async function main(): Promise<number> {
+    const args = parseArgs(process.argv.slice(2))
+    if (args.flags.version) {
+        process.stdout.write(`tmuxd ${VERSION}\n`)
+        return 0
+    }
+    if (!args.cmd || args.flags.help) {
+        if (args.cmd && SUBCOMMANDS[args.cmd]) {
+            // `tmuxd <verb> --help` prints the subcommand block (or falls
+            // back to root help if no per-subcommand block is registered).
+            printSubcommandHelp(args.cmd)
+            return 0
+        }
+        printRootHelp()
+        return args.cmd ? 1 : 0
+    }
+    const handler = SUBCOMMANDS[args.cmd]
+    if (!handler) {
+        process.stderr.write(`unknown subcommand: ${args.cmd}\n`)
+        printRootHelp()
+        return 1
+    }
+    return handler(args)
+}
+
+// Only run main when invoked as a script, not when imported by tests.
+// `import.meta.main` would be cleaner but isn't node-stable yet; the
+// `argv[1] === fileURLToPath(import.meta.url)` check is the canonical
+// ESM equivalent. Tests can `import { warnInsecureHubScheme } from './cli.ts'`
+// without triggering the top-level main() side effect.
+import { fileURLToPath } from 'node:url'
+import { realpathSync } from 'node:fs'
+
+function isMainModule(): boolean {
+    if (!process.argv[1]) return false
+    try {
+        const here = fileURLToPath(import.meta.url)
+        // realpath both sides to defang symlinked node_modules and `tsx` shims
+        return realpathSync(process.argv[1]) === realpathSync(here)
+    } catch {
+        return false
+    }
+}
+
+if (isMainModule()) {
+    main()
+        .then((code) => process.exit(code))
+        .catch((err) => {
+            if (err instanceof UsageError) {
+                process.stderr.write(`tmuxd: ${err.message}\n`)
+                process.exit(1)
+            }
+            if (err instanceof AuthError) {
+                process.stderr.write(`tmuxd: ${err.message}\n`)
+                process.exit(2)
+            }
+            if (err instanceof NotFoundError) {
+                process.stderr.write(`tmuxd: ${err.message}\n`)
+                process.exit(3)
+            }
+            if (err instanceof ApiError) {
+                process.stderr.write(`tmuxd: ${err.message}\n`)
+                process.exit(1)
+            }
+            const reason = err instanceof Error ? err.message : String(err)
+            process.stderr.write(`tmuxd: ${reason}\n`)
+            process.exit(1)
+        })
+}
