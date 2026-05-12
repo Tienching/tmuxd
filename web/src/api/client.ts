@@ -79,8 +79,8 @@ async function uploadRequest<T>(path: string, form: FormData): Promise<T> {
 }
 
 export const api = {
-    login: (password: string) =>
-        request<AuthResponse>('/api/auth', { method: 'POST', body: JSON.stringify({ password }) }),
+    login: (token: string) =>
+        request<AuthResponse>('/api/auth', { method: 'POST', body: JSON.stringify({ token }) }),
     listHosts: () => request<{ hosts: HostInfo[] }>('/api/hosts'),
     listSessions: () => request<{ sessions: TmuxSession[] }>('/api/sessions'),
     listHostSessions: (hostId = LOCAL_HOST_ID) =>

@@ -49,3 +49,30 @@ export function notifyAuthRequired(): void {
     clearToken()
     window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT))
 }
+
+/**
+ * Decode the `ns` claim from the current JWT for display purposes only
+ * (the namespace badge in the header). Returns null if no token, the
+ * token is malformed, or the claim is missing.
+ *
+ * The signature is NOT verified client-side — that is the server's job.
+ * This is purely a UX affordance so the user can confirm "I'm logged in
+ * as alice." The server enforces the actual identity boundary on every
+ * request.
+ */
+export function getCurrentNamespace(): string | null {
+    const token = getToken()
+    if (!token) return null
+    const parts = token.split('.')
+    if (parts.length !== 3) return null
+    try {
+        const payload = parts[1]
+        // base64url → base64
+        const padded = payload.replace(/-/g, '+').replace(/_/g, '/').padEnd(payload.length + ((4 - (payload.length % 4)) % 4), '=')
+        const json = atob(padded)
+        const obj = JSON.parse(json) as { ns?: unknown }
+        return typeof obj.ns === 'string' && obj.ns.length > 0 ? obj.ns : null
+    } catch {
+        return null
+    }
+}

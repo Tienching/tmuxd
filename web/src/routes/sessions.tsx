@@ -3,7 +3,7 @@ import { useNavigate } from '@tanstack/react-router'
 import { useEffect, useState, type ReactNode } from 'react'
 import { LOCAL_HOST_ID, type HostInfo, type SessionTarget, type TargetSession } from '@tmuxd/shared'
 import { api } from '../api/client'
-import { clearToken } from '../auth/tokenStore'
+import { clearToken, getCurrentNamespace } from '../auth/tokenStore'
 import { listHostSessionsData } from '../hosts/sessionData'
 import { createSessionWithOptionalName } from '../session/createSession'
 
@@ -78,7 +78,10 @@ export function SessionsPage() {
         <div className="mx-auto flex h-full min-h-0 max-w-5xl flex-col gap-4 p-4 sm:gap-6 sm:p-6">
             <header className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
                 <div>
-                    <h1 className="text-lg font-semibold tracking-tight">tmux sessions</h1>
+                    <div className="flex items-center gap-2">
+                        <h1 className="text-lg font-semibold tracking-tight">tmux sessions</h1>
+                        <NamespaceBadge />
+                    </div>
                     <p className="text-xs text-neutral-500">Pick a session from any connected host, or create a new one.</p>
                 </div>
                 <button
@@ -284,4 +287,24 @@ async function invalidateSessionQueries(queryClient: ReturnType<typeof useQueryC
         queryClient.invalidateQueries({ queryKey: ['sessions', hostId] }),
         queryClient.invalidateQueries({ queryKey: ['hosts'] })
     ])
+}
+
+/**
+ * Tiny visual affordance: shows the current JWT's `ns` claim so the user
+ * can confirm "I'm logged in as alice". Decoded client-side without
+ * verification — the server enforces the actual identity boundary on
+ * every request. Hides itself for the legacy `default` namespace so
+ * single-user installs don't get clutter.
+ */
+function NamespaceBadge() {
+    const ns = getCurrentNamespace()
+    if (!ns || ns === 'default') return null
+    return (
+        <span
+            className="rounded-full border border-neutral-700 bg-neutral-900 px-2 py-0.5 text-xs font-medium text-neutral-300"
+            title="Your namespace. Server filters everything by this label."
+        >
+            {ns}
+        </span>
+    )
 }
