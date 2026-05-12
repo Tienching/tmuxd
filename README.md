@@ -1,6 +1,6 @@
 # tmuxd
 
-A local-first web UI for `tmux` sessions. Open your browser, sign in with one password, and attach to existing tmux sessions with a full xterm terminal.
+A local-first web UI for `tmux` sessions. Open your browser, sign in with one shared token, and attach to existing tmux sessions with a full xterm terminal.
 
 ![Terminal with session sidebar](docs/screenshots/03-terminal-sidebar.png)
 
@@ -17,7 +17,7 @@ A local-first web UI for `tmux` sessions. Open your browser, sign in with one pa
 - Starts newly-created sessions in the server user's home directory.
 - Supports mobile layouts and install-to-home-screen PWA metadata.
 - Adds mobile-friendly **Keys** and **Text** controls for special keys and selectable session text.
-- Uses password login + short-lived JWTs for the API.
+- Uses shared-token login + short-lived JWTs for the API. Single-user is bare token; multi-user adds `:<namespace>`.
 - Uses short-lived one-time WebSocket tickets instead of putting the long-lived JWT in the WebSocket URL.
 
 ## Screenshots
@@ -50,7 +50,7 @@ A local-first web UI for `tmux` sessions. Open your browser, sign in with one pa
 ```bash
 npm install
 cp .env.example .env
-# edit .env and set TMUXD_PASSWORD
+# edit .env and set TMUXD_TOKEN
 npm run build
 npm start
 ```
@@ -61,7 +61,7 @@ Open the URL printed by the server, usually:
 http://127.0.0.1:7681
 ```
 
-Sign in with the value after `TMUXD_PASSWORD=` in `.env`.
+Sign in with the value after `TMUXD_TOKEN=` in `.env`. For multi-user deployments, append `:<your-namespace>` (see [docs/hub-mode.md](docs/hub-mode.md)).
 
 ## Configuration
 
@@ -69,23 +69,29 @@ Sign in with the value after `TMUXD_PASSWORD=` in `.env`.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `TMUXD_PASSWORD` | required | Password for the web login. |
+| `TMUXD_TOKEN` | required | Shared web-login token. Bare value (`abc123`) → JWT scoped to `default` namespace (single-user). With suffix (`abc123:alice`) → JWT scoped to namespace `alice` (multi-user). One concept, two UX shapes. See [docs/hub-mode.md](docs/hub-mode.md). |
+| `TMUXD_HUB_ONLY` | unset | When `1`/`true`, every local-tmux route returns 403 and the local host is hidden from `/api/hosts`. Recommended for multi-user hub deployments. |
 | `HOST` | `127.0.0.1` | Bind address. Use `0.0.0.0` only when you understand the network exposure. |
 | `PORT` | `7681` | HTTP port. |
-| `TMUXD_HOME` | `.tmuxd` in CWD | Directory for generated runtime secrets. |
-| `JWT_SECRET` | generated | Optional JWT signing secret. If set manually, it must be at least 32 bytes. |
-| `TMUXD_AGENT_TOKEN` | unset | Enables `/agent/connect` with one legacy shared agent token. Use only over trusted networks. |
-| `TMUXD_AGENT_TOKENS` | unset | Preferred hub/agent auth: comma-separated `hostId=token` entries that bind each agent token to one stable host ID. |
+| `TMUXD_HOME` | `.tmuxd` in CWD | Directory for generated runtime secrets (e.g. `jwt-secret`). |
+| `JWT_SECRET` | generated | Optional JWT signing secret. If set manually, it must be at least 32 bytes. Removing the persisted `jwt-secret` file revokes every outstanding JWT on next restart. |
+| `TMUXD_TMUX_PATH` | `tmux` on PATH | Override the tmux binary the agent invokes. Useful for non-standard tmux installs. |
+| `TMUXD_AUDIT_DISABLE` | unset | When `1`, silences the structured audit log on stderr. Default behavior in production is on. |
+| `TMUXD_AGENT_TOKEN` | unset | Enables `/agent/connect` with one shared agent token (binds to default namespace). Use only over trusted networks. |
+| `TMUXD_AGENT_TOKENS` | unset | Preferred hub/agent auth: comma-separated entries of `[<namespace>/]<hostId>=<token>`. Binds each agent token to one `(namespace, hostId)` pair. Bare form `<hostId>=<token>` binds into the default namespace. |
+| `TMUXD_AGENT_NAMESPACE` | `default` | (Agent CLI) Namespace this agent registers under. Must match the namespace pinned in the hub's `TMUXD_AGENT_TOKENS` binding, otherwise hub closes WS with 4401 and agent exits with status 2. |
+
+`TMUXD_PASSWORD` and `TMUXD_BASE_TOKEN` are deprecated aliases for `TMUXD_TOKEN`, accepted with a startup warning. Rename in your `.env` at your convenience.
 
 Example `.env`:
 
 ```env
-TMUXD_PASSWORD=replace-with-a-long-random-password
+TMUXD_TOKEN=replace-with-a-long-random-token
 HOST=127.0.0.1
 PORT=7681
 ```
 
-Generate a strong password:
+Generate a strong token:
 
 ```bash
 openssl rand -base64 24
@@ -110,7 +116,7 @@ By default, tmuxd controls tmux on the same machine as the web server. To show t
 On the hub:
 
 ```bash
-TMUXD_PASSWORD=replace-with-a-long-random-password \
+TMUXD_TOKEN=replace-with-a-long-random-token \
 TMUXD_AGENT_TOKENS=workstation=replace-with-a-long-random-agent-token \
 HOST=0.0.0.0 PORT=7681 npm start
 ```
@@ -143,12 +149,28 @@ Notes:
 
 The home page, terminal sidebar, mobile picker, and split chooser group sessions by host. Existing local routes such as `/attach/main` still mean the hub's `local/main`; remote sessions use `/attach/:hostId/:name`.
 
+## Multi-user hub mode
+
+For deployments where many users share a single tmuxd hub and each
+should only see their own tmux sessions, see [docs/hub-mode.md](docs/hub-mode.md).
+Multi-user is the natural extension of the same single-token login:
+
+- Login takes `<TMUXD_TOKEN>:<namespace>` (e.g. `team-secret:alice`). Bare
+  `<TMUXD_TOKEN>` (no `:`) is the single-user form, which lands the user
+  in the default namespace.
+- Per-namespace agent registration via `TMUXD_AGENT_TOKENS=alice/laptop=...,bob/desktop=...`.
+- `TMUXD_HUB_ONLY=1` to disable local-tmux routes entirely (the hub
+  becomes a proxy/router only).
+
+Read the doc before deploying — namespace is a per-user *label*, not an
+auth boundary against anyone holding `TMUXD_TOKEN`.
+
 ## Using the app
 
 ### Sign in
 
 1. Visit the server URL.
-2. Enter the password from `.env`.
+2. Enter the token from `.env` (append `:<namespace>` for multi-user).
 3. Click **Sign in**.
 
 ### New session
@@ -208,7 +230,7 @@ All endpoints require the normal web JWT:
 ```bash
 TOKEN=$(curl -s http://127.0.0.1:7681/api/auth \
   -H 'content-type: application/json' \
-  -d '{"password":"..."}' | jq -r .token)
+  -d '{"token":"..."}' | jq -r .token)
 ```
 
 Pane inspection:
@@ -275,6 +297,52 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 Remote hosts use the same routes with their host id, for example `/api/hosts/workstation/panes`. New tmuxd outbound agents advertise `panes` and `input` capabilities; older agents continue to work for session list/create/capture/attach but return `capability_not_supported` for these newer endpoints.
 
+### Command-line client (`tmuxd`)
+
+If you'd rather not hand-roll `curl` against the API, tmuxd ships a CLI that
+mirrors the real `tmux` command grammar. Verbs and target syntax are the same
+ones you already know — the only addition is `-t HOST:…` because tmuxd lives
+above many tmux servers.
+
+```bash
+# One-time login. Bare token = single-user; `<token>:<ns>` = multi-user hub.
+npm run tmuxd -- login --hub http://127.0.0.1:7681 \
+  --access-token "$TMUXD_TOKEN"
+
+# Or for a multi-user hub:
+npm run tmuxd -- login --hub https://hub.example.com \
+  --access-token "$TMUXD_TOKEN:alice"
+
+# Same verbs as tmux:
+npm run tmuxd -- list-hosts
+npm run tmuxd -- list-sessions -t laptop
+npm run tmuxd -- new-session   -t laptop -s scratch
+npm run tmuxd -- list-panes    -t laptop:scratch
+npm run tmuxd -- capture-pane  -t laptop:scratch:0.0 --lines 80
+npm run tmuxd -- send-text     -t laptop:scratch:0.0 --enter 'echo hi'
+npm run tmuxd -- send-keys     -t laptop:scratch:0.0 C-c
+npm run tmuxd -- pane-status   -t laptop:scratch:0.0   # state + light + summary
+npm run tmuxd -- attach-session -t laptop:scratch      # prints web UI URL
+npm run tmuxd -- kill-session  -t laptop:scratch
+npm run tmuxd -- whoami
+npm run tmuxd -- logout
+```
+
+Notes:
+
+- `--access-token` only appears on `login`; everything else reads the JWT from
+  `~/.tmuxd/cli/credentials.json` (mode 0600). The CLI refuses to read the
+  file if any group/world bit is set on it.
+- The `-t` flag follows tmux conventions: `-t host`, `-t host:session`,
+  `-t host:session:0.0`, or `-t host:%paneId`.
+- `--json` on any subcommand prints raw API JSON, suitable for piping to `jq`
+  or driving from another agent.
+- JWTs live for 12 hours. `tmuxd whoami` shows time-to-expiry; on 401 the CLI
+  prints a one-line hint pointing at `tmuxd login` again. There is no silent
+  re-auth.
+- For a global install (`tmuxd ...` without `npm run`), see the bin entry in
+  `server/package.json`.
+
 ### Clipboard images
 
 When you paste an image into a **Local** terminal session, tmuxd saves it under `~/.tmuxd/uploads` on the server and pastes the shell-quoted file path into the terminal. This makes screenshots available to shell commands and terminal editors as normal files.
@@ -305,13 +373,13 @@ Recommended deployment:
   ```
 
 - Or put tmuxd behind an HTTPS reverse proxy such as Caddy, nginx, or Cloudflare Tunnel.
-- Use a long random password.
-- If hub/agent mode is enabled, use separate long random agent tokens; do not reuse the browser password.
+- Use a long random token.
+- If hub/agent mode is enabled, use separate long random agent tokens; do not reuse the browser token.
 - Restrict firewall/security-group access to trusted IPs.
 
 Implemented safeguards:
 
-- Password login with constant-time comparison.
+- Token login with constant-time comparison.
 - Short-lived API JWTs.
 - Short-lived one-time WebSocket tickets.
 - Session names are validated against `^[A-Za-z0-9._-]{1,64}$`.
@@ -320,7 +388,7 @@ Implemented safeguards:
 - WebSocket Origin checks.
 - WebSocket connection limits and idle timeout.
 - API responses use `Cache-Control: no-store`.
-- PTY child environment strips `TMUXD_PASSWORD`, `TMUXD_AGENT_TOKEN`, `TMUXD_AGENT_TOKENS`, and `JWT_SECRET`.
+- PTY child environment strips `TMUXD_TOKEN`, `TMUXD_BASE_TOKEN`, `TMUXD_PASSWORD`, `TMUXD_AGENT_TOKEN`, `TMUXD_AGENT_TOKENS`, and `JWT_SECRET`.
 - Browser JWTs are never forwarded to agents; the hub talks to agents over the separate agent token channel.
 
 ## Development
@@ -383,12 +451,13 @@ scripts/  E2E validation scripts
 
 ## Troubleshooting
 
-### Login says “Wrong password”
+### Login says “Wrong token”
 
-Use the value after `TMUXD_PASSWORD=` in `.env`, not the variable name itself.
+Use the value after `TMUXD_TOKEN=` in `.env`, not the variable name itself. For
+multi-user deployments, append `:<your-namespace>` (e.g. `team-secret:alice`).
 
 ```bash
-grep '^TMUXD_PASSWORD=' .env
+grep '^TMUXD_TOKEN=' .env
 ```
 
 ### Cannot access from another machine

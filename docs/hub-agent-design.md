@@ -4,6 +4,12 @@ Status: implemented v1
 
 Branch: `feature/hub-agent-design`
 
+> **Historical note (post-merge):** This document was written before the
+> auth-token unification. References to `TMUXD_PASSWORD` below predate the
+> rename to `TMUXD_TOKEN`. The wire shapes described still apply; only
+> the env var name changed. See [hub-mode.md](./hub-mode.md) for the
+> current operator guide.
+
 Goal: let one browser page show and control tmux sessions from multiple machines.
 
 ## Summary
