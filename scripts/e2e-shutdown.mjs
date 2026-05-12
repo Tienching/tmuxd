@@ -11,7 +11,7 @@ import { spawn } from 'node:child_process'
 import WebSocket from 'ws'
 
 const PORT = 17684
-const PASSWORD = 'shutdown-test-pw'
+const TOKEN = 'shutdown-test-token'
 
 async function waitUp(port, maxMs = 8000) {
     const deadline = Date.now() + maxMs
@@ -34,7 +34,7 @@ async function main() {
         {
             env: {
                 ...process.env,
-                TMUXD_PASSWORD: PASSWORD,
+                TMUXD_TOKEN: TOKEN,
                 PORT: String(PORT),
                 HOST: '127.0.0.1',
                 TMUXD_HOME: '/tmp/tmuxd-shutdown-home'
@@ -60,7 +60,7 @@ async function main() {
     const login = await fetch(`http://127.0.0.1:${PORT}/api/auth`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ password: PASSWORD })
+        body: JSON.stringify({ token: TOKEN })
     }).then((r) => r.json())
     const token = login.token
     if (!token) throw new Error('no token')

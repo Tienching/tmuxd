@@ -14,7 +14,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 const execFileP = promisify(execFile)
 const PORT = 17685
-const PASSWORD = 'web-smoke-pw'
+const TOKEN = 'web-smoke-token'
 
 async function waitUp(port, maxMs = 10000) {
     const deadline = Date.now() + maxMs
@@ -43,7 +43,7 @@ async function main() {
         {
             env: {
                 ...process.env,
-                TMUXD_PASSWORD: PASSWORD,
+                TMUXD_TOKEN: TOKEN,
                 PORT: String(PORT),
                 HOST: '127.0.0.1',
                 TMUXD_HOME: '/tmp/tmuxd-web-smoke'
@@ -100,8 +100,8 @@ async function main() {
                 ],
                 { timeout: 30000, maxBuffer: 10 * 1024 * 1024 }
             )
-            const renders = /tmuxd/.test(stdout) && /password/i.test(stdout) && /Sign in/i.test(stdout)
-            log('Chrome renders /login (Sign in + password input)', renders)
+            const renders = /tmuxd/.test(stdout) && /Access token/i.test(stdout) && /Sign in/i.test(stdout)
+            log('Chrome renders /login (Sign in + Access token label)', renders)
         } catch (err) {
             log('Chrome renders /login', false, err.message.slice(0, 120))
         }

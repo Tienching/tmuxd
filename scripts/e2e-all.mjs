@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 const PORT = 17686
-const PASSWORD = 'e2e-all-password'
+const TOKEN = 'e2e-all-token'
 const AGENT_TOKEN = 'e2e-agent-token'
 
 async function waitUp(port, maxMs = 10000) {
@@ -39,7 +39,7 @@ async function main() {
         {
             env: {
                 ...process.env,
-                TMUXD_PASSWORD: PASSWORD,
+                TMUXD_TOKEN: TOKEN,
                 PORT: String(PORT),
                 HOST: '127.0.0.1',
                 TMUXD_HOME: '/tmp/tmuxd-e2e-all',
@@ -57,7 +57,7 @@ async function main() {
         try {
             await run('scripts/e2e.mjs', {
                 PORT: String(PORT),
-                TMUXD_PASSWORD: PASSWORD,
+                TMUXD_TOKEN: TOKEN,
                 HOST: '127.0.0.1',
                 TMUXD_AGENT_TOKEN: AGENT_TOKEN,
                 TMUXD_E2E_AGENT_HOST_BOUND: '1'
@@ -91,6 +91,37 @@ async function main() {
         await run('scripts/e2e-web.mjs')
     } catch {
         fails.push('web')
+    }
+
+    // Hub-mode suites — each script spawns its own server on a unique
+    // port and tears it down on exit. They don't share fixture state
+    // with the API suite above.
+    console.log('\n=== Hub mode: HTTP isolation (own server) ===')
+    try {
+        await run('scripts/e2e-hub.mjs')
+    } catch {
+        fails.push('hub')
+    }
+
+    console.log('\n=== Hub mode: real two-agent isolation (own server) ===')
+    try {
+        await run('scripts/e2e-hub-agents.mjs')
+    } catch {
+        fails.push('hub-agents')
+    }
+
+    console.log('\n=== Hub mode: same-hostId + reconnect lifecycle (own server) ===')
+    try {
+        await run('scripts/e2e-hub-lifecycle.mjs')
+    } catch {
+        fails.push('hub-lifecycle')
+    }
+
+    console.log('\n=== CLI smoke (own server + real agent) ===')
+    try {
+        await run('scripts/e2e-cli.mjs')
+    } catch {
+        fails.push('cli')
     }
 
     console.log('\n========')

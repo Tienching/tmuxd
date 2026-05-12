@@ -25,7 +25,7 @@ const execFileP = promisify(execFile)
 
 const HOST = process.env.HOST ?? '127.0.0.1'
 const PORT = Number(process.env.PORT ?? 17683)
-const PASSWORD = process.env.TMUXD_PASSWORD ?? 'e2e-test-password-123'
+const TOKEN = process.env.TMUXD_TOKEN ?? process.env.TMUXD_PASSWORD ?? 'e2e-test-token-123'
 const AGENT_TOKEN = process.env.TMUXD_AGENT_TOKEN ?? ''
 const AGENT_HOST_BOUND = process.env.TMUXD_E2E_AGENT_HOST_BOUND === '1'
 const ORIGIN = `http://${HOST}:${PORT}`
@@ -287,13 +287,13 @@ async function main() {
         return r.status === 200 && r.body?.ok === true
     })
 
-    await check('auth: wrong password → 401', async () => {
+    await check('auth: wrong token → 401', async () => {
         const r = await http('/api/auth', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ password: 'definitely-wrong' })
+            body: JSON.stringify({ token: 'definitely-wrong' })
         })
-        return r.status === 401 && r.body?.error === 'invalid_password'
+        return r.status === 401 && r.body?.error === 'invalid_token'
     })
 
     await check('auth: missing body → 400', async () => {
@@ -302,11 +302,11 @@ async function main() {
     })
 
     let token = null
-    await check('auth: correct password → 200 {token}', async () => {
+    await check('auth: correct token → 200 {token}', async () => {
         const r = await http('/api/auth', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ password: PASSWORD })
+            body: JSON.stringify({ token: TOKEN })
         })
         if (r.status !== 200) return false
         if (typeof r.body?.token !== 'string' || r.body.token.length < 32) return false
