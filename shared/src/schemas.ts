@@ -44,6 +44,24 @@ export const hostIdSchema = z
     .max(64)
     .regex(/^[A-Za-z0-9._-]+$/, 'Invalid host id')
 
+/**
+ * Valid namespace identifier.
+ *
+ * Namespaces are per-user tenancy labels in tmuxd's hub mode. A namespace
+ * must be argv/URL/log-safe; `[A-Za-z0-9._-]{1,64}` is intentionally
+ * stricter than HAPI's namespace charset (HAPI accepts any non-whitespace
+ * string after the last `:`).
+ *
+ * `'local'` is NOT reserved here — namespaces and host ids share no
+ * keyspace; the `'local'` name is reserved for the hub's own host id
+ * (see `hostIdSchema` consumers).
+ */
+export const namespaceSchema = z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[A-Za-z0-9._-]+$/, 'Invalid namespace')
+
 export const tmuxPaneTargetSchema = z
     .string()
     .min(1)
@@ -93,8 +111,17 @@ export const tmuxActionIdSchema = z
     .max(64)
     .regex(/^[A-Za-z0-9._-]+$/, 'Invalid action id')
 
+/**
+ * Login body. The client always sends `{ token }`; the bare token form
+ * `<token>` lands the user in `DEFAULT_NAMESPACE`, while `<token>:<ns>`
+ * lands them in the named namespace. The server splits with
+ * `parseAccessToken`. Max length is generous to permit long secrets;
+ * the parser rejects anything not well-formed after trimming.
+ *
+ * There is exactly one login concept — see `docs/hub-mode.md`.
+ */
 export const loginSchema = z.object({
-    password: z.string().min(1).max(512)
+    token: z.string().min(1).max(1024)
 })
 
 export const createSessionSchema = z.object({
@@ -179,3 +206,157 @@ export const clientWsMessageSchema = z.discriminatedUnion('type', [
     }),
     z.object({ type: z.literal('ping') })
 ])
+
+// ---------------------------------------------------------------------------
+// Wire-contract response schemas. These are validated client-side (CLI,
+// future SDKs) so that a server bug returning a malformed payload fails
+// loudly with "wire contract violation" instead of crashing on a
+// `.map()` call. Each schema is `.passthrough()` so adding a new
+// optional field to the server doesn't break existing clients — only
+// the field set we *consume* must be present and typed correctly.
+//
+// Keep these lenient on enums (`z.string()` for state/light) so the CLI
+// doesn't reject a future server's new state. The CLI's narrowing
+// happens at the print/format layer where it needs to decide what to
+// show; runtime validation here is about catching wire bugs, not
+// imposing an exhaustive enum lock.
+// ---------------------------------------------------------------------------
+
+export const authResponseSchema = z
+    .object({
+        token: z.string().min(1),
+        expiresAt: z.number().int().positive()
+    })
+    .passthrough()
+
+export const hostInfoSchema = z
+    .object({
+        id: z.string().min(1),
+        name: z.string(),
+        status: z.string(),
+        isLocal: z.boolean(),
+        version: z.string(),
+        lastSeenAt: z.number(),
+        capabilities: z.array(z.string())
+    })
+    .passthrough()
+
+export const hostsResponseSchema = z.object({ hosts: z.array(hostInfoSchema) }).passthrough()
+
+const tmuxSessionFieldsSchema = z
+    .object({
+        name: z.string(),
+        windows: z.number().int(),
+        attached: z.boolean(),
+        attachedClients: z.number().int(),
+        created: z.number(),
+        activity: z.number()
+    })
+    .passthrough()
+
+export const targetSessionSchema = tmuxSessionFieldsSchema.extend({
+    hostId: z.string().optional(),
+    hostName: z.string().optional()
+})
+
+/**
+ * Stricter shape for the `/api/hosts/:hostId/sessions` endpoint where
+ * the server always populates hostId/hostName. Used by clients that
+ * iterate per-host and want to avoid `?? '?'` defensive sprinkles.
+ */
+export const hostScopedSessionSchema = tmuxSessionFieldsSchema.extend({
+    hostId: z.string().min(1),
+    hostName: z.string()
+})
+
+export const sessionsResponseSchema = z
+    .object({ sessions: z.array(targetSessionSchema) })
+    .passthrough()
+
+/** `/api/hosts/:hostId/sessions` shape — hostId/hostName guaranteed. */
+export const hostScopedSessionsResponseSchema = z
+    .object({ sessions: z.array(hostScopedSessionSchema) })
+    .passthrough()
+
+const tmuxPaneFieldsSchema = z
+    .object({
+        target: z.string(),
+        sessionName: z.string(),
+        windowIndex: z.number().int(),
+        windowName: z.string(),
+        windowActive: z.boolean(),
+        paneIndex: z.number().int(),
+        paneId: z.string(),
+        paneActive: z.boolean(),
+        paneDead: z.boolean(),
+        currentCommand: z.string(),
+        currentPath: z.string(),
+        title: z.string(),
+        width: z.number().int(),
+        height: z.number().int(),
+        paneInMode: z.boolean(),
+        scrollPosition: z.number().int(),
+        historySize: z.number().int(),
+        sessionAttached: z.boolean(),
+        sessionAttachedClients: z.number().int(),
+        sessionActivity: z.number(),
+        windowActivity: z.number()
+    })
+    .passthrough()
+
+export const targetPaneSchema = tmuxPaneFieldsSchema.extend({
+    hostId: z.string().optional(),
+    hostName: z.string().optional()
+})
+
+/** `/api/hosts/:hostId/panes` shape — hostId/hostName guaranteed. */
+export const hostScopedPaneSchema = tmuxPaneFieldsSchema.extend({
+    hostId: z.string().min(1),
+    hostName: z.string()
+})
+
+export const panesResponseSchema = z.object({ panes: z.array(targetPaneSchema) }).passthrough()
+
+/** `/api/hosts/:hostId/panes` shape — hostId/hostName guaranteed. */
+export const hostScopedPanesResponseSchema = z
+    .object({ panes: z.array(hostScopedPaneSchema) })
+    .passthrough()
+
+export const tmuxPaneCaptureSchema = z
+    .object({
+        target: z.string(),
+        text: z.string(),
+        truncated: z.boolean(),
+        maxBytes: z.number().int(),
+        paneInMode: z.boolean(),
+        scrollPosition: z.number().int(),
+        historySize: z.number().int(),
+        paneHeight: z.number().int()
+    })
+    .passthrough()
+
+export const paneActivitySchema = z
+    .object({
+        light: z.string(),
+        unread: z.boolean().optional(),
+        changed: z.boolean().optional(),
+        seq: z.number().optional(),
+        reason: z.string().optional(),
+        updatedAt: z.number().optional(),
+        checkedAt: z.number().optional()
+    })
+    .passthrough()
+
+export const tmuxPaneStatusSchema = z
+    .object({
+        target: z.string(),
+        state: z.string(),
+        signals: z.array(z.string()).optional(),
+        summary: z.string(),
+        checkedAt: z.number().optional(),
+        capture: tmuxPaneCaptureSchema.optional(),
+        activity: paneActivitySchema.optional()
+    })
+    .passthrough()
+
+export const okResponseSchema = z.object({ ok: z.boolean() }).passthrough()
