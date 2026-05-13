@@ -49,11 +49,28 @@ A local-first web UI for `tmux` sessions. Open your browser, sign in with one sh
 
 ```bash
 npm install
-cp .env.example .env
-# edit .env and set TMUXD_SERVER_TOKEN
+npm run tmuxd -- init server   # writes .env at the repo root, mode 0600
 npm run build
 npm start
 ```
+
+The `tmuxd init` step generates a fresh `TMUXD_SERVER_TOKEN`, prints it
+once to stderr (save it to a password manager — anyone with it can use
+this server), and writes a Mode A single-user-local config. For other
+shapes:
+
+```bash
+npm run tmuxd -- init server --public      # Mode B: server + remote clients
+npm run tmuxd -- init relay                # Mode C: pure router/auth, no local tmux
+npm run tmuxd -- init client \
+  --url https://tmuxd.example.com \
+  --server-token "$TMUXD_SERVER_TOKEN" \
+  --user-token   "$TMUXD_USER_TOKEN" \
+  --host-id laptop --host-name "Alice Laptop"
+```
+
+If you'd rather hand-edit, copy `.env.example` (server) or
+`.env.client.example` (client) and fill in the values yourself.
 
 The server prints a URL, usually `http://127.0.0.1:7681`.
 

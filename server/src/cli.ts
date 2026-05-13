@@ -41,6 +41,7 @@ import {
     saveCredentials,
     type SavedCred
 } from './cliCredentials.js'
+import { writeEnvFile, type InitMode } from './cliInit.js'
 import {
     authResponseSchema,
     generateUserToken,
@@ -82,7 +83,7 @@ interface ParsedArgs {
  * boolean", because that path silently swallows legitimate dash-prefixed
  * values like `--text -draft`.
  */
-const BOOLEAN_FLAGS = new Set(['help', 'enter', 'json', 'capture', 'version', 'user-token-generate'])
+const BOOLEAN_FLAGS = new Set(['help', 'enter', 'json', 'capture', 'version', 'user-token-generate', 'force', 'public'])
 
 /**
  * Short-flag → long-flag mapping for value-taking single-letter flags.
@@ -270,6 +271,12 @@ Auth (one-time):
   tmuxd login   --hub <url> --server-token <secret> --user-token <secret>
   tmuxd whoami
   tmuxd logout  [--hub <url>]
+
+Bootstrap a new box:
+  tmuxd init server  [--public] [--port N] [--server-token VAL] [--force]
+  tmuxd init relay   [--port N] [--server-token VAL] [--force]
+  tmuxd init client  --url URL --server-token VAL --user-token VAL
+                     [--host-id ID] [--host-name NAME] [--force]
 
 Hosts & sessions (mirror tmux verbs):
   tmuxd list-hosts
@@ -483,6 +490,53 @@ Usage:
   tmuxd snapshot [--capture] [--limit <n>] [--lines <n>] [-B <bytes>]
 
 Always emits JSON; pipe to jq for ad-hoc filtering.
+`,
+    init: `tmuxd init — bootstrap a .env for one of three deployment shapes
+
+Usage:
+  tmuxd init server  [--public] [--port <n>] [--server-token <value>] [--force]
+  tmuxd init relay   [--port <n>] [--server-token <value>] [--force]
+  tmuxd init client  --url <server-url> --server-token <value> --user-token <value>
+                     [--host-id <id>] [--host-name <name>] [--force]
+
+Modes:
+  server   tmuxd box that hosts its own tmux. Defaults to Mode A
+           (HOST=127.0.0.1, single-user local). Pass --public for Mode B
+           (HOST=0.0.0.0, server + remote clients mixed).
+  relay    Mode C: TMUXD_RELAY=1, HOST=0.0.0.0. Pure router/auth box;
+           sessions live on user clients only.
+  client   Outbound client .env (TMUXD_URL + the two tokens + optional
+           host id/name). No HOST/PORT/JWT_SECRET/etc.
+
+Common flags:
+  --force          Overwrite an existing .env in CWD (default: refuse).
+  --port <n>       HTTP port for server / relay (default: 7681).
+  --server-token   For init server / init relay: skip auto-generation
+                   and use this value. (Default: generate openssl-rand-hex
+                   32-byte token, print once to stderr.)
+
+Auto-generated server tokens are printed ONCE to stderr in the
+ \`tmuxd: generated server token (save this somewhere safe...)\` form.
+You're expected to copy it out into a password manager / 1Password /
+team vault. The CLI never re-prints it.
+
+The .env file is written to CWD with mode 0600.
+
+Examples:
+  # Single-user local server on this laptop:
+  tmuxd init server
+
+  # Public-facing server that also hosts tmux:
+  tmuxd init server --public --port 7681
+
+  # Pure relay (recommended multi-user shape):
+  tmuxd init relay
+
+  # Client config for Alice's laptop:
+  tmuxd init client --url https://tmuxd.example.com \\
+    --server-token "$TMUXD_SERVER_TOKEN" \\
+    --user-token   "$ALICE_USER_TOKEN" \\
+    --host-id laptop --host-name "Alice Laptop"
 `
 }
 
@@ -1212,6 +1266,96 @@ async function cmdSnapshot(args: ParsedArgs): Promise<number> {
 }
 
 /**
+ * `tmuxd init <mode>` — bootstrap a .env for server / relay / client.
+ * The first positional argument is the mode; everything after is flag
+ * data consumed by `writeEnvFile`. We deliberately keep this thin:
+ * validation, defaulting, and rendering all live in `cliInit.ts` so
+ * unit tests don't need to spin up the whole CLI.
+ *
+ * On success:
+ *   - the .env is written to CWD at mode 0600
+ *   - if a server token was auto-generated (server/relay only), it
+ *     gets printed to stderr ONCE with a "save this somewhere safe"
+ *     warning. We never re-print, never persist, never re-derive.
+ *   - stdout gets a one-liner with the path written
+ */
+async function cmdInit(args: ParsedArgs): Promise<number> {
+    const mode = args.positional[0]
+    if (!mode || (mode !== 'server' && mode !== 'relay' && mode !== 'client')) {
+        throw usageError(
+            `init requires one of: server | relay | client. Got: ${mode ?? '(none)'}`
+        )
+    }
+    const force = !!args.flags.force
+    const port = args.flags.port ? Number(args.flags.port) : undefined
+    const serverToken = args.flags['server-token'] || process.env.TMUXD_SERVER_TOKEN || undefined
+    let result
+    try {
+        if (mode === 'server' || mode === 'relay') {
+            result = await writeEnvFile(mode, {
+                force,
+                port,
+                serverToken,
+                publicBind: !!args.flags.public
+            })
+        } else {
+            // mode === 'client'
+            const tmuxdUrl = args.flags.url || args.flags.hub || process.env.TMUXD_URL
+            const userToken = args.flags['user-token'] || process.env.TMUXD_USER_TOKEN
+            if (!tmuxdUrl) {
+                throw usageError(
+                    'init client requires --url <server-url> (or TMUXD_URL env). ' +
+                        'Example: --url https://tmuxd.example.com'
+                )
+            }
+            if (!serverToken) {
+                throw usageError(
+                    'init client requires --server-token <secret> (or TMUXD_SERVER_TOKEN env). ' +
+                        'Get this from your server admin.'
+                )
+            }
+            if (!userToken) {
+                throw usageError(
+                    'init client requires --user-token <secret> (or TMUXD_USER_TOKEN env). ' +
+                        'This is your personal token; reuse the same value across devices.'
+                )
+            }
+            result = await writeEnvFile('client', {
+                force,
+                tmuxdUrl,
+                serverToken,
+                userToken,
+                hostId: args.flags['host-id'] || undefined,
+                hostName: args.flags['host-name'] || undefined
+            })
+        }
+    } catch (err) {
+        // Refuse-to-overwrite + missing-required-flag are genuine usage
+        // errors — surface them as exit-1 so scripts can detect.
+        if (err instanceof Error && /already exists/.test(err.message)) {
+            throw usageError(err.message)
+        }
+        throw err
+    }
+
+    if (result.generatedServerToken) {
+        process.stderr.write(
+            `tmuxd: generated server token (save this somewhere safe — anyone with it\n` +
+                `can use this server):\n` +
+                `\n` +
+                `    ${result.generatedServerToken}\n` +
+                `\n` +
+                `Distribute it through whatever channel you trust for team secrets\n` +
+                `(1Password, shared vault, etc). Each user pairs it with their own\n` +
+                `personal user token via \`tmuxd login --user-token-generate\` on\n` +
+                `their first device.\n`
+        )
+    }
+    process.stdout.write(`wrote ${result.path} (mode 0600)\n`)
+    return 0
+}
+
+/**
  * Stub — `attach-session` over the wire is non-trivial: WebSocket,
  * raw-TTY mode, SIGWINCH propagation, ping/pong, ticket consumption.
  * We don't ship that today, but listing the verb in --help with a 404
@@ -1353,7 +1497,8 @@ const SUBCOMMANDS: Record<string, (a: ParsedArgs) => Promise<number>> = {
     'send-keys': cmdSendKeys,
     'send-text': cmdSendText,
     'attach-session': cmdAttachSession,
-    snapshot: cmdSnapshot
+    snapshot: cmdSnapshot,
+    init: cmdInit
 }
 
 async function main(): Promise<number> {

@@ -19,7 +19,7 @@
 import { spawn } from 'node:child_process'
 import { execFile } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { chmod, mkdir, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -1169,6 +1169,191 @@ async function main() {
             await sleep(200)
             await rm(`${TMUXD_HOME}-alt`, { recursive: true, force: true }).catch(() => {})
             await rm(`${FAKE_HOME}-carol`, { recursive: true, force: true }).catch(() => {})
+        }
+
+        // ----------------------------------------------------------
+        // `tmuxd init` smoke tests. Independent of the running hub —
+        // these are pure file-write operations into a scratch CWD.
+        // The unit tests in cliInit.test.ts cover the rendering matrix;
+        // here we just confirm the CLI shells out, honors INIT_CWD, and
+        // emits the expected stderr instructions.
+        // ----------------------------------------------------------
+        const initCwd = `/tmp/tmuxd-e2e-cli-init-${process.pid}`
+        try {
+            await mkdir(initCwd, { recursive: true })
+
+            // Helper: run `tmuxd init …` with INIT_CWD pointed at our scratch dir.
+            async function runInit(...args) {
+                const result = await execFileP(
+                    'node',
+                    ['node_modules/.bin/tsx', 'server/src/cli.ts', 'init', ...args],
+                    {
+                        env: {
+                            ...process.env,
+                            HOME: `${FAKE_HOME}-init`,
+                            INIT_CWD: initCwd,
+                            TMUXD_SERVER_TOKEN: '',
+                            TMUXD_USER_TOKEN: '',
+                            TMUXD_URL: '',
+                            TMUX_TMPDIR
+                        },
+                        encoding: 'utf8'
+                    }
+                ).catch((err) => ({
+                    stdout: err.stdout ?? '',
+                    stderr: err.stderr ?? '',
+                    code: typeof err.code === 'number' ? err.code : 1,
+                    failed: true
+                }))
+                if (result.failed) return result
+                return { ...result, code: 0, failed: false }
+            }
+
+            await check('init server (default) writes a Mode A .env in INIT_CWD', async () => {
+                await rm(join(initCwd, '.env'), { force: true })
+                const r = await runInit('server')
+                if (r.failed) throw new Error(`init server failed: ${r.stderr}`)
+                if (!r.stdout.includes(join(initCwd, '.env'))) {
+                    throw new Error(`stdout missing path: ${r.stdout}`)
+                }
+                const body = await readFile(join(initCwd, '.env'), 'utf8')
+                if (!/Mode: A/.test(body)) throw new Error(`Mode A header missing:\n${body}`)
+                if (!/HOST=127\.0\.0\.1/.test(body)) throw new Error(`HOST not loopback:\n${body}`)
+                if (/TMUXD_RELAY/.test(body)) throw new Error(`relay leaked into server .env`)
+            })
+
+            await check('init server prints generated server token to stderr', async () => {
+                await rm(join(initCwd, '.env'), { force: true })
+                const r = await runInit('server')
+                if (r.failed) throw new Error(`init server failed: ${r.stderr}`)
+                if (!/generated server token/.test(r.stderr)) {
+                    throw new Error(`stderr missing generated-token banner: ${r.stderr}`)
+                }
+                // Token should appear in both stderr and the file.
+                const m = r.stderr.match(/[0-9a-f]{64}/)
+                if (!m) throw new Error(`stderr missing 64-hex token: ${r.stderr}`)
+                const body = await readFile(join(initCwd, '.env'), 'utf8')
+                if (!body.includes(m[0])) throw new Error(`token mismatch between stderr and .env`)
+            })
+
+            await check('init server --public writes Mode B (HOST=0.0.0.0)', async () => {
+                await rm(join(initCwd, '.env'), { force: true })
+                const r = await runInit('server', '--public')
+                if (r.failed) throw new Error(`init server --public failed: ${r.stderr}`)
+                const body = await readFile(join(initCwd, '.env'), 'utf8')
+                if (!/Mode: B/.test(body)) throw new Error(`Mode B header missing:\n${body}`)
+                if (!/HOST=0\.0\.0\.0/.test(body)) throw new Error(`HOST not 0.0.0.0:\n${body}`)
+            })
+
+            await check('init relay writes Mode C with TMUXD_RELAY=1', async () => {
+                await rm(join(initCwd, '.env'), { force: true })
+                const r = await runInit('relay')
+                if (r.failed) throw new Error(`init relay failed: ${r.stderr}`)
+                const body = await readFile(join(initCwd, '.env'), 'utf8')
+                if (!/Mode: C/.test(body)) throw new Error(`Mode C header missing:\n${body}`)
+                if (!/TMUXD_RELAY=1/.test(body)) throw new Error(`relay flag missing:\n${body}`)
+                if (!/HOST=0\.0\.0\.0/.test(body)) throw new Error(`HOST not 0.0.0.0:\n${body}`)
+            })
+
+            await check('init server --port respects custom port', async () => {
+                await rm(join(initCwd, '.env'), { force: true })
+                const r = await runInit('server', '--port', '9999')
+                if (r.failed) throw new Error(`init --port failed: ${r.stderr}`)
+                const body = await readFile(join(initCwd, '.env'), 'utf8')
+                if (!/PORT=9999/.test(body)) throw new Error(`port not honored:\n${body}`)
+            })
+
+            await check('init server refuses to overwrite without --force', async () => {
+                // Re-running init server now that .env exists must fail.
+                const r = await runInit('server')
+                if (!r.failed || r.code !== 1) {
+                    throw new Error(`expected exit 1, got ${r.code}: ${r.stdout}`)
+                }
+                if (!/already exists/.test(r.stderr)) {
+                    throw new Error(`expected "already exists" hint, got: ${r.stderr}`)
+                }
+            })
+
+            await check('init server --force overwrites', async () => {
+                const r = await runInit('server', '--force')
+                if (r.failed) throw new Error(`init --force failed: ${r.stderr}`)
+            })
+
+            await check('init client writes outbound .env', async () => {
+                await rm(join(initCwd, '.env'), { force: true })
+                const r = await runInit(
+                    'client',
+                    '--url',
+                    'https://tmuxd.example.com',
+                    '--server-token',
+                    'team-secret-xyz',
+                    '--user-token',
+                    'alice-personal-abc',
+                    '--host-id',
+                    'laptop',
+                    '--host-name',
+                    'Alice Laptop'
+                )
+                if (r.failed) throw new Error(`init client failed: ${r.stderr}`)
+                if (/generated server token/.test(r.stderr)) {
+                    throw new Error(`init client must not generate a server token`)
+                }
+                const body = await readFile(join(initCwd, '.env'), 'utf8')
+                if (!/TMUXD_URL=https:\/\/tmuxd\.example\.com/.test(body)) {
+                    throw new Error(`TMUXD_URL missing:\n${body}`)
+                }
+                if (!/TMUXD_SERVER_TOKEN=team-secret-xyz/.test(body)) {
+                    throw new Error(`TMUXD_SERVER_TOKEN missing:\n${body}`)
+                }
+                if (!/TMUXD_USER_TOKEN=alice-personal-abc/.test(body)) {
+                    throw new Error(`TMUXD_USER_TOKEN missing:\n${body}`)
+                }
+                if (!/TMUXD_HOST_ID=laptop/.test(body)) {
+                    throw new Error(`TMUXD_HOST_ID missing:\n${body}`)
+                }
+                if (!/TMUXD_HOST_NAME=Alice Laptop/.test(body)) {
+                    throw new Error(`TMUXD_HOST_NAME missing:\n${body}`)
+                }
+                // Server-side keys must be absent.
+                if (/^HOST=/m.test(body)) throw new Error(`HOST leaked into client .env`)
+                if (/TMUXD_RELAY/.test(body)) throw new Error(`relay leaked into client .env`)
+            })
+
+            await check('init client without --url → exit 1', async () => {
+                await rm(join(initCwd, '.env'), { force: true })
+                const r = await runInit('client', '--server-token', 'a', '--user-token', 'b')
+                if (!r.failed || r.code !== 1) {
+                    throw new Error(`expected exit 1, got ${r.code}: ${r.stderr}`)
+                }
+                if (!/--url/.test(r.stderr)) throw new Error(`stderr missing --url hint: ${r.stderr}`)
+            })
+
+            await check('init with unknown mode → exit 1', async () => {
+                const r = await runInit('bogus')
+                if (!r.failed || r.code !== 1) {
+                    throw new Error(`expected exit 1, got ${r.code}: ${r.stderr}`)
+                }
+            })
+
+            await check('init with no mode → exit 1', async () => {
+                const r = await runInit()
+                if (!r.failed || r.code !== 1) {
+                    throw new Error(`expected exit 1, got ${r.code}: ${r.stderr}`)
+                }
+            })
+
+            await check('written .env is mode 0600', async () => {
+                await rm(join(initCwd, '.env'), { force: true })
+                const r = await runInit('relay', '--force')
+                if (r.failed) throw new Error(`init relay failed: ${r.stderr}`)
+                const st = await stat(join(initCwd, '.env'))
+                if ((st.mode & 0o777) !== 0o600) {
+                    throw new Error(`expected mode 0600, got ${(st.mode & 0o777).toString(8)}`)
+                }
+            })
+        } finally {
+            await rm(initCwd, { recursive: true, force: true }).catch(() => {})
+            await rm(`${FAKE_HOME}-init`, { recursive: true, force: true }).catch(() => {})
         }
 
         // Cleanup the pre-created session so we don't leak into shutdown
