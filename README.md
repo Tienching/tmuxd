@@ -369,7 +369,7 @@ npm run tmuxd -- capture-pane  -t laptop:scratch:0.0 --lines 80
 npm run tmuxd -- send-text     -t laptop:scratch:0.0 --enter 'echo hi'
 npm run tmuxd -- send-keys     -t laptop:scratch:0.0 C-c
 npm run tmuxd -- pane-status   -t laptop:scratch:0.0   # state + light + summary
-npm run tmuxd -- attach-session -t laptop:scratch      # prints web UI URL
+npm run tmuxd -- attach-session -t laptop:scratch      # raw-TTY attach (Ctrl-B d to detach)
 npm run tmuxd -- kill-session  -t laptop:scratch
 npm run tmuxd -- whoami
 npm run tmuxd -- logout
@@ -391,6 +391,12 @@ Notes:
   re-auth.
 - For a global install (`tmuxd ...` without `npm run`), see the bin entry in
   `server/package.json`.
+- `attach-session` opens a real raw-TTY WebSocket attach (the same wire the
+  web UI uses). Default detach key is `Ctrl-B d`, matching tmux. Override with
+  `--detach-key <bytes>`. For non-interactive callers (cron/CI/pipelines),
+  pass `--print-url` to skip the attach and emit the web-UI deep-link instead;
+  exits 1 if stdin is not a TTY and `--print-url` was not passed, with a hint
+  pointing at `send-text` / `capture-pane`.
 
 ### Clipboard images
 

@@ -7,6 +7,26 @@ upgrading a deployment.
 
 ## Unreleased
 
+### New: `tmuxd attach-session` (real raw-TTY attach)
+
+The CLI verb that previously printed the web-UI deep-link now opens a
+real raw-TTY WebSocket attach — same wire path the web UI uses. stdin
+→ pane, pane → stdout, raw mode, SIGWINCH propagation, 25-second
+keep-alive ping.
+
+- Default detach key is `Ctrl-B d` (tmux convention). Override with
+  `--detach-key <bytes>` (hex bytes like `0271` or single ASCII char).
+- The previous deep-link behavior is still available via
+  `--print-url` (or `--json`). Useful for non-interactive callers
+  (cron, CI, pipelines).
+- If stdin is not a TTY and `--print-url` was not passed, the CLI
+  exits 1 with a hint pointing at `send-text` / `capture-pane`
+  (the non-interactive verbs that handle write/read without an
+  attached terminal).
+- Exit codes match the rest of the CLI: 0 on detach / clean close /
+  pane exit; 1 on wire / TTY errors; 2 on auth (re-login required);
+  3 on host-or-session not found.
+
 ### ⚠️ Breaking — vocabulary rename
 
 The three roles in tmuxd have been renamed across code, docs, env vars,

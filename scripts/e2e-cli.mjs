@@ -23,6 +23,7 @@ import { chmod, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
+import pty from 'node-pty'
 
 const execFileP = promisify(execFile)
 
@@ -543,15 +544,16 @@ async function main() {
             if (r.failed) throw new Error(`kill-session exited ${r.code}: ${r.stderr}`)
         })
 
-        await check('attach-session prints web UI deep-link URL', async () => {
-            const r = await cli('alice', 'attach-session', '-t', 'laptop:cli-e2e-pre')
-            if (r.failed) throw new Error(`attach-session exited ${r.code}: ${r.stderr}`)
+        await check('attach-session --print-url emits the web UI deep-link', async () => {
+            const r = await cli('alice', 'attach-session', '-t', 'laptop:cli-e2e-pre', '--print-url')
+            if (r.failed) throw new Error(`attach-session --print-url exited ${r.code}: ${r.stderr}`)
             const url = r.stdout.trim()
             if (!url.startsWith(HUB_URL + '/attach/laptop/cli-e2e-pre')) {
                 throw new Error(`expected URL prefix ${HUB_URL}/attach/laptop/cli-e2e-pre, got: ${url}`)
             }
-            if (!/not yet implemented/i.test(r.stderr)) {
-                throw new Error(`stderr missing 'not yet implemented' notice: ${r.stderr}`)
+            // The "not yet implemented" stderr is gone — attach is real now.
+            if (/not yet implemented/i.test(r.stderr)) {
+                throw new Error(`stale 'not yet implemented' notice still in stderr: ${r.stderr}`)
             }
         })
 
@@ -564,6 +566,81 @@ async function main() {
             }
             if (!body.attachUrl?.startsWith(HUB_URL)) {
                 throw new Error(`attachUrl missing hub prefix: ${body.attachUrl}`)
+            }
+        })
+
+        await check('attach-session refuses non-TTY stdin with exit 1 + hint', async () => {
+            // Default invocation through cli() goes through execFile, which
+            // pipes stdin (no TTY). The CLI should see !isTTY and refuse.
+            const r = await cli('alice', 'attach-session', '-t', 'laptop:cli-e2e-pre')
+            if (!r.failed || r.code !== 1) {
+                throw new Error(`expected exit 1 on non-TTY, got ${r.code}: ${r.stderr}`)
+            }
+            if (!/TTY/i.test(r.stderr) || !/--print-url|send-text/.test(r.stderr)) {
+                throw new Error(`stderr should hint at non-interactive verbs: ${r.stderr}`)
+            }
+        })
+
+        await check('attach-session under a real PTY round-trips input + detach', async () => {
+            // Drive the CLI under a real PTY (node-pty), send a marker, then
+            // press the detach key and confirm the marker landed in the
+            // remote pane (visible via capture-pane).
+            const aliceHome = `${FAKE_HOME}-alice`
+            const term = pty.spawn(
+                'node',
+                ['node_modules/.bin/tsx', 'server/src/cli.ts', 'attach-session', '-t', 'laptop:cli-e2e-pre'],
+                {
+                    name: 'xterm-256color',
+                    cols: 80,
+                    rows: 24,
+                    cwd: process.cwd(),
+                    env: {
+                        ...process.env,
+                        HOME: aliceHome,
+                        TMUXD_SERVER_TOKEN: '',
+                        TMUXD_USER_TOKEN: '',
+                        TMUX_TMPDIR
+                    }
+                }
+            )
+            let collected = ''
+            term.onData((data) => {
+                collected += data
+            })
+            // Wait for the WS to connect and the shell prompt to print.
+            // ~500ms of CI wiggle room is enough on every platform we run.
+            await sleep(800)
+            const marker = `cli-attach-${Math.random().toString(36).slice(2, 8)}`
+            term.write(`echo ${marker}\r`)
+            // Wait for the pane to echo our command back.
+            await sleep(400)
+            // Press Ctrl-B d to detach.
+            term.write(Buffer.from([0x02, 0x64]).toString('binary'))
+            const exitCode = await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    try {
+                        term.kill()
+                    } catch {}
+                    reject(new Error('attach-session did not exit after detach key'))
+                }, 5000)
+                term.onExit(({ exitCode: code }) => {
+                    clearTimeout(timeout)
+                    resolve(code ?? 0)
+                })
+            })
+            if (exitCode !== 0) {
+                throw new Error(`attach-session exited ${exitCode} after detach (collected: ${JSON.stringify(collected.slice(-200))})`)
+            }
+            // Confirm the marker actually landed inside the pane by grabbing
+            // its scrollback through the API. capture-pane is the canonical
+            // read primitive — if the marker is in there, the WS round-trip
+            // worked end-to-end.
+            const cap = await cli('alice', 'capture-pane', '-t', 'laptop:cli-e2e-pre:0.0', '--lines', '50')
+            if (cap.failed) throw new Error(`capture-pane after attach failed: ${cap.stderr}`)
+            if (!cap.stdout.includes(marker)) {
+                throw new Error(
+                    `marker '${marker}' missing from pane after PTY attach. capture-pane stdout:\n${cap.stdout}`
+                )
             }
         })
 

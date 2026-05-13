@@ -49,6 +49,7 @@ import {
     type SavedCred
 } from './cliCredentials.js'
 import { writeEnvFile, type InitMode } from './cliInit.js'
+import { runAttach, applyTty, DEFAULT_DETACH_KEY } from './cliAttach.js'
 import {
     authResponseSchema,
     generateUserToken,
@@ -99,7 +100,8 @@ const BOOLEAN_FLAGS = new Set([
     'user-token-generate',
     'force',
     'public',
-    'server-token-from-env'
+    'server-token-from-env',
+    'print-url'
 ])
 
 /**
@@ -320,7 +322,8 @@ Hosts & sessions (mirror tmux verbs):
   tmuxd send-keys        -t <host>:<target> <KEY> [<KEY> ...]
   tmuxd send-text        -t <host>:<target> [--enter] <TEXT> [<TEXT> ...]
   tmuxd pane-status      -t <host>:<target>            (state, light, summary)
-  tmuxd attach-session   -t <host>:<session>           (prints web UI URL)
+  tmuxd attach-session   -t <host>:<session>           (raw-TTY attach;
+                                                       --print-url for fallback)
   tmuxd snapshot         [--capture] [--limit <n>]
 
 Common flags:
@@ -506,21 +509,43 @@ Multiple positionals are joined with a single space. \`--enter\` appends
 a Return after the text. Use \`--\` to pass dash-prefixed text:
   tmuxd send-text -t laptop:main -- --help
 `,
-    'attach-session': `tmuxd attach-session — print the web UI deep-link for a session
+    'attach-session': `tmuxd attach-session — attach to a remote tmux session
 
 Usage:
-  tmuxd attach-session -t <host>:<session> [--json]
+  tmuxd attach-session -t <host>:<session> [--detach-key <bytes>]
+  tmuxd attach-session -t <host>:<session> --print-url
+  tmuxd attach-session -t <host>:<session> --json
 
-In-CLI raw-TTY attach is not yet implemented (the WebSocket plumbing
-needed for a faithful interactive terminal — SIGWINCH, ping/pong,
-xterm-256color negotiation — is a larger piece of work). For now the
-verb writes a working web-UI URL to stdout so you can pipe it through
-\`xdg-open\` (Linux) or \`open\` (macOS), or paste into a browser that
-is already logged in to the hub.
+Default behavior is a full-screen, raw-TTY attach over WebSocket — the
+same wire path the web UI uses. stdin → pane, pane → stdout, raw mode,
+SIGWINCH propagation, 25-second keepalive ping.
+
+Detach: press \`Ctrl-B d\` (tmux convention; the prefix byte gets
+swallowed by the CLI, so a nested-tmux user is in the same shape as
+they'd be with \`tmux attach\` — double-tap the prefix to forward it).
+Override with --detach-key:
+
+  --detach-key <bytes>      Hex byte sequence (e.g. \`0271\` for Ctrl-B q),
+                            or a single printable ASCII char. Default
+                            \`02 64\` = Ctrl-B d.
+
+Fallback for non-TTY callers (cron jobs, pipelines, scripts):
+
+  --print-url               Skip the attach; print the web-UI deep-link
+                            to stdout. The URL is a working session that
+                            requires the user to be logged in via the web.
+  --json                    Same as --print-url but emits structured JSON.
+
+Exit codes:
+  0   Detached, server closed cleanly, or pane exited.
+  1   Wire error / not-a-TTY / malformed --detach-key.
+  2   Auth rejected (401/403). Run \`tmuxd login\` again.
+  3   Target host or session not found (404 from /api/ws-ticket).
 
 Examples:
-  open "$(tmuxd attach-session -t laptop:main)"
-  xdg-open "$(tmuxd attach-session -t laptop:main)"
+  tmuxd attach-session -t laptop:main                  # raw-TTY attach
+  tmuxd attach-session -t laptop:main --detach-key q   # detach by 'q'
+  open "$(tmuxd attach-session -t laptop:main --print-url)"
 `,
     snapshot: `tmuxd snapshot — full inventory across all visible hosts
 
@@ -1482,21 +1507,23 @@ async function cmdInit(args: ParsedArgs): Promise<number> {
 }
 
 /**
- * Stub — `attach-session` over the wire is non-trivial: WebSocket,
- * raw-TTY mode, SIGWINCH propagation, ping/pong, ticket consumption.
- * We don't ship that today, but listing the verb in --help with a 404
- * mental model is worse than this stub which points the user at the
- * web UI deep-link instead. The web UI does the real attach over the
- * exact same WebSocket the CLI would use, just rendered in xterm.js.
+ * `attach-session` — full-screen, raw-TTY attach to a remote pane,
+ * mirroring `tmux attach-session`. Defaults to in-process WebSocket
+ * attach; pass `--print-url` (or `--json`) to fall back to the
+ * web-UI deep-link instead of opening the WS.
  *
- * Two failure modes to be specific about:
- *   - No creds → AuthError (exit 2). Same as every other verb.
- *   - Target missing → UsageError (exit 1). Tell them what -t expects.
+ * Failure modes:
+ *   - No creds                → AuthError (exit 2).
+ *   - Stdin is not a TTY      → UsageError (exit 1) with hint at
+ *                                send-text/capture-pane/--print-url.
+ *   - 404 on /api/ws-ticket   → NotFoundError (exit 3).
+ *   - 401/403 on ws-ticket    → AuthError (exit 2).
+ *   - Pane exits, idle timeout, or detach key → exit 0.
  *
- * On success, exit 0 and write the URL to stdout (so a script can
- * pipe it into `xdg-open`/`open`). The URL format is what the web
- * UI uses today; if the web UI's URL scheme changes, this will
- * follow.
+ * The detach key defaults to `Ctrl-B d` (tmux convention). Override
+ * via `--detach-key <bytes>` where bytes is hex (`0x02 0x71` →
+ * `--detach-key 0271`) or a single ASCII letter (`--detach-key q`
+ * means just press `q` — only useful for tests / one-off scripts).
  */
 async function cmdAttachSession(args: ParsedArgs): Promise<number> {
     const target = requireTarget(args, 'attach-session', 'expected -t <host>:<session>')
@@ -1504,24 +1531,90 @@ async function cmdAttachSession(args: ParsedArgs): Promise<number> {
         throw usageError('attach-session requires -t <host>:<session>')
     }
     const cred = await requireCred(getHubFlag(args))
-    // The web UI exposes attach as `/attach/<host>/<session>` for non-local
-    // hosts and `/attach/<session>` for local. We always emit the
-    // host-qualified form because the CLI reaches a hub whose `local`
-    // (if any) is just one host among many.
-    const url = `${cred.tmuxdUrl.replace(/\/+$/, '')}/attach/${encodeURIComponent(target.hostId)}/${encodeURIComponent(target.sessionName)}`
-    if (args.flags.json) {
-        printJson({ attachUrl: url, hostId: target.hostId, sessionName: target.sessionName })
+
+    // --print-url / --json: skip the WS entirely, just emit the deep-link.
+    // This is the old behavior, kept for two real use cases:
+    //   1. The user is on a non-TTY (cron job, CI, pipe) and wants the URL.
+    //   2. They have an open browser session and prefer attaching there.
+    if (args.flags.json || args.flags['print-url']) {
+        const url = `${cred.tmuxdUrl.replace(/\/+$/, '')}/attach/${encodeURIComponent(target.hostId)}/${encodeURIComponent(target.sessionName)}`
+        if (args.flags.json) {
+            printJson({
+                attachUrl: url,
+                hostId: target.hostId,
+                sessionName: target.sessionName
+            })
+        } else {
+            process.stdout.write(url + '\n')
+        }
         return 0
     }
-    process.stderr.write(
-        'tmuxd: in-CLI attach is not yet implemented — opening the session\n' +
-            'in the web UI is the supported path. The URL below is a working\n' +
-            'deep-link; pipe through `xdg-open` (Linux) or `open` (macOS), or\n' +
-            'paste into a browser already logged in to the hub.\n'
+
+    const detachKey = parseDetachKey(args.flags['detach-key'])
+    const result = await runAttach(
+        {
+            cred,
+            hostId: target.hostId,
+            sessionName: target.sessionName,
+            detachKey
+        },
+        {
+            stdin: process.stdin,
+            stdout: process.stdout,
+            stderr: process.stderr,
+            setupTty: (cols, rows, onResize) => {
+                onResize(cols, rows) // initial sync: server already got cols/rows from URL but echo a resize so any drift is reconciled
+                return applyTty(process.stdin, process.stdout, onResize)
+            }
+        }
     )
-    process.stdout.write(url + '\n')
-    return 0
+    if (result.reason && result.exitCode !== 0) {
+        process.stderr.write(`tmuxd: ${result.reason}\n`)
+    } else if (result.reason && process.stderr.isTTY) {
+        // On a successful detach, write the reason to stderr so the
+        // user sees "[detached]" rather than wondering whether the WS
+        // dropped. Only when stderr is a TTY — scripts piping the
+        // CLI shouldn't see our chatter.
+        process.stderr.write(`tmuxd: ${result.reason}\n`)
+    }
+    return result.exitCode
 }
+
+/**
+ * `--detach-key` accepts either:
+ *   - A hex string of even length: `02` (Ctrl-B), `0271` (Ctrl-B q).
+ *     Treated literally byte-for-byte. This is the canonical form.
+ *   - A single printable ASCII char: `q` → just press `q`. Only useful
+ *     for testing or when you really want a single-byte detach trigger.
+ *
+ * Returns the byte sequence, or undefined when the flag is absent
+ * (caller falls back to DEFAULT_DETACH_KEY). Throws UsageError for
+ * malformed input.
+ */
+function parseDetachKey(flag: string | undefined): Uint8Array | undefined {
+    if (!flag) return undefined
+    if (/^[0-9a-fA-F]+$/.test(flag) && flag.length % 2 === 0 && flag.length >= 2) {
+        const bytes = new Uint8Array(flag.length / 2)
+        for (let i = 0; i < bytes.length; i++) {
+            bytes[i] = Number.parseInt(flag.slice(i * 2, i * 2 + 2), 16)
+        }
+        if (bytes.includes(0)) {
+            throw usageError(`--detach-key must not contain a NUL byte`)
+        }
+        return bytes
+    }
+    if (flag.length === 1 && flag.charCodeAt(0) >= 0x20 && flag.charCodeAt(0) < 0x7f) {
+        return Uint8Array.from([flag.charCodeAt(0)])
+    }
+    throw usageError(
+        `--detach-key must be hex bytes (e.g. \`0271\` for Ctrl-B q) or a single ` +
+            `printable ASCII char. Got: ${flag}`
+    )
+}
+
+// Silence unused-import warning when DEFAULT_DETACH_KEY is only re-exported
+// from cliAttach for tests; we don't reference it in cli.ts itself.
+void DEFAULT_DETACH_KEY
 
 // ---------------------------------------------------------------------------
 // shared helpers
