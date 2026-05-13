@@ -8,7 +8,7 @@ import { createSessionsRoutes } from './sessions.js'
 import { issueToken } from '../auth.js'
 import { setLocalHostEnabled } from '../hosts.js'
 import { TmuxActionStore } from '../actions.js'
-import { AgentError } from '../agentRegistry.js'
+import { ClientError } from '../clientRegistry.js'
 import { parseCaptureMetadata } from '../tmux.test.js'
 import type { TmuxPaneCapture, TmuxPaneStatus, TmuxSession } from '@tmuxd/shared'
 
@@ -293,7 +293,7 @@ async function installFakeTmux(defaultState: { sessions: TmuxSession[]; panes: a
         }
     ]
 
-    const agentRegistry = {
+    const clientRegistry = {
         listHosts: (_ns: string) => [remoteHost],
         hasHost: (_ns: string, id: string) => id === remoteHost.id,
         listSessions: async (_ns: string, _hostId: string) => [
@@ -313,7 +313,7 @@ async function installFakeTmux(defaultState: { sessions: TmuxSession[]; panes: a
             return
         },
         captureSession: async (_ns: string, _hostId: string, name: string) => {
-            if (name !== 'remote') throw new AgentError("can't find session")
+            if (name !== 'remote') throw new ClientError("can't find session")
             return {
                 text: 'remote session capture\\n',
                 paneInMode: false,
@@ -352,7 +352,7 @@ async function installFakeTmux(defaultState: { sessions: TmuxSession[]; panes: a
         }
     } as any
 
-    app.route('/api', createSessionsRoutes(jwtSecret, agentRegistry, actionStore))
+    app.route('/api', createSessionsRoutes(jwtSecret, clientRegistry, actionStore))
 
     const calls = async (): Promise<FakeTmuxCall[]> => {
         try {
@@ -926,7 +926,7 @@ describe('tmuxd sessions api', { concurrency: 1 }, () => {
         try {
             const headers = authHeader(token)
 
-            const snapshotResponse = await app.request('/api/agent/snapshot', { headers })
+            const snapshotResponse = await app.request('/api/client/snapshot', { headers })
             const snapshotBody = (await snapshotResponse.json()) as {
                 hosts: Array<{ id: string }>
                 sessions: Array<{ target: string }>
@@ -939,7 +939,7 @@ describe('tmuxd sessions api', { concurrency: 1 }, () => {
             assert.equal(snapshotBody.panes.length, 2)
             assert.equal(snapshotBody.statuses, undefined)
 
-            const captureSnapshotResponse = await app.request('/api/agent/snapshot?capture=1&captureLimit=1&lines=120&maxBytes=2048', {
+            const captureSnapshotResponse = await app.request('/api/client/snapshot?capture=1&captureLimit=1&lines=120&maxBytes=2048', {
                 headers
             })
             const captureSnapshotBody = (await captureSnapshotResponse.json()) as { statuses?: TmuxPaneStatus[] }
@@ -1015,7 +1015,7 @@ describe('tmuxd sessions api', { concurrency: 1 }, () => {
  * project." If any of these go red, an attacker with valid credentials
  * for namespace A can reach data in namespace B.
  *
- * The fixture wires a fake AgentRegistry that registers two hosts in
+ * The fixture wires a fake ClientRegistry that registers two hosts in
  * disjoint namespaces and asserts the registry's filter is honored end
  * to end through the route layer.
  */
@@ -1171,13 +1171,13 @@ describe('cross-namespace isolation', { concurrency: 1 }, () => {
 })
 
 /**
- * Hub-only mode — TMUXD_HUB_ONLY=1 disables every `isLocalHost`-dispatch
+ * Hub-only mode — TMUXD_RELAY=1 disables every `isLocalHost`-dispatch
  * branch. The tests flip the module-level switch via `setLocalHostEnabled`
  * and confirm each branch returns 403 `local_host_disabled`. They also
  * confirm `GET /hosts` omits the local host when disabled and remote hosts
  * still work.
  */
-describe('hub-only mode (TMUXD_HUB_ONLY)', { concurrency: 1 }, () => {
+describe('hub-only mode (TMUXD_RELAY)', { concurrency: 1 }, () => {
     function makeApp(jwtSecret: Uint8Array, actionStore: TmuxActionStore) {
         const remoteHost = {
             id: 'remote',

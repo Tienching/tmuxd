@@ -57,7 +57,7 @@ async function main() {
                 PORT: String(PORT),
                 TMUXD_SERVER_TOKEN: TOKEN,
                 HOST: '127.0.0.1',
-                TMUXD_E2E_AGENT_HOST_BOUND: '1'
+                TMUXD_E2E_CLIENT_HOST_BOUND: '1'
             })
         } catch (e) {
             fails.push('api')
@@ -90,31 +90,31 @@ async function main() {
         fails.push('web')
     }
 
-    // Hub-mode suites — each script spawns its own server on a unique
+    // Relay-mode suites — each script spawns its own server on a unique
     // port and tears it down on exit. They don't share fixture state
     // with the API suite above.
-    console.log('\n=== Hub mode: HTTP isolation (own server) ===')
+    console.log('\n=== Relay mode: HTTP isolation (own server) ===')
     try {
-        await run('scripts/e2e-hub.mjs')
+        await run('scripts/e2e-relay.mjs')
     } catch {
-        fails.push('hub')
+        fails.push('relay')
     }
 
-    console.log('\n=== Hub mode: real two-agent isolation (own server) ===')
+    console.log('\n=== Relay mode: real two-client isolation (own server) ===')
     try {
-        await run('scripts/e2e-hub-agents.mjs')
+        await run('scripts/e2e-relay-clients.mjs')
     } catch {
-        fails.push('hub-agents')
+        fails.push('relay-clients')
     }
 
-    console.log('\n=== Hub mode: same-hostId + reconnect lifecycle (own server) ===')
+    console.log('\n=== Relay mode: same-hostId + reconnect lifecycle (own server) ===')
     try {
-        await run('scripts/e2e-hub-lifecycle.mjs')
+        await run('scripts/e2e-relay-lifecycle.mjs')
     } catch {
-        fails.push('hub-lifecycle')
+        fails.push('relay-lifecycle')
     }
 
-    console.log('\n=== CLI smoke (own server + real agent) ===')
+    console.log('\n=== CLI smoke (own server + real client) ===')
     try {
         await run('scripts/e2e-cli.mjs')
     } catch {

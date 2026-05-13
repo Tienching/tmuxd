@@ -85,11 +85,11 @@ async function login(userToken) {
 function spawnAgent({ userToken, hostId, hostName }) {
     return spawn(
         'node',
-        ['node_modules/.bin/tsx', 'server/src/agent.ts'],
+        ['node_modules/.bin/tsx', 'server/src/client.ts'],
         {
             env: {
                 ...process.env,
-                TMUXD_HUB_URL: `http://${HOST}:${PORT}`,
+                TMUXD_URL: `http://${HOST}:${PORT}`,
                 TMUXD_SERVER_TOKEN: SERVER_TOKEN,
                 TMUXD_USER_TOKEN: userToken,
                 TMUXD_HOST_ID: hostId,
@@ -153,7 +153,7 @@ async function main() {
             env: {
                 ...process.env,
                 TMUXD_SERVER_TOKEN: SERVER_TOKEN,
-                TMUXD_HUB_ONLY: '1',
+                TMUXD_RELAY: '1',
                 TMUXD_HOME,
                 TMUXD_AUDIT_DISABLE: '1',
                 HOST,

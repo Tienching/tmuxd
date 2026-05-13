@@ -4,7 +4,7 @@
  * One JSON file at `~/.tmuxd/cli/credentials.json` holds the JWT(s) the
  * CLI obtained from `tmuxd login`. Multi-hub aware: a user can be logged
  * into more than one hub at the same time (e.g. work + personal), and
- * each subcommand picks the right entry by `hubUrl`.
+ * each subcommand picks the right entry by `tmuxdUrl`.
  *
  * Security posture is paranoid by design: the JWT is bearer-equivalent
  * to "control over visible tmux sessions for this namespace", so:
@@ -25,7 +25,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 export interface SavedCred {
-    hubUrl: string
+    tmuxdUrl: string
     jwt: string
     /** Unix seconds — matches `AuthResponse.expiresAt`. */
     expiresAt: number
@@ -43,9 +43,9 @@ export interface SavedCred {
 
 interface CredFile {
     version: 1
-    /** hubUrl chosen by `tmuxd login` last time, used when subcommands omit `--hub`. */
+    /** tmuxdUrl chosen by `tmuxd login` last time, used when subcommands omit `--hub`. */
     default: string | null
-    servers: Record<string, Omit<SavedCred, 'hubUrl'>>
+    servers: Record<string, Omit<SavedCred, 'tmuxdUrl'>>
 }
 
 const FILE_VERSION = 1
@@ -198,17 +198,17 @@ async function writeCredentialsFile(file: CredFile): Promise<void> {
 }
 
 /**
- * Look up credentials for a hub. If `hubUrl` is omitted, returns the
+ * Look up credentials for a hub. If `tmuxdUrl` is omitted, returns the
  * "default" entry (last-logged-in hub), or null if the file is empty.
  */
-export async function loadCredentials(hubUrl?: string): Promise<SavedCred | null> {
+export async function loadCredentials(tmuxdUrl?: string): Promise<SavedCred | null> {
     const file = await readFileIfExists()
     if (!file) return null
-    const target = hubUrl ?? file.default
+    const target = tmuxdUrl ?? file.default
     if (!target) return null
     const entry = file.servers[target]
     if (!entry) return null
-    return { hubUrl: target, ...entry }
+    return { tmuxdUrl: target, ...entry }
 }
 
 /** Save (or replace) the credential for one hub and mark it as default. */
@@ -218,14 +218,14 @@ export async function saveCredentials(cred: SavedCred): Promise<void> {
         default: null,
         servers: {}
     }
-    file.servers[cred.hubUrl] = {
+    file.servers[cred.tmuxdUrl] = {
         jwt: cred.jwt,
         expiresAt: cred.expiresAt,
         namespace: cred.namespace,
         serverToken: cred.serverToken,
         userToken: cred.userToken
     }
-    file.default = cred.hubUrl
+    file.default = cred.tmuxdUrl
     await writeCredentialsFile(file)
 }
 
@@ -236,11 +236,11 @@ export async function saveCredentials(cred: SavedCred): Promise<void> {
  * empty, write an empty stub rather than deleting; the operator may
  * re-`tmuxd login` and we want the directory ready.
  */
-export async function clearCredentials(hubUrl: string): Promise<void> {
+export async function clearCredentials(tmuxdUrl: string): Promise<void> {
     const file = await readFileIfExists()
     if (!file) return
-    delete file.servers[hubUrl]
-    if (file.default === hubUrl) {
+    delete file.servers[tmuxdUrl]
+    if (file.default === tmuxdUrl) {
         const remaining = Object.keys(file.servers)
         file.default = remaining.length > 0 ? remaining[remaining.length - 1] : null
     }

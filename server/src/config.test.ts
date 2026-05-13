@@ -57,11 +57,11 @@ describe('loadConfig', () => {
         assert.equal(config.hubOnly, false)
     })
 
-    it('TMUXD_HUB_ONLY=1 → hubOnly true', () => {
+    it('TMUXD_RELAY=1 → hubOnly true', () => {
         const config = withEnv(
             {
                 TMUXD_SERVER_TOKEN: 'team-secret',
-                TMUXD_HUB_ONLY: '1',
+                TMUXD_RELAY: '1',
                 TMUXD_HOME: dataDir,
                 JWT_SECRET: 'a'.repeat(32)
             },

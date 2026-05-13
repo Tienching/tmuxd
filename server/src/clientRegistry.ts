@@ -18,7 +18,7 @@ import {
     type TmuxPaneCapture,
     type TmuxSession
 } from '@tmuxd/shared'
-import { agentClientMessageSchema, type AgentClientMessage, type AgentHelloMessage, type AgentServerMessage } from './agentProtocol.js'
+import { clientToServerMessageSchema, type ClientToServerMessage, type ClientHelloMessage, type ServerToClientMessage } from './clientProtocol.js'
 import { logAudit } from './audit.js'
 import type { TmuxCapture } from './tmux.js'
 
@@ -57,7 +57,7 @@ const remotePaneCaptureTextSchema = z.string().refine(
  * token and compute the namespace from the user token. Stored against
  * the `WebSocket` so the hello handler can pick it up.
  */
-interface AgentAuthContext {
+interface ClientAuthContext {
     namespace: string
 }
 
@@ -130,7 +130,7 @@ export interface RemoteStreamBridge {
     dispose(): void
 }
 
-export class AgentRegistry {
+export class ClientRegistry {
     private readonly wss = new WebSocketServer({ noServer: true, maxPayload: MAX_AGENT_PAYLOAD })
     /**
      * Nested map: namespace → hostId → agent connection. Same hostId in two
@@ -139,7 +139,7 @@ export class AgentRegistry {
      */
     private readonly agents = new Map<string, Map<string, RemoteHostConnection>>()
     /** Per-WS auth context captured at upgrade time and consumed at hello. */
-    private readonly authenticatedContexts = new WeakMap<WebSocket, AgentAuthContext>()
+    private readonly authenticatedContexts = new WeakMap<WebSocket, ClientAuthContext>()
     private readonly serverToken: string
 
     /**
@@ -158,7 +158,7 @@ export class AgentRegistry {
     }
 
     /**
-     * Authenticate and accept a `/agent/connect` WS upgrade.
+     * Authenticate and accept a `/client/connect` WS upgrade.
      *
      * Required query params:
      *   - `serverToken`: must equal the hub's TMUXD_SERVER_TOKEN
@@ -173,7 +173,7 @@ export class AgentRegistry {
      */
     async tryHandleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): Promise<boolean> {
         const url = new URL(request.url || '', 'http://localhost')
-        if (url.pathname !== '/agent/connect') return false
+        if (url.pathname !== '/client/connect') return false
 
         const serverToken = url.searchParams.get('serverToken') || ''
         const userToken = url.searchParams.get('userToken') || ''
@@ -326,7 +326,7 @@ export class AgentRegistry {
             if (!accepted) {
                 ws.close(1008, 'missing_hello')
                 logAudit({
-                    event: 'agent_rejected',
+                    event: 'client_rejected',
                     namespace: '',
                     remoteAddr,
                     reason: 'missing_hello'
@@ -339,7 +339,7 @@ export class AgentRegistry {
             if (!msg || msg.type !== 'hello') {
                 ws.close(1008, 'invalid_hello')
                 logAudit({
-                    event: 'agent_rejected',
+                    event: 'client_rejected',
                     namespace: '',
                     remoteAddr,
                     reason: 'invalid_hello'
@@ -350,12 +350,12 @@ export class AgentRegistry {
             const ctx = this.authenticatedContexts.get(ws) ?? null
             this.authenticatedContexts.delete(ws)
             try {
-                if (!ctx) throw new AgentError('not_authenticated')
+                if (!ctx) throw new ClientError('not_authenticated')
 
                 const namespace = ctx.namespace
                 const hostId = resolveHostId(msg)
                 const inner = this.agents.get(namespace) ?? new Map<string, RemoteHostConnection>()
-                if (inner.has(hostId)) throw new AgentError('host_already_connected')
+                if (inner.has(hostId)) throw new ClientError('host_already_connected')
 
                 const conn = new RemoteHostConnection(ws, msg, hostId, namespace, () => {
                     const slot = this.agents.get(namespace)
@@ -370,7 +370,7 @@ export class AgentRegistry {
                 ws.off('message', onFirstMessage)
                 conn.start()
                 logAudit({
-                    event: 'agent_register',
+                    event: 'client_register',
                     namespace,
                     hostId,
                     name: msg.name,
@@ -380,7 +380,7 @@ export class AgentRegistry {
                 const reason = err instanceof Error ? err.message : 'invalid_hello'
                 ws.close(1008, reason)
                 logAudit({
-                    event: 'agent_rejected',
+                    event: 'client_rejected',
                     namespace: ctx?.namespace ?? '',
                     hostId: typeof msg.id === 'string' ? msg.id : undefined,
                     name: typeof msg.name === 'string' ? msg.name : undefined,
@@ -397,15 +397,15 @@ export class AgentRegistry {
 
     private requireAgent(namespace: string, hostId: string): RemoteHostConnection {
         const agent = this.agents.get(namespace)?.get(hostId)
-        if (!agent) throw new AgentError('host_not_found')
+        if (!agent) throw new ClientError('host_not_found')
         return agent
     }
 }
 
-export class AgentError extends Error {
+export class ClientError extends Error {
     constructor(message: string) {
         super(message)
-        this.name = 'AgentError'
+        this.name = 'ClientError'
     }
 }
 
@@ -420,7 +420,7 @@ class RemoteHostConnection {
 
     constructor(
         private readonly ws: WebSocket,
-        hello: AgentHelloMessage,
+        hello: ClientHelloMessage,
         hostId: string,
         private readonly namespace: string,
         private readonly onClose: () => void
@@ -441,8 +441,8 @@ class RemoteHostConnection {
     start(): void {
         this.send({ type: 'hello_ack', hostId: this.host.id, heartbeatMs: HEARTBEAT_MS })
         this.ws.on('message', (raw: Buffer) => this.handleMessage(raw))
-        this.ws.on('close', () => this.cleanup('agent_disconnected'))
-        this.ws.on('error', () => this.cleanup('agent_error'))
+        this.ws.on('close', () => this.cleanup('client_disconnected'))
+        this.ws.on('error', () => this.cleanup('client_error'))
     }
 
     hostInfo(): HostInfo {
@@ -450,17 +450,17 @@ class RemoteHostConnection {
     }
 
     requireCapability(capability: HostCapability): void {
-        if (!this.host.capabilities.includes(capability)) throw new AgentError('capability_not_supported')
+        if (!this.host.capabilities.includes(capability)) throw new ClientError('capability_not_supported')
     }
 
-    async request(type: AgentServerMessage['type'], payload: Record<string, unknown>): Promise<unknown> {
-        if (this.closed || this.ws.readyState !== this.ws.OPEN) throw new AgentError('host_not_found')
+    async request(type: ServerToClientMessage['type'], payload: Record<string, unknown>): Promise<unknown> {
+        if (this.closed || this.ws.readyState !== this.ws.OPEN) throw new ClientError('host_not_found')
         const id = `${Date.now().toString(36)}-${++this.requestCounter}`
-        const msg = { type, id, ...payload } as AgentServerMessage
+        const msg = { type, id, ...payload } as ServerToClientMessage
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
                 this.pending.delete(id)
-                reject(new AgentError('agent_timeout'))
+                reject(new ClientError('client_timeout'))
             }, REQUEST_TIMEOUT_MS)
             this.pending.set(id, { resolve, reject, timer })
             try {
@@ -474,7 +474,7 @@ class RemoteHostConnection {
     }
 
     async attach(session: string, cols: number, rows: number): Promise<RemoteStreamBridge> {
-        if (this.closed || this.ws.readyState !== this.ws.OPEN) throw new AgentError('host_not_found')
+        if (this.closed || this.ws.readyState !== this.ws.OPEN) throw new ClientError('host_not_found')
         const safe = sessionTargetNameSchema.parse(session)
         const streamId = randomUUID()
         const stream = new RemoteStream(this, streamId, safe, cols, rows)
@@ -528,7 +528,7 @@ class RemoteHostConnection {
             clearTimeout(pending.timer)
             this.pending.delete(msg.id)
             if (msg.ok) pending.resolve(msg.body)
-            else pending.reject(new AgentError(msg.error))
+            else pending.reject(new ClientError(msg.error))
             return
         }
 
@@ -544,21 +544,21 @@ class RemoteHostConnection {
         }
     }
 
-    private send(msg: AgentServerMessage): void {
-        if (this.ws.readyState !== this.ws.OPEN) throw new AgentError('host_not_found')
+    private send(msg: ServerToClientMessage): void {
+        if (this.ws.readyState !== this.ws.OPEN) throw new ClientError('host_not_found')
         this.ws.send(JSON.stringify(msg))
     }
 
     private tickHeartbeat(): void {
         if (this.closed) return
         if (Date.now() - this.lastSeenAt > HEARTBEAT_MS * 3) {
-            this.close(1001, 'agent_timeout')
+            this.close(1001, 'client_timeout')
             return
         }
         try {
             this.send({ type: 'ping' })
         } catch {
-            this.cleanup('agent_disconnected')
+            this.cleanup('client_disconnected')
         }
     }
 
@@ -568,7 +568,7 @@ class RemoteHostConnection {
         clearInterval(this.heartbeat)
         for (const pending of this.pending.values()) {
             clearTimeout(pending.timer)
-            pending.reject(new AgentError(reason))
+            pending.reject(new ClientError(reason))
         }
         this.pending.clear()
         for (const stream of this.streams.values()) {
@@ -577,7 +577,7 @@ class RemoteHostConnection {
         this.streams.clear()
         this.onClose()
         logAudit({
-            event: 'agent_disconnect',
+            event: 'client_disconnect',
             namespace: this.namespace,
             hostId: this.host.id,
             reason
@@ -618,7 +618,7 @@ class RemoteStream implements RemoteStreamBridge {
             this.readyTimer = setTimeout(() => {
                 this.readyReject = null
                 this.readyResolve = null
-                reject(new AgentError('attach_timeout'))
+                reject(new ClientError('attach_timeout'))
             }, timeoutMs)
         })
     }
@@ -652,7 +652,7 @@ class RemoteStream implements RemoteStreamBridge {
         if (this.disposed) return
         if (!this.ready && this.readyReject) {
             this.clearReadyTimer()
-            this.readyReject(new AgentError(message))
+            this.readyReject(new ClientError(message))
             this.readyReject = null
             this.readyResolve = null
         }
@@ -715,16 +715,16 @@ interface PendingRequest {
     timer: NodeJS.Timeout
 }
 
-function parseAgentMessage(raw: Buffer): AgentClientMessage | null {
+function parseAgentMessage(raw: Buffer): ClientToServerMessage | null {
     try {
-        const parsed = agentClientMessageSchema.safeParse(JSON.parse(raw.toString('utf8')))
+        const parsed = clientToServerMessageSchema.safeParse(JSON.parse(raw.toString('utf8')))
         return parsed.success ? parsed.data : null
     } catch {
         return null
     }
 }
 
-function resolveHostId(hello: AgentHelloMessage): string {
+function resolveHostId(hello: ClientHelloMessage): string {
     const candidate = hello.id ?? slugHostId(hello.name)
     const parsed = hostIdSchema.safeParse(candidate)
     if (!parsed.success || parsed.data === LOCAL_HOST_ID) throw new Error('invalid_host_id')

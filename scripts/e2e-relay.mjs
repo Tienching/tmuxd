@@ -4,7 +4,7 @@
  * spawned `tmuxd` server.
  *
  * Boots a tmuxd hub configured for hub-only multi-user operation:
- *   TMUXD_HUB_ONLY=1
+ *   TMUXD_RELAY=1
  *   TMUXD_SERVER_TOKEN=<secret>
  *
  * Then drives two real HTTP clients logged in with distinct user
@@ -107,7 +107,7 @@ async function main() {
             env: {
                 ...process.env,
                 TMUXD_SERVER_TOKEN: SERVER_TOKEN,
-                TMUXD_HUB_ONLY: '1',
+                TMUXD_RELAY: '1',
                 TMUXD_HOME,
                 TMUXD_AUDIT_DISABLE: '1', // keep test stderr clean
                 HOST,
@@ -249,8 +249,8 @@ async function main() {
 
         // ── 11. Both users can hit /agent/snapshot independently
         await check('Alice and Bob each get an /agent/snapshot', async () => {
-            const ar = await get('/api/agent/snapshot', { authorization: `Bearer ${aliceToken}` })
-            const br = await get('/api/agent/snapshot', { authorization: `Bearer ${bobToken}` })
+            const ar = await get('/api/client/snapshot', { authorization: `Bearer ${aliceToken}` })
+            const br = await get('/api/client/snapshot', { authorization: `Bearer ${bobToken}` })
             if (ar.status !== 200 || br.status !== 200) {
                 throw new Error(`alice=${ar.status} bob=${br.status}`)
             }

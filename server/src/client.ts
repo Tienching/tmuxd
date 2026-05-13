@@ -6,14 +6,14 @@ import { config as loadDotenv } from 'dotenv'
 import WebSocket from 'ws'
 import { attachTmuxPty, type PtyBridge } from './ptyManager.js'
 import { capturePane, captureSession, createSession, killSession, listPanes, listSessions, sendKeysToTarget, sendTextToTarget } from './tmux.js'
-import { agentServerMessageSchema, type AgentServerMessage } from './agentProtocol.js'
+import { serverToClientMessageSchema, type ServerToClientMessage } from './clientProtocol.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 loadDotenv({ path: join(__dirname, '..', '..', '.env') })
 loadDotenv()
 
 const VERSION = '0.1.0'
-const DEFAULT_NAME = 'agent'
+const DEFAULT_NAME = 'client'
 const CAPABILITIES = ['list', 'create', 'kill', 'capture', 'attach', 'panes', 'input']
 
 interface StreamState {
@@ -48,8 +48,8 @@ function requireValue(name: string, value: string | undefined): string {
     return value.trim()
 }
 
-function makeAgentUrl(hubUrl: string, serverToken: string, userToken: string): string {
-    const url = new URL('/agent/connect', hubUrl)
+function makeAgentUrl(tmuxdUrl: string, serverToken: string, userToken: string): string {
+    const url = new URL('/client/connect', tmuxdUrl)
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
     url.searchParams.set('serverToken', serverToken)
     url.searchParams.set('userToken', userToken)
@@ -57,20 +57,20 @@ function makeAgentUrl(hubUrl: string, serverToken: string, userToken: string): s
 }
 
 function printHelpAndExit(): never {
-    const text = `tmuxd agent — outbound WebSocket connection to a tmuxd hub
+    const text = `tmuxd client — outbound WebSocket connection to a tmuxd server
 
 Usage:
-  tmuxd agent [flags]
+  tmuxd client [flags]
   TMUXD_* env vars are equivalent (env-only deploys are supported).
 
 Required:
-  --hub <url>             Hub base URL, e.g. https://tmuxd.example.com
-                          (env: TMUXD_HUB_URL)
-  --server-token <secret> Shared trust-circle token for the hub. Same
-                          value the hub has in TMUXD_SERVER_TOKEN.
+  --hub <url>             Server base URL, e.g. https://tmuxd.example.com
+                          (env: TMUXD_URL)
+  --server-token <secret> Shared trust-circle token. Same value the
+                          server has in TMUXD_SERVER_TOKEN.
                           (env: TMUXD_SERVER_TOKEN)
-  --user-token <secret>   Personal token of the user this agent belongs
-                          to. The hub derives namespace = sha256(this).
+  --user-token <secret>   Personal token of the user this client belongs
+                          to. The server derives namespace = sha256(this).
                           You can re-use the same TMUXD_USER_TOKEN your
                           'tmuxd login' uses.
                           (env: TMUXD_USER_TOKEN)
@@ -79,26 +79,26 @@ Optional:
   --host-id <id>          Stable host ID. Defaults to a slug of --name.
                           (env: TMUXD_HOST_ID)
   --host-name <display>   Human-readable name shown in the web UI.
-                          (env: TMUXD_HOST_NAME, default: "agent")
+                          (env: TMUXD_HOST_NAME, default: "client")
   --help, -h              Print this message and exit.
 
 Exit codes:
   0   Clean shutdown (e.g. SIGTERM)
   1   Fatal startup error (missing flags, etc.)
-  2   Hub rejected configuration
+  2   Server rejected configuration
 
 Examples:
-  tmuxd agent --hub http://hub.example:7681 \\
-              --server-token \${TMUXD_SERVER_TOKEN} \\
-              --user-token  \${ALICE_USER_TOKEN} \\
-              --host-id laptop --host-name "Alice Laptop"
+  tmuxd client --hub http://tmuxd.example:7681 \\
+               --server-token \${TMUXD_SERVER_TOKEN} \\
+               --user-token  \${ALICE_USER_TOKEN} \\
+               --host-id laptop --host-name "Alice Laptop"
 
-  TMUXD_HUB_URL=http://hub.example:7681 \\
+  TMUXD_URL=http://tmuxd.example:7681 \\
   TMUXD_SERVER_TOKEN=\${TMUXD_SERVER_TOKEN} \\
   TMUXD_USER_TOKEN=\${ALICE_USER_TOKEN} \\
   TMUXD_HOST_ID=laptop \\
   TMUXD_HOST_NAME="Alice Laptop" \\
-    tmuxd agent
+    tmuxd client
 
 See docs/identity-model.md for the trust model rationale.
 `
@@ -106,19 +106,19 @@ See docs/identity-model.md for the trust model rationale.
     process.exit(0)
 }
 
-interface AgentConfig {
-    hubUrl: string
+interface ClientConfig {
+    tmuxdUrl: string
     serverToken: string
     userToken: string
     hostName: string
     hostId: string | undefined
 }
 
-function readConfig(): AgentConfig {
+function readConfig(): ClientConfig {
     const args = parseArgs(process.argv.slice(2))
     if (args.help || args.h) printHelpAndExit()
     return {
-        hubUrl: requireValue('--hub or TMUXD_HUB_URL', args.hub || process.env.TMUXD_HUB_URL),
+        tmuxdUrl: requireValue('--hub or TMUXD_URL', args.hub || process.env.TMUXD_URL),
         serverToken: requireValue(
             '--server-token or TMUXD_SERVER_TOKEN',
             args['server-token'] || process.env.TMUXD_SERVER_TOKEN
@@ -133,10 +133,10 @@ function readConfig(): AgentConfig {
 }
 
 /**
- * Thrown when the hub rejects the agent for a configuration reason that
- * retrying cannot fix. The agent main loop catches it, prints a clear
- * instruction, and exits with code 2 instead of looping forever on
- * backoff.
+ * Thrown when the server rejects the client for a configuration reason
+ * that retrying cannot fix. The client main loop catches it, prints a
+ * clear instruction, and exits with code 2 instead of looping forever
+ * on backoff.
  */
 class FatalConfigError extends Error {
     constructor(message: string, public readonly hint: string) {
@@ -154,11 +154,11 @@ async function main() {
             attempt = 0
         } catch (err) {
             if (err instanceof FatalConfigError) {
-                console.error(`[agent] ${err.message}`)
-                console.error(`[agent] hint: ${err.hint}`)
+                console.error(`[client] ${err.message}`)
+                console.error(`[client] hint: ${err.hint}`)
                 process.exit(2)
             }
-            console.error(`[agent] ${err instanceof Error ? err.message : String(err)}`)
+            console.error(`[client] ${err instanceof Error ? err.message : String(err)}`)
         }
         attempt = Math.min(attempt + 1, 6)
         const delay = Math.min(30_000, 500 * 2 ** attempt)
@@ -166,9 +166,9 @@ async function main() {
     }
 }
 
-function connectOnce(config: AgentConfig): Promise<void> {
+function connectOnce(config: ClientConfig): Promise<void> {
     return new Promise((resolve, reject) => {
-        const ws = new WebSocket(makeAgentUrl(config.hubUrl, config.serverToken, config.userToken))
+        const ws = new WebSocket(makeAgentUrl(config.tmuxdUrl, config.serverToken, config.userToken))
         const streams = new Map<string, StreamState>()
         let settled = false
 
@@ -199,7 +199,7 @@ function connectOnce(config: AgentConfig): Promise<void> {
             const msg = parseHubMessage(raw)
             if (!msg) return
             if (msg.type === 'hello_ack') {
-                console.log(`[agent] connected as ${msg.hostId}`)
+                console.log(`[client] connected as ${msg.hostId}`)
                 return
             }
             if (msg.type === 'ping') {
@@ -216,13 +216,13 @@ function connectOnce(config: AgentConfig): Promise<void> {
                 if (res.statusCode === 401) {
                     reject(
                         new FatalConfigError(
-                            `hub rejected agent websocket: HTTP 401`,
-                            'verify TMUXD_SERVER_TOKEN matches the hub, and that TMUXD_USER_TOKEN is non-empty.'
+                            `server rejected client websocket: HTTP 401`,
+                            'verify TMUXD_SERVER_TOKEN matches the server, and that TMUXD_USER_TOKEN is non-empty.'
                         )
                     )
                     return
                 }
-                reject(new Error(`hub rejected agent websocket: HTTP ${res.statusCode}`))
+                reject(new Error(`server rejected client websocket: HTTP ${res.statusCode}`))
             }
         })
         ws.on('error', (err) => {
@@ -238,28 +238,28 @@ function connectOnce(config: AgentConfig): Promise<void> {
             if (!settled) {
                 settled = true
                 if (code === 1008 && reason === 'host_already_connected') {
-                    // The hub already has a connection registered under our
+                    // The server already has a connection registered under our
                     // (namespace, hostId). This is NOT a fatal config error
                     // even though it looks like one: a previous instance of
-                    // this same agent may have died abruptly (hard kill,
-                    // network drop, machine sleep) and the hub takes up to
+                    // this same client may have died abruptly (hard kill,
+                    // network drop, machine sleep) and the server takes up to
                     // HEARTBEAT_MS × 3 = 45s to reap the stale entry. If we
                     // exit 2 here, a transient network blip permanently
-                    // kills the agent process — systemd / docker-restart
+                    // kills the client process — systemd / docker-restart
                     // can't help because the exit code is 2 (config error
                     // by convention), not a generic crash.
                     //
                     // The right move is to log clearly and let the main
                     // loop's backoff (capped at 30s) retry. Most cases
                     // self-heal within one heartbeat window. If the user
-                    // ACTUALLY ran two agents with the same host id, the
+                    // ACTUALLY ran two clients with the same host id, the
                     // log line tells them what to do; they can stop the
                     // other one and this loop will succeed on the next
                     // attempt.
                     console.error(
-                        `[agent] hub rejected hello: another agent is already connected with this host id. ` +
-                            `If a previous instance just died, the hub will reap it within ~45s and we will retry. ` +
-                            `If you are intentionally running two agents on the same hub, give them distinct ` +
+                        `[client] server rejected hello: another client is already connected with this host id. ` +
+                            `If a previous instance just died, the server will reap it within ~45s and we will retry. ` +
+                            `If you are intentionally running two clients on the same server, give them distinct ` +
                             `--host-id values.`
                     )
                     resolve()
@@ -271,7 +271,7 @@ function connectOnce(config: AgentConfig): Promise<void> {
     })
 }
 
-async function handleMessage(ws: WebSocket, streams: Map<string, StreamState>, msg: AgentServerMessage): Promise<void> {
+async function handleMessage(ws: WebSocket, streams: Map<string, StreamState>, msg: ServerToClientMessage): Promise<void> {
     if (msg.type === 'list_sessions') {
         await reply(ws, msg.id, async () => ({ sessions: await listSessions() }))
     } else if (msg.type === 'create_session') {
@@ -365,9 +365,9 @@ function disposeStream(streams: Map<string, StreamState>, streamId: string): voi
     }
 }
 
-function parseHubMessage(raw: WebSocket.RawData): AgentServerMessage | null {
+function parseHubMessage(raw: WebSocket.RawData): ServerToClientMessage | null {
     try {
-        const parsed = agentServerMessageSchema.safeParse(JSON.parse(raw.toString()))
+        const parsed = serverToClientMessageSchema.safeParse(JSON.parse(raw.toString()))
         return parsed.success ? parsed.data : null
     } catch {
         return null
@@ -385,6 +385,6 @@ function send(ws: WebSocket, msg: unknown): void {
 
 main().catch((err) => {
     console.error('fatal:', err instanceof Error ? err.message : err)
-    console.error('Run `tmuxd agent --help` for usage.')
+    console.error('Run `tmuxd client --help` for usage.')
     process.exit(1)
 })

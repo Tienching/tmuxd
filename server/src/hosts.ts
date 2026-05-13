@@ -5,7 +5,7 @@ const VERSION = '0.1.0'
 /**
  * Module-level switch tracking whether the local host is reachable through
  * tmuxd routes. Defaults to true (single-user / non-hub-only mode). When
- * `TMUXD_HUB_ONLY=1`, `index.ts` calls `setLocalHostEnabled(false)` at boot
+ * `TMUXD_RELAY=1`, `index.ts` calls `setLocalHostEnabled(false)` at boot
  * so every `isLocalHost`-dispatch branch in the routes returns 403 and
  * `getLocalHost()` is omitted from snapshots.
  *

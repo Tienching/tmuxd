@@ -30,10 +30,10 @@ const SERVER_TOKEN = process.env.TMUXD_SERVER_TOKEN ?? 'e2e-test-token-123'
 // e2e uses a fixed user token so we can re-auth deterministically.
 const USER_TOKEN = process.env.TMUXD_USER_TOKEN ?? 'e2e-test-user-token'
 // In the trust-model design there's no static binding — agents just
-// self-declare. We keep the AGENT_HOST_BOUND flag because it gates the
+// self-declare. We keep the CLIENT_HOST_BOUND flag because it gates the
 // e2e block that spawns a real outbound agent, which only runs when the
-// caller signals "we set up an agent fixture". Set TMUXD_E2E_AGENT_HOST_BOUND=1.
-const AGENT_HOST_BOUND = process.env.TMUXD_E2E_AGENT_HOST_BOUND === '1'
+// caller signals "we set up an agent fixture". Set TMUXD_E2E_CLIENT_HOST_BOUND=1.
+const CLIENT_HOST_BOUND = process.env.TMUXD_E2E_CLIENT_HOST_BOUND === '1'
 const ORIGIN = `http://${HOST}:${PORT}`
 const BASE = ORIGIN
 
@@ -190,7 +190,7 @@ async function waitForHostGone(hostId, token, maxMs = 5000) {
 function agentHelloOnce(hostId, userToken) {
     return new Promise((resolve, reject) => {
         const url =
-            `ws://${HOST}:${PORT}/agent/connect` +
+            `ws://${HOST}:${PORT}/client/connect` +
             `?serverToken=${encodeURIComponent(SERVER_TOKEN)}` +
             `&userToken=${encodeURIComponent(userToken)}`
         const ws = new WebSocket(url)
@@ -226,7 +226,7 @@ function agentHelloOnce(hostId, userToken) {
 function connectLegacyAgent(hostId, userToken) {
     return new Promise((resolve, reject) => {
         const url =
-            `ws://${HOST}:${PORT}/agent/connect` +
+            `ws://${HOST}:${PORT}/client/connect` +
             `?serverToken=${encodeURIComponent(SERVER_TOKEN)}` +
             `&userToken=${encodeURIComponent(userToken)}`
         const ws = new WebSocket(url)
@@ -263,10 +263,10 @@ function connectLegacyAgent(hostId, userToken) {
 }
 
 function startAgentProcess(hostId, userToken) {
-    return spawn('node', ['node_modules/.bin/tsx', 'server/src/agent.ts'], {
+    return spawn('node', ['node_modules/.bin/tsx', 'server/src/client.ts'], {
         env: {
             ...process.env,
-            TMUXD_HUB_URL: BASE,
+            TMUXD_URL: BASE,
             TMUXD_SERVER_TOKEN: SERVER_TOKEN,
             TMUXD_USER_TOKEN: userToken,
             TMUXD_HOST_ID: hostId,
@@ -737,7 +737,7 @@ async function main() {
     })
 
     await check('agent-api: snapshot aggregates hosts, sessions, panes, and optional status', async () => {
-        const r = await http('/api/agent/snapshot?capture=1&captureLimit=1&lines=40&maxBytes=4096', {
+        const r = await http('/api/client/snapshot?capture=1&captureLimit=1&lines=40&maxBytes=4096', {
             headers: { authorization: `Bearer ${token}` }
         })
         return (
@@ -847,7 +847,7 @@ async function main() {
     })
 
     let agentProc = null
-    if (AGENT_HOST_BOUND) {
+    if (CLIENT_HOST_BOUND) {
         const AGENT_HOST = 'e2e-agent'
         // Use the SAME user token as the API client. Under the trust model
         // every connection (agent WS + API client) hashes its userToken into
@@ -861,9 +861,9 @@ async function main() {
         const AGENT_SESSION = 'tmuxd-e2e-agent'
         await killIfPresent(AGENT_SESSION)
 
-        await check('agent: missing tokens on /agent/connect → 401', async () => {
+        await check('agent: missing tokens on /client/connect → 401', async () => {
             try {
-                await wsConnect(`ws://${HOST}:${PORT}/agent/connect`)
+                await wsConnect(`ws://${HOST}:${PORT}/client/connect`)
                 return false
             } catch (err) {
                 return /401/.test(err.message)
@@ -908,7 +908,7 @@ async function main() {
                         headers: { authorization: `Bearer ${token}` }
                     })
                 }
-                const snapshot = await http('/api/agent/snapshot?capture=1&captureLimit=8', {
+                const snapshot = await http('/api/client/snapshot?capture=1&captureLimit=8', {
                     headers: { authorization: `Bearer ${token}` }
                 })
                 return (
@@ -1193,7 +1193,7 @@ async function main() {
         })
 
         await check('agent-api: snapshot includes remote host sessions panes and statuses', async () => {
-            const r = await http('/api/agent/snapshot?capture=1&captureLimit=16&lines=80&maxBytes=4096', {
+            const r = await http('/api/client/snapshot?capture=1&captureLimit=16&lines=80&maxBytes=4096', {
                 headers: { authorization: `Bearer ${token}` }
             })
             return (

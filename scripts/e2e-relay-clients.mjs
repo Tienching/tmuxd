@@ -47,7 +47,7 @@ const ALICE_USER_TOKEN = 'alice-real-agent-' + Math.random().toString(36).slice(
 const BOB_USER_TOKEN = 'bob-real-agent-' + Math.random().toString(36).slice(2)
 const TMUXD_HOME = `/tmp/tmuxd-e2e-real-agents-${process.pid}`
 
-/** Mirror of shared/src/identity.ts#computeNamespace — see e2e-hub.mjs. */
+/** Mirror of shared/src/identity.ts#computeNamespace — see e2e-relay.mjs. */
 function computeNamespace(userToken) {
     const trimmed = String(userToken).trim()
     if (!trimmed) throw new Error('userToken must not be empty')
@@ -110,11 +110,11 @@ async function login(userToken) {
 function spawnAgent({ userToken, hostId, hostName, serverToken = SERVER_TOKEN }) {
     return spawn(
         'node',
-        ['node_modules/.bin/tsx', 'server/src/agent.ts'],
+        ['node_modules/.bin/tsx', 'server/src/client.ts'],
         {
             env: {
                 ...process.env,
-                TMUXD_HUB_URL: `http://${HOST}:${PORT}`,
+                TMUXD_URL: `http://${HOST}:${PORT}`,
                 TMUXD_SERVER_TOKEN: serverToken,
                 TMUXD_USER_TOKEN: userToken,
                 TMUXD_HOST_ID: hostId,
@@ -151,7 +151,7 @@ async function main() {
             env: {
                 ...process.env,
                 TMUXD_SERVER_TOKEN: SERVER_TOKEN,
-                TMUXD_HUB_ONLY: '1',
+                TMUXD_RELAY: '1',
                 TMUXD_HOME,
                 TMUXD_AUDIT_DISABLE: '1',
                 HOST,
@@ -302,7 +302,7 @@ async function main() {
 
         // ── 9. /agent/snapshot is also namespace-filtered
         await check('Alice /agent/snapshot has only her host', async () => {
-            const r = await get('/api/agent/snapshot', { authorization: `Bearer ${aliceJwt}` })
+            const r = await get('/api/client/snapshot', { authorization: `Bearer ${aliceJwt}` })
             const body = await r.json()
             const remoteIds = body.hosts.filter((h) => !h.isLocal).map((h) => h.id).sort()
             if (remoteIds.length !== 1 || remoteIds[0] !== 'laptop') {

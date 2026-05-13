@@ -7,7 +7,7 @@ A local-first web UI for `tmux` sessions. Open your browser, sign in with one sh
 ## What it does
 
 - Lists all tmux sessions for the server user.
-- Can act as a hub for outbound tmuxd agents, so one page can show tmux sessions from multiple machines.
+- Can route to outbound tmuxd clients on other boxes, so one page can show tmux sessions from multiple machines.
 - Creates, attaches to, and kills tmux sessions from the web UI.
 - Creates named sessions or auto-named sessions when you leave the name blank.
 - Streams an interactive terminal over WebSocket using xterm.js.
@@ -17,7 +17,7 @@ A local-first web UI for `tmux` sessions. Open your browser, sign in with one sh
 - Starts newly-created sessions in the server user's home directory.
 - Supports mobile layouts and install-to-home-screen PWA metadata.
 - Adds mobile-friendly **Keys** and **Text** controls for special keys and selectable session text.
-- Uses two-token login + short-lived JWTs for the API. Server token is the team trust circle; user token is your personal identity (the hub hashes it into a namespace).
+- Uses two-token login + short-lived JWTs for the API. Server token is the team trust circle; user token is your personal identity (the server hashes it into a namespace).
 - Uses short-lived one-time WebSocket tickets instead of putting the long-lived JWT in the WebSocket URL.
 
 ## Screenshots
@@ -58,9 +58,9 @@ npm start
 The server prints a URL, usually `http://127.0.0.1:7681`.
 
 **First time only**: generate a personal user token. This is your
-permanent identity on this hub — re-use the same value on every device
-(laptop CLI, web UI, agent processes) so they all land in the same
-namespace.
+permanent identity on this server — re-use the same value on every
+device (laptop CLI, web UI, client processes) so they all land in the
+same namespace.
 
 ```bash
 npm run tmuxd -- login \
@@ -74,31 +74,31 @@ Then open the web URL and sign in with the **server token** plus the
 **same user token** you just generated. See
 [docs/identity-model.md](docs/identity-model.md) for the trust model
 rationale and [docs/deployment-modes.md](docs/deployment-modes.md) for
-multi-user / agent setups.
+multi-user / client setups.
 
 ## Configuration
 
 `tmuxd` reads `.env` from the project root. There are two templates:
 
-- `.env.example` — for the **hub** (the box running `npm start`)
-- `.env.agent.example` — for **agent** boxes (the ones running `npm run agent`)
+- `.env.example` — for the **server** (the box running `npm start`)
+- `.env.client.example` — for **client** boxes (the ones running `npm run client`)
 
-The hub has three deployment shapes (single-user local, hub+agents
-mixed, hub-only multi-user) — pick one before filling in `.env`.
-See [docs/deployment-modes.md](docs/deployment-modes.md) for the
-decision tree.
+The server has three deployment shapes (single-user local,
+server+clients mixed, relay multi-user) — pick one before filling in
+`.env`. See [docs/deployment-modes.md](docs/deployment-modes.md) for
+the decision tree.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `TMUXD_SERVER_TOKEN` | required | Shared trust-circle token. Anyone with this can use the hub. Pair it with a personal `TMUXD_USER_TOKEN` to identify *who* is using it. See [docs/identity-model.md](docs/identity-model.md). |
-| `TMUXD_HUB_ONLY` | unset | When `1`/`true`, every local-tmux route returns 403 and the local host is hidden from `/api/hosts`. Recommended for multi-user hub deployments. |
+| `TMUXD_SERVER_TOKEN` | required | Shared trust-circle token. Anyone with this can use the server. Pair it with a personal `TMUXD_USER_TOKEN` to identify *who* is using it. See [docs/identity-model.md](docs/identity-model.md). |
+| `TMUXD_RELAY` | unset | When `1`/`true`, every local-tmux route returns 403 and the local host is hidden from `/api/hosts`. Recommended for multi-user deployments (relay mode). |
 | `HOST` | `127.0.0.1` | Bind address. Use `0.0.0.0` only when you understand the network exposure. |
 | `PORT` | `7681` | HTTP port. |
 | `TMUXD_HOME` | `.tmuxd` in CWD | Directory for generated runtime secrets (e.g. `jwt-secret`). |
 | `JWT_SECRET` | generated | Optional JWT signing secret. If set manually, it must be at least 32 bytes. Removing the persisted `jwt-secret` file revokes every outstanding JWT on next restart. |
-| `TMUXD_TMUX_PATH` | `tmux` on PATH | Override the tmux binary the agent invokes. Useful for non-standard tmux installs. |
+| `TMUXD_TMUX_PATH` | `tmux` on PATH | Override the tmux binary the server / client invokes. Useful for non-standard tmux installs. |
 | `TMUXD_AUDIT_DISABLE` | unset | When `1`, silences the structured audit log on stderr. Default behavior in production is on. |
-| `TMUXD_USER_TOKEN` | (per-client) | Personal token used by the agent and the CLI. The hub computes `namespace = sha256(userToken).slice(0, 16)` from it. **Not** read by the hub itself; lives on each user's client device. |
+| `TMUXD_USER_TOKEN` | (per-client) | Personal token used by the outbound client and the CLI. The server computes `namespace = sha256(userToken).slice(0, 16)` from it. **Not** read by the server itself; lives on each user's client device. |
 
 Example `.env`:
 
@@ -121,40 +121,40 @@ openssl rand -base64 48
 ```
 
 Generate a fresh user token from the CLI (run on your client device,
-not the hub — the user token is per-user, not per-deployment):
+not the server — the user token is per-user, not per-deployment):
 
 ```bash
-npm run tmuxd -- login --hub https://hub.example.com \
+npm run tmuxd -- login --hub https://tmuxd.example.com \
   --server-token "$TMUXD_SERVER_TOKEN" --user-token-generate
 ```
 
-## Hub / agent mode
+## Server / client mode
 
-By default, tmuxd controls tmux on the same machine as the web server. To show tmux sessions from other machines in the same web UI, run the normal server as the hub and start one outbound agent per remote machine.
+By default, tmuxd controls tmux on the same machine as the web server. To show tmux sessions from other machines in the same web UI, run the normal server and start one outbound client per remote machine.
 
-On the hub:
+On the server:
 
 ```bash
 TMUXD_SERVER_TOKEN=replace-with-a-long-random-token \
 HOST=0.0.0.0 PORT=7681 npm start
 ```
 
-On an agent machine:
+On a client machine:
 
 ```bash
-TMUXD_HUB_URL=http://hub.example:7681 \
+TMUXD_URL=http://tmuxd.example:7681 \
 TMUXD_SERVER_TOKEN=replace-with-a-long-random-token \
 TMUXD_USER_TOKEN=your-personal-user-token \
 TMUXD_HOST_ID=workstation \
 TMUXD_HOST_NAME=Workstation \
-npm run agent
+npm run client
 ```
 
-You can also pass agent options as flags:
+You can also pass client options as flags:
 
 ```bash
-npm run agent -- \
-  --hub http://hub.example:7681 \
+npm run client -- \
+  --hub http://tmuxd.example:7681 \
   --server-token replace-with-a-long-random-token \
   --user-token  your-personal-user-token \
   --host-id workstation --host-name Workstation
@@ -162,29 +162,29 @@ npm run agent -- \
 
 Notes:
 
-- Agents make an outbound WebSocket connection to `/agent/connect`; they do not open an inbound HTTP port.
+- Clients make an outbound WebSocket connection to `/client/connect`; they do not open an inbound HTTP port.
 - `TMUXD_HOST_ID` is the stable ID stored in browser workspaces and URLs. Use letters, digits, `.`, `_`, or `-`.
 - `TMUXD_HOST_NAME` is just the display name in the UI.
-- Agents authenticate via `?serverToken=…&userToken=…` query string on the WS upgrade. Authorization headers are not used because some intermediate proxies strip them on `Upgrade`.
+- Clients authenticate via `?serverToken=…&userToken=…` query string on the WS upgrade. Authorization headers are not used because some intermediate proxies strip them on `Upgrade`.
 - Same `TMUXD_HOST_ID` in two different namespaces (i.e. with two different user tokens) coexist as distinct records — Alice's `laptop` and Bob's `laptop` do not collide.
-- Use HTTPS/WSS when the hub is reachable beyond a private network.
-- A connected agent advertises capabilities to the hub. Hosts with the `create` capability appear in New-session host pickers.
+- Use HTTPS/WSS when the server is reachable beyond a private network.
+- A connected client advertises capabilities to the server. Hosts with the `create` capability appear in New-session host pickers.
 
-The home page, terminal sidebar, mobile picker, and split chooser group sessions by host. Existing local routes such as `/attach/main` still mean the hub's `local/main`; remote sessions use `/attach/:hostId/:name`.
+The home page, terminal sidebar, mobile picker, and split chooser group sessions by host. Existing local routes such as `/attach/main` still mean the server's `local/main`; remote sessions use `/attach/:hostId/:name`.
 
-## Multi-user hub mode
+## Multi-user relay mode
 
-For deployments where many users share a single tmuxd hub and each
-should only see their own tmux sessions, see [docs/hub-mode.md](docs/hub-mode.md).
-The two-token model means new users do not require any server-side
-configuration:
+For deployments where many users share a single tmuxd server and each
+should only see their own tmux sessions, see
+[docs/relay-deployment.md](docs/relay-deployment.md). The two-token
+model means new users do not require any server-side configuration:
 
 - Operator hands out the **server token** once.
 - Each user picks (or generates) their own **user token**.
-- The hub hashes the user token into a 16-hex-char namespace; everyone's
+- The server hashes the user token into a 16-hex-char namespace; everyone's
   view is filtered to their namespace.
-- `TMUXD_HUB_ONLY=1` to disable local-tmux routes entirely (the hub
-  becomes a proxy/router only).
+- `TMUXD_RELAY=1` to disable local-tmux routes entirely (the server
+  becomes a proxy/router only — that's "relay mode").
 
 Read [docs/identity-model.md](docs/identity-model.md) before deploying —
 namespace is convention isolation, not authentication against people
@@ -248,9 +248,9 @@ The terminal page has an **Actions** panel on desktop and mobile.
 
 Custom actions are stored in the browser's localStorage. They are not synced between browsers and do not run in the background after the page is closed.
 
-### Agent-facing tmux API
+### Programmatic tmux API
 
-Other local agents can use tmuxd as a JSON control plane for both **Local** and hub/agent remote tmux hosts. This mirrors the common `tmux` skill workflow: list panes, capture bounded scrollback, send literal text or special keys, and reuse named actions.
+Other local agents can use tmuxd as a JSON control plane for both **Local** and remote tmux hosts (registered via outbound clients). This mirrors the common `tmux` skill workflow: list panes, capture bounded scrollback, send literal text or special keys, and reuse named actions.
 
 All endpoints require the normal web JWT:
 
@@ -289,7 +289,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
 # One aggregate snapshot for agents that need a quick inventory.
 curl -H "Authorization: Bearer $TOKEN" \
-  'http://127.0.0.1:7681/api/agent/snapshot?capture=1&captureLimit=4'
+  'http://127.0.0.1:7681/api/client/snapshot?capture=1&captureLimit=4'
 ```
 
 Pane captures return `truncated` and `maxBytes`. When truncation is needed, tmuxd keeps the newest UTF-8-safe tail of the capture so status checks still see the latest prompt. Pane status responses also include a small sticky `activity` light: `green` = read/normal, `yellow` = unread output changed, `red` = tracked pane closed. Polling status does not clear unread; clear it explicitly with `POST /api/hosts/:hostId/panes/:target/activity/read`.
@@ -322,7 +322,7 @@ curl -H "Authorization: Bearer $TOKEN" \
   'http://127.0.0.1:7681/api/actions/history?limit=20'
 ```
 
-Remote hosts use the same routes with their host id, for example `/api/hosts/workstation/panes`. New tmuxd outbound agents advertise `panes` and `input` capabilities; older agents continue to work for session list/create/capture/attach but return `capability_not_supported` for these newer endpoints.
+Remote hosts use the same routes with their host id, for example `/api/hosts/workstation/panes`. New tmuxd outbound clients advertise `panes` and `input` capabilities; older clients continue to work for session list/create/capture/attach but return `capability_not_supported` for these newer endpoints.
 
 ### Command-line client (`tmuxd`)
 
@@ -339,7 +339,7 @@ npm run tmuxd -- login --hub http://127.0.0.1:7681 \
   --user-token-generate
 
 # Subsequent logins on the same identity (re-use the same user token):
-npm run tmuxd -- login --hub https://hub.example.com \
+npm run tmuxd -- login --hub https://tmuxd.example.com \
   --server-token "$TMUXD_SERVER_TOKEN" \
   --user-token  "$TMUXD_USER_TOKEN"
 
@@ -381,7 +381,7 @@ When you paste an image into a **Local** terminal session, tmuxd saves it under 
 
 If your browser does not expose clipboard images to web pages, use the **Image** button in the terminal UI to choose an image file manually.
 
-Remote agent sessions do not currently receive pasted image files; only local sessions can use this clipboard-image path paste.
+Remote client sessions do not currently receive pasted image files; only local sessions can use this clipboard-image path paste.
 
 ### Mobile / install as app
 
@@ -406,7 +406,7 @@ Recommended deployment:
 
 - Or put tmuxd behind an HTTPS reverse proxy such as Caddy, nginx, or Cloudflare Tunnel.
 - Use a long random token.
-- If hub/agent mode is enabled, use separate long random agent tokens; do not reuse the browser token.
+- If you run outbound clients, give every user their own user token; do not share user tokens across people.
 - Restrict firewall/security-group access to trusted IPs.
 
 Implemented safeguards:
@@ -421,7 +421,7 @@ Implemented safeguards:
 - WebSocket connection limits and idle timeout.
 - API responses use `Cache-Control: no-store`.
 - PTY child environment strips `TMUXD_SERVER_TOKEN`, `TMUXD_USER_TOKEN`, and `JWT_SECRET`.
-- Browser JWTs are never forwarded to agents; the hub talks to agents over their own authenticated WebSocket channel.
+- Browser JWTs are never forwarded to clients; the server talks to outbound clients over their own authenticated WebSocket channel.
 
 ## Development
 
@@ -443,15 +443,15 @@ Run only the web app:
 npm run dev:web
 ```
 
-Run an outbound agent:
+Run an outbound client:
 
 ```bash
-npm run agent -- \
+npm run client -- \
   --hub http://127.0.0.1:7681 \
   --server-token your-server-token \
   --user-token  your-user-token \
-  --host-id dev-agent \
-  --host-name DevAgent
+  --host-id dev-client \
+  --host-name DevClient
 ```
 
 ## Validation
@@ -470,9 +470,9 @@ E2E coverage includes:
 - New/duplicate/bad-name/delete session flows.
 - New sessions starting in the server user's home directory.
 - Session text capture from tmux scrollback.
-- Agent-facing pane list/capture/input APIs and server-side action CRUD/run flows.
+- Programmatic pane list/capture/input APIs and server-side action CRUD/run flows.
 - WebSocket attach, resize, ping/pong, input echo, UTF-8 roundtrip.
-- Hub/agent remote host connect, remote session create/list/capture/delete, remote pane inspection/input, and remote WebSocket attach/input.
+- Outbound-client remote host connect, remote session create/list/capture/delete, remote pane inspection/input, and remote WebSocket attach/input.
 - Multi-client shared attach.
 - Graceful shutdown with a live WebSocket.
 - Production web build smoke test.
@@ -480,7 +480,7 @@ E2E coverage includes:
 ## Project structure
 
 ```text
-server/   Hono HTTP API, WebSocket upgrade, tmux/PTY bridge, outbound agent
+server/   Hono HTTP API, WebSocket upgrade, tmux/PTY bridge, outbound client
 shared/   TypeScript types and Zod schemas
 web/      Vite + React + TanStack Router + xterm.js
 scripts/  E2E validation scripts
@@ -491,7 +491,7 @@ scripts/  E2E validation scripts
 ### Login says "Wrong tokens"
 
 Both fields are required. The **server token** is the value after
-`TMUXD_SERVER_TOKEN=` in the hub's `.env` (not the variable name). The
+`TMUXD_SERVER_TOKEN=` in the server's `.env` (not the variable name). The
 **user token** is your own — generate one with `tmuxd login --user-token-generate`
 the first time, then re-use the same value on every device that should
 share your identity.

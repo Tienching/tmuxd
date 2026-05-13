@@ -24,7 +24,7 @@ export interface Config {
      */
     serverToken: string
     /**
-     * When true (TMUXD_HUB_ONLY=1), tmuxd refuses to host any tmux session
+     * When true (TMUXD_RELAY=1), tmuxd refuses to host any tmux session
      * itself; only registered agents serve sessions. Every route that today
      * dispatches via `isLocalHost(hostId)` returns 403 in this mode and the
      * hub's own host is hidden from every namespace's host list. Sysadmins
@@ -80,7 +80,7 @@ export function loadConfig(): Config {
     }
     const dataDir = resolveDataDir()
     const jwtSecret = resolveJwtSecret(dataDir)
-    const hubOnly = parseBoolean(process.env.TMUXD_HUB_ONLY)
+    const hubOnly = parseBoolean(process.env.TMUXD_RELAY)
     return { serverToken, hubOnly, host, port, jwtSecret, dataDir }
 }
 

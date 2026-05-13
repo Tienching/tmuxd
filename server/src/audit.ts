@@ -16,12 +16,12 @@
  *   - `auth_failure`      — a bearer JWT on /api/* was missing or invalid;
  *                           catches brute-forcing the API surface vs the
  *                           login endpoint
- *   - `agent_register`    — agent passed hello + binding check
- *   - `agent_rejected`    — agent's hello was rejected after a successful
+ *   - `client_register`    — agent passed hello + binding check
+ *   - `client_rejected`    — agent's hello was rejected after a successful
  *                           token check (e.g. namespace mismatch); WS
  *                           closed with a 4xxx code, agent told to fix
  *                           its config and exit
- *   - `agent_disconnect`  — agent's WS closed; `reason` carries the cause
+ *   - `client_disconnect`  — agent's WS closed; `reason` carries the cause
  *   - `ws_attach`         — browser opened an attach WS
  */
 
@@ -31,9 +31,9 @@ export type AuditEventType =
     | 'login_success'
     | 'login_failure'
     | 'auth_failure'
-    | 'agent_register'
-    | 'agent_rejected'
-    | 'agent_disconnect'
+    | 'client_register'
+    | 'client_rejected'
+    | 'client_disconnect'
     | 'ws_attach'
 
 export interface AuditEvent {
@@ -50,7 +50,7 @@ export interface AuditEvent {
     sessionName?: string
     /** Source IP if we know it (from `request.socket.remoteAddress`). */
     remoteAddr?: string
-    /** Optional human-readable agent display name for agent_register. */
+    /** Optional human-readable agent display name for client_register. */
     name?: string
     /** Why something failed, was rejected, or disconnected. */
     reason?: string

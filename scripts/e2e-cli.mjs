@@ -6,7 +6,7 @@
  * Plus a cross-namespace probe so the namespace isolation gate is exercised
  * end-to-end through the CLI.
  *
- * Topology (mirrors e2e-hub-agents.mjs):
+ * Topology (mirrors e2e-relay-clients.mjs):
  *   Alice agent ──► hub ◄── tmuxd CLI as Alice (ns = sha256(ALICE_USER_TOKEN))
  *   Bob   agent ──►     ◄── tmuxd CLI as Bob   (ns = sha256(BOB_USER_TOKEN))
  *
@@ -38,7 +38,7 @@ const TMUX_TMPDIR = `/tmp/tmuxd-e2e-cli-tmux-${process.pid}`
 const FAKE_HOME = `/tmp/tmuxd-e2e-cli-home-${process.pid}`
 const HUB_URL = `http://${HOST}:${PORT}`
 
-/** Mirror of shared/src/identity.ts#computeNamespace — see e2e-hub.mjs. */
+/** Mirror of shared/src/identity.ts#computeNamespace — see e2e-relay.mjs. */
 function computeNamespace(userToken) {
     const trimmed = String(userToken).trim()
     if (!trimmed) throw new Error('userToken must not be empty')
@@ -95,8 +95,8 @@ async function waitForHostId(jwt, hostId, maxMs = 5000) {
     throw new Error(`hostId ${hostId} did not appear within ${maxMs}ms`)
 }
 
-async function login(userToken, hubUrl = HUB_URL, serverToken = SERVER_TOKEN) {
-    const r = await fetch(`${hubUrl}/api/auth`, {
+async function login(userToken, tmuxdUrl = HUB_URL, serverToken = SERVER_TOKEN) {
+    const r = await fetch(`${tmuxdUrl}/api/auth`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ serverToken, userToken })
@@ -111,7 +111,7 @@ function spawnHub() {
         env: {
             ...process.env,
             TMUXD_SERVER_TOKEN: SERVER_TOKEN,
-            TMUXD_HUB_ONLY: '1',
+            TMUXD_RELAY: '1',
             TMUXD_HOME,
             TMUXD_AUDIT_DISABLE: '1',
             HOST,
@@ -123,10 +123,10 @@ function spawnHub() {
 }
 
 function spawnAgent({ userToken, hostId, hostName }) {
-    return spawn('node', ['node_modules/.bin/tsx', 'server/src/agent.ts'], {
+    return spawn('node', ['node_modules/.bin/tsx', 'server/src/client.ts'], {
         env: {
             ...process.env,
-            TMUXD_HUB_URL: HUB_URL,
+            TMUXD_URL: HUB_URL,
             TMUXD_SERVER_TOKEN: SERVER_TOKEN,
             TMUXD_USER_TOKEN: userToken,
             TMUXD_HOST_ID: hostId,
@@ -496,7 +496,7 @@ async function main() {
             }
         })
 
-        // ─── 9c. snapshot — wraps /api/agent/snapshot.
+        // ─── 9c. snapshot — wraps /api/client/snapshot.
         await check('cli snapshot returns alice-scoped hosts and sessions', async () => {
             const r = await cli('alice', 'snapshot')
             if (r.failed) throw new Error(`snapshot exited ${r.code}: ${r.stderr}`)
@@ -994,7 +994,7 @@ async function main() {
             env: {
                 ...process.env,
                 TMUXD_SERVER_TOKEN: TTL_SERVER_TOKEN,
-                TMUXD_HUB_ONLY: '1',
+                TMUXD_RELAY: '1',
                 TMUXD_HOME: `${TMUXD_HOME}-ttl`,
                 TMUXD_AUDIT_DISABLE: '1',
                 TMUXD_JWT_TTL_SECONDS_FOR_TEST: '2',
@@ -1058,7 +1058,7 @@ async function main() {
             env: {
                 ...process.env,
                 TMUXD_SERVER_TOKEN: ALT_SERVER_TOKEN,
-                TMUXD_HUB_ONLY: '1',
+                TMUXD_RELAY: '1',
                 TMUXD_HOME: `${TMUXD_HOME}-alt`,
                 TMUXD_AUDIT_DISABLE: '1',
                 HOST,
@@ -1117,7 +1117,7 @@ async function main() {
                 if (j.namespace !== CAROL_HUB_A_NS) {
                     throw new Error(`expected ns=${CAROL_HUB_A_NS}, got ${j.namespace}`)
                 }
-                if (j.hubUrl !== HUB_URL) throw new Error(`expected hubUrl=${HUB_URL}, got ${j.hubUrl}`)
+                if (j.tmuxdUrl !== HUB_URL) throw new Error(`expected tmuxdUrl=${HUB_URL}, got ${j.tmuxdUrl}`)
             })
 
             await check('multi-hub: whoami --hub HUB-B → HUB-B namespace', async () => {
@@ -1127,7 +1127,7 @@ async function main() {
                 if (j.namespace !== CAROL_HUB_B_NS) {
                     throw new Error(`expected ns=${CAROL_HUB_B_NS}, got ${j.namespace}`)
                 }
-                if (j.hubUrl !== ALT_HUB) throw new Error(`expected hubUrl=${ALT_HUB}, got ${j.hubUrl}`)
+                if (j.tmuxdUrl !== ALT_HUB) throw new Error(`expected tmuxdUrl=${ALT_HUB}, got ${j.tmuxdUrl}`)
             })
 
             // Bare `whoami` (no --hub) returns the most-recently-saved hub
@@ -1136,8 +1136,8 @@ async function main() {
                 const r = await cli('carol', 'whoami', '--json')
                 if (r.failed) throw new Error(`whoami default failed: ${r.stderr}`)
                 const j = JSON.parse(r.stdout)
-                if (j.hubUrl !== ALT_HUB) {
-                    throw new Error(`expected default hubUrl=${ALT_HUB}, got ${j.hubUrl}`)
+                if (j.tmuxdUrl !== ALT_HUB) {
+                    throw new Error(`expected default tmuxdUrl=${ALT_HUB}, got ${j.tmuxdUrl}`)
                 }
             })
 

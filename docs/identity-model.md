@@ -1,9 +1,9 @@
 # Identity model
 
 This document explains how tmuxd thinks about "who are you" — the trust
-relationship between the hub, the people who use it, and the agents
+relationship between the server, the people who use it, and the clients
 those people run on their own boxes. Code in `shared/src/identity.ts`,
-`server/src/auth.ts`, `server/src/agentRegistry.ts`, and
+`server/src/auth.ts`, `server/src/clientRegistry.ts`, and
 `server/src/cli.ts` all point at this file as the rationale.
 
 ## The two tokens
@@ -12,7 +12,7 @@ those people run on their own boxes. Code in `shared/src/identity.ts`,
 ┌───────────────────────────────────────────────────────────┐
 │  TMUXD_SERVER_TOKEN  — shared by everyone in the circle.  │
 │                        Issued once per deployment.        │
-│                        Authorizes use of the hub.         │
+│                        Authorizes use of the server.      │
 │                                                           │
 │  TMUXD_USER_TOKEN    — personal. One per identity.        │
 │                        Hashed into a namespace.           │
@@ -20,15 +20,15 @@ those people run on their own boxes. Code in `shared/src/identity.ts`,
 └───────────────────────────────────────────────────────────┘
 ```
 
-Every actor that talks to the hub — the web UI, the `tmuxd` CLI, an
-outbound `tmuxd agent` — presents **both** tokens:
+Every actor that talks to the server — the web UI, the `tmuxd` CLI, an
+outbound `tmuxd` client — presents **both** tokens:
 
 | Caller | Server token | User token |
 |---|---|---|
 | Web/CLI login (`POST /api/auth`) | `serverToken` field in JSON body | `userToken` field in JSON body |
-| Agent WS upgrade (`/agent/connect`) | `?serverToken=…` query param | `?userToken=…` query param |
+| Client WS upgrade (`/client/connect`) | `?serverToken=…` query param | `?userToken=…` query param |
 
-The hub:
+The server:
 1. Constant-time-compares the server token against `TMUXD_SERVER_TOKEN`.
    Wrong token → 401 Unauthorized, no further processing.
 2. Computes `namespace = sha256(userToken).slice(0, 16)` (16 lowercase
@@ -36,7 +36,7 @@ The hub:
 3. Stamps the resulting authentication token (JWT for HTTP, in-memory
    record for WS) with that namespace.
 
-The hub never persists user tokens. They live only in memory long
+The server never persists user tokens. They live only in memory long
 enough to compute the hash, then go out of scope.
 
 ## Why two separate concepts
@@ -46,22 +46,22 @@ are you". Conflating those locks the deployment into one of two bad
 shapes:
 
 - **Per-user secrets configured server-side.** Adding a user requires
-  editing `.env` on the hub and restarting. (This was the old
+  editing `.env` on the server and restarting. (This was the old
   `TMUXD_AGENT_TOKENS=alice/laptop=…` approach. It scales like writing
   every customer's name on a wall.)
 - **One shared password for everyone.** No way to tell users apart;
-  every web client lands in the same namespace; agents collide.
+  every web client lands in the same namespace; clients collide.
 
 Splitting them gives:
 
 - **Onboarding without server changes.** A new user picks a user token
   on their own box (or runs `tmuxd login --user-token-generate`), logs
-  in. The hub doesn't need a config change. As long as they know the
-  server token, they're in.
+  in. The server doesn't need a config change. As long as they know
+  the server token, they're in.
 - **Stable identity without operator coordination.** `sha256(userToken)`
   is deterministic, so the same user token from the same person
-  produces the same namespace on every device, every login session, every
-  hub upgrade.
+  produces the same namespace on every device, every login session,
+  every server upgrade.
 - **Compatible with corporate SSO later.** Phase 2 can derive the user
   token from a verified-by-SSO identifier (employee ID, email, SAML
   subject) and pipe it through the same `computeNamespace`. The wire
@@ -72,7 +72,7 @@ Splitting them gives:
 The namespace is **isolation between users who already share the
 trust circle**. Specifically:
 
-- Every persistent record (saved actions, agent registrations, JWTs,
+- Every persistent record (saved actions, client registrations, JWTs,
   WS tickets) carries the namespace it was minted under.
 - Every read API filters its results by the calling JWT's namespace.
 - Cross-namespace probes (Alice asking for `/hosts/bob-laptop/sessions`)
@@ -89,7 +89,7 @@ What it does **not** give you:
   knows the team key but tries to log in as Alice", you need a real
   user store — phase 2.
 - It is **not** an authorization system. There are no roles, no ACLs.
-  Inside a namespace, the JWT-bearer can do everything the hub
+  Inside a namespace, the JWT-bearer can do everything the server
   exposes for that namespace.
 
 In other words: the server token is the trust boundary, the user
@@ -102,15 +102,15 @@ token is the convention boundary.
 | Adversary | Can | Cannot |
 |---|---|---|
 | Stranger off the internet | Send `/health` requests; receive 401 from everything else. | Read or write anything in any namespace. |
-| Has the **server token only** | Log in as any namespace they pick (by inventing a user token). See agents that registered with the *same* user token they invented. | See any namespace whose user token they don't know. (Hashes are one-way.) |
+| Has the **server token only** | Log in as any namespace they pick (by inventing a user token). See clients that registered with the *same* user token they invented. | See any namespace whose user token they don't know. (Hashes are one-way.) |
 | Has **server + a specific user token** | Full read/write inside that user's namespace. | Cross into other namespaces. |
-| Has compromised the hub itself | Everything for everyone. The server token rotation tool below is the only mitigation. | — |
+| Has compromised the server itself | Everything for everyone. The server token rotation tool below is the only mitigation. | — |
 
 Design implications:
 - **Treat the server token like a team API key.** Anyone you give it
-  to can pose as any persona on the hub. Don't paste it into Slack.
+  to can pose as any persona on the server. Don't paste it into Slack.
 - **Treat the user token like an SSH private key.** Whoever has it
-  *is* you on every hub that uses the same `sha256(userToken)` =
+  *is* you on every server that uses the same `sha256(userToken)` =
   namespace mapping.
 - **Rotation:**
   - Rotating the **server token** evicts everyone who hasn't gotten
@@ -123,8 +123,8 @@ Design implications:
     Everything they had under the old namespace becomes invisible to
     them (and to anyone else). This is the right move when the user
     suspects their token leaked. The old records still exist on disk,
-    keyed under the old namespace; they will sit dormant until a hub
-    operator garbage-collects them.
+    keyed under the old namespace; they will sit dormant until a
+    server operator garbage-collects them.
 
 ## Wire contract
 
@@ -154,7 +154,7 @@ Errors:
   non-string values.
 - 401 `invalid_token` — server token wrong (constant-time compared).
 
-### Agent WebSocket: `GET /agent/connect`
+### Client WebSocket: `GET /client/connect`
 
 Query string:
 
@@ -169,17 +169,17 @@ protected WebSocket (assuming `wss://`); the URL is not durably
 logged by tmuxd itself. Operators are responsible for not pointing
 reverse-proxy access logs at the upgrade path.
 
-After a successful upgrade, the agent sends a `hello` frame with
-`{ id, name, version, capabilities }`. The hub stamps the registered
+After a successful upgrade, the client sends a `hello` frame with
+`{ id, name, version, capabilities }`. The server stamps the registered
 host record with `namespace = sha256(userToken).slice(0, 16)` derived
 from the upgrade's query.
 
 Reject paths:
 - HTTP 401 at upgrade: missing `serverToken`, missing `userToken`, or
-  server token mismatch. The agent's `connectOnce` catches this and
+  server token mismatch. The client's `connectOnce` catches this and
   exits with code 2 (FatalConfigError) — there is no point retrying.
 - WS close 1008 `host_already_connected` after the upgrade succeeds:
-  another agent in the same namespace already claims this hostId.
+  another client in the same namespace already claims this hostId.
   Same exit-code-2 path.
 
 ### JWT shape
@@ -205,23 +205,23 @@ token" in `docs/deployment-modes.md`); these are points on it.
   them the server token + show them how to run `tmuxd login`."
 - **Wider audience with a signup gate.** Server token distributed via
   an approval-gated flow (CAPTCHA / email confirmation / GitHub
-  OAuth). Same hub config as the small-team shape; the gate lives
-  in the distribution layer, not the hub. Namespace separation
+  OAuth). Same server config as the small-team shape; the gate lives
+  in the distribution layer, not the server. Namespace separation
   becomes the primary barrier between holders, so this is appropriate
   only for use cases where "anyone in the circle could in principle
   reach anyone else's namespace if they knew the user token" is
   acceptable.
-- **Corporate SSO** (phase 2). Hub computes the user token by
+- **Corporate SSO** (phase 2). Server computes the user token by
   HMAC-ing the SSO subject ID. The user token is never typed; it's
   derived from "the user who just authed via SSO." The wire contract
-  is unchanged: hub still receives `userToken` from the auth flow,
+  is unchanged: server still receives `userToken` from the auth flow,
   still computes the same `sha256` namespace.
 
 A note on truly **public** distribution (server token in a README):
-the hub itself doesn't care, but at scale you'll hit problems the
+the server itself doesn't care, but at scale you'll hit problems the
 trust model can't solve — resource abuse, no per-user eviction,
 rotation locks out legitimate users along with attackers. Add a
-signup gate even for "public" demos, or run the hub behind an
+signup gate even for "public" demos, or run the server behind an
 authenticating reverse proxy.
 
 ## Why sha256 and 16 hex chars

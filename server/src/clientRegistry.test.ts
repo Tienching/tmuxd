@@ -4,10 +4,10 @@ import { createServer, type IncomingMessage, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import WebSocket from 'ws'
 import { computeNamespace } from '@tmuxd/shared'
-import { AgentRegistry } from './agentRegistry.js'
+import { ClientRegistry } from './clientRegistry.js'
 
 /**
- * Spin up a real `http.Server` + `AgentRegistry` listening on an
+ * Spin up a real `http.Server` + `ClientRegistry` listening on an
  * ephemeral port, so we can drive a real WebSocket client at the
  * agent-protocol level. This exercises the actual Buffer parsing,
  * close-code propagation, and JSON wire format that the agent CLI
@@ -15,12 +15,12 @@ import { AgentRegistry } from './agentRegistry.js'
  * `acceptAgent()` would mock those out.
  */
 async function startHub(serverToken: string): Promise<{
-    registry: AgentRegistry
+    registry: ClientRegistry
     server: Server
     baseUrl: string
     close(): Promise<void>
 }> {
-    const registry = new AgentRegistry(serverToken)
+    const registry = new ClientRegistry(serverToken)
     const server = createServer()
     server.on('upgrade', async (request: IncomingMessage, socket: any, head: Buffer) => {
         try {
@@ -64,14 +64,14 @@ interface AgentClientResult {
 }
 
 /**
- * Connect an agent-style WebSocket client to /agent/connect with the
+ * Connect an agent-style WebSocket client to /client/connect with the
  * given (serverToken, userToken) on the URL query string. Resolves with
  * the close code/reason the server emits, or the HTTP rejection status
  * if the upgrade is refused.
  */
 function runAgentClient(opts: AgentClientOpts): Promise<AgentClientResult> {
     return new Promise((resolve, reject) => {
-        const url = new URL('/agent/connect', opts.baseUrl)
+        const url = new URL('/client/connect', opts.baseUrl)
         if (opts.serverToken !== undefined) url.searchParams.set('serverToken', opts.serverToken)
         if (opts.userToken !== undefined) url.searchParams.set('userToken', opts.userToken)
         const ws = new WebSocket(url.toString())
@@ -123,7 +123,7 @@ function runAgentClient(opts: AgentClientOpts): Promise<AgentClientResult> {
     })
 }
 
-describe('AgentRegistry — trust-model handshake', { concurrency: 1 }, () => {
+describe('ClientRegistry — trust-model handshake', { concurrency: 1 }, () => {
     it('rejects upgrade with HTTP 401 when serverToken is missing', async () => {
         const hub = await startHub('correct-server-token')
         try {
@@ -173,7 +173,7 @@ describe('AgentRegistry — trust-model handshake', { concurrency: 1 }, () => {
             // Open a long-lived WS so we can observe the registry state
             // *while* the agent is connected (closeAfterAck would race
             // the cleanup against our listHosts() assertion).
-            const url = new URL('/agent/connect', hub.baseUrl)
+            const url = new URL('/client/connect', hub.baseUrl)
             url.searchParams.set('serverToken', 'correct-server-token')
             url.searchParams.set('userToken', 'alice-secret')
             const ws = new WebSocket(url.toString())
@@ -245,7 +245,7 @@ describe('AgentRegistry — trust-model handshake', { concurrency: 1 }, () => {
         try {
             // First connection: lives forever (we never closeAfterAck).
             const first = new WebSocket(
-                `${hub.baseUrl}/agent/connect?serverToken=correct-server-token&userToken=alice-secret`
+                `${hub.baseUrl}/client/connect?serverToken=correct-server-token&userToken=alice-secret`
             )
             await new Promise<void>((resolve) => first.on('open', () => resolve()))
             first.send(JSON.stringify({ type: 'hello', id: 'laptop', name: 'Alice Laptop' }))
@@ -274,14 +274,14 @@ describe('AgentRegistry — trust-model handshake', { concurrency: 1 }, () => {
         try {
             // alice/laptop and bob/laptop coexist.
             const aliceWs = new WebSocket(
-                `${hub.baseUrl}/agent/connect?serverToken=correct-server-token&userToken=alice-secret`
+                `${hub.baseUrl}/client/connect?serverToken=correct-server-token&userToken=alice-secret`
             )
             await new Promise<void>((resolve) => aliceWs.on('open', () => resolve()))
             aliceWs.send(JSON.stringify({ type: 'hello', id: 'laptop', name: 'Alice Laptop' }))
             await new Promise((r) => setTimeout(r, 80))
 
             const bobWs = new WebSocket(
-                `${hub.baseUrl}/agent/connect?serverToken=correct-server-token&userToken=bob-secret`
+                `${hub.baseUrl}/client/connect?serverToken=correct-server-token&userToken=bob-secret`
             )
             await new Promise<void>((resolve) => bobWs.on('open', () => resolve()))
             bobWs.send(JSON.stringify({ type: 'hello', id: 'laptop', name: 'Bob Laptop' }))
@@ -303,7 +303,7 @@ describe('AgentRegistry — trust-model handshake', { concurrency: 1 }, () => {
         }
     })
 
-    it('rejects upgrade if /agent/connect path is wrong', async () => {
+    it('rejects upgrade if /client/connect path is wrong', async () => {
         const hub = await startHub('correct-server-token')
         try {
             const url = new URL('/wrong-path', hub.baseUrl)

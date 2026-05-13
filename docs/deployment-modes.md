@@ -7,27 +7,39 @@ the threat surface looks like.
 For the trust-model rationale (why two tokens, what `namespace = sha256(userToken)`
 buys you and what it doesn't), read `docs/identity-model.md` first.
 
+## Vocabulary
+
+- **Server**: the tmuxd box that runs `npm start`, holds the JWT
+  signing key, and exposes the web UI / HTTP API.
+- **Relay**: a server with `TMUXD_RELAY=1` set. Same binary, same
+  routes — just refuses to host tmux sessions itself. Pure router.
+- **Client**: the outbound process that runs on a user's machine
+  (`npm run client`), exposing that machine's local tmux to the server
+  over a single outbound WebSocket. Clients open no inbound port.
+
+A "deployment" is one server (or one relay) plus zero or more clients.
+
 ## Decision tree
 
 ```
-Want anyone besides yourself to use this hub?
+Want anyone besides yourself to use this server?
 ├── No  → Mode A: single-user local
 └── Yes →
-      Should the hub box itself host tmux sessions?
-      ├── Yes → Mode B: hub + remote agents (mixed)
-      └── No  → Mode C: hub-only multi-user ⭐
+      Should the server box itself host tmux sessions?
+      ├── Yes → Mode B: server + remote clients (mixed)
+      └── No  → Mode C: relay multi-user ⭐
 ```
 
 ## Mode matrix
 
-| Mode | Use case | `TMUXD_HUB_ONLY` | `HOST` | Who needs a user token |
+| Mode | Use case | `TMUXD_RELAY` | `HOST` | Who needs a user token |
 |---|---|---|---|---|
-| **A. Single-user local** | One person, hub + tmux on the same box | unset | `127.0.0.1` | the user (web/CLI) |
-| **B. Hub + remote agents** | Hub also hosts some sessions, plus agents on other boxes | unset | `0.0.0.0` | every web/CLI user **and** every agent |
-| **C. Hub-only multi-user** | Hub as pure router; sessions live on user agents | `1` | `0.0.0.0` | every user (same token for their CLI + their agent) |
+| **A. Single-user local** | One person, server + tmux on the same box | unset | `127.0.0.1` | the user (web/CLI) |
+| **B. Server + remote clients** | Server also hosts some sessions, plus clients on other boxes | unset | `0.0.0.0` | every web/CLI user **and** every client |
+| **C. Relay multi-user** | Server as pure router; sessions live on user clients | `1` | `0.0.0.0` | every user (same token for their CLI + their client) |
 
-`.env` for the hub is the same skeleton in all three; only `TMUXD_HUB_ONLY`
-and `HOST` change. `TMUXD_USER_TOKEN` **never** appears in the hub's
+`.env` for the server is the same skeleton in all three; only `TMUXD_RELAY`
+and `HOST` change. `TMUXD_USER_TOKEN` **never** appears in the server's
 `.env` — it lives on each user's client device.
 
 ---
@@ -39,21 +51,21 @@ Every user runs this once, on whichever machine they set up first
 
 ```bash
 npm run tmuxd -- login \
-  --hub <hub-url> \
+  --hub <server-url> \
   --server-token <value> \
   --user-token-generate
 ```
 
 The CLI prints a fresh 64-char hex token to **stderr** and saves it
 to `~/.tmuxd/cli/credentials.json`. **Save the printed value to a
-password manager.** It is your permanent identity on this hub:
+password manager.** It is your permanent identity on this server:
 
 - Same user token on every device → same namespace → same sessions
   visible everywhere.
 - Different user token → different namespace → previous sessions
   invisible, no recovery path.
 
-On every additional device (other laptops, phone, agent boxes), use
+On every additional device (other laptops, phone, client boxes), use
 the **same** token via `--user-token <value>` or the
 `TMUXD_USER_TOKEN` env var. **Do not run `--user-token-generate`
 again** unless you genuinely want a new identity.
@@ -67,9 +79,9 @@ identity.
 
 ## Mode A: Single-user local
 
-The default. Hub and tmux on your laptop, only loopback access.
+The default. Server and tmux on your laptop, only loopback access.
 
-**Hub `.env`**:
+**Server `.env`**:
 
 ```bash
 TMUXD_SERVER_TOKEN=$(openssl rand -hex 32)
@@ -79,9 +91,8 @@ PORT=7681
 
 **Use it**:
 - Open `http://127.0.0.1:7681`
-- Enter the server token
-- Click **Generate** for a user token, save it, sign in
-- The hub's local tmux is immediately visible. No agent needed.
+- Sign in with the server token + your user token
+- The server's local tmux is immediately visible. No client needed.
 
 **Threat model**: nothing reaches the box from outside loopback. The
 user token here is mainly for stable identity across browsers / PWA
@@ -89,14 +100,14 @@ installs; whoever can ssh into your laptop can already do everything.
 
 ---
 
-## Mode B: Hub + remote agents (mixed)
+## Mode B: Server + remote clients (mixed)
 
-Hub is reachable on the network and **also** runs tmux locally; users
-additionally run agents from their own boxes that register against the
-hub. Web UI shows the hub's `local` host plus every connected agent's
-host.
+Server is reachable on the network and **also** runs tmux locally; users
+additionally run clients from their own boxes that register against the
+server. Web UI shows the server's `local` host plus every connected
+client's host.
 
-**Hub `.env`**:
+**Server `.env`**:
 
 ```bash
 TMUXD_SERVER_TOKEN=$(openssl rand -hex 32)
@@ -104,69 +115,69 @@ HOST=0.0.0.0
 PORT=7681
 ```
 
-**Each user's agent box** (`.env.agent.example` is the template):
+**Each user's client box** (`.env.client.example` is the template):
 
 ```bash
-TMUXD_HUB_URL=https://hub.example.com
-TMUXD_SERVER_TOKEN=<same as hub>
+TMUXD_URL=https://tmuxd.example.com
+TMUXD_SERVER_TOKEN=<same as server>
 TMUXD_USER_TOKEN=<your personal token>
 TMUXD_HOST_ID=laptop
 TMUXD_HOST_NAME="Alice Laptop"
 ```
 
 **Use it**:
-- `npm run agent` on each agent box
-- Web/CLI sees `local` (hub box) + all your registered agents
+- `npm run client` on each client box
+- Web/CLI sees `local` (server box) + all your registered clients
 
-⚠ **Caveat**: the hub's `local` host is visible to **every** user that
-logs into the hub, regardless of their namespace. Every signed-in user
-can open tmux sessions on the hub box itself. If that's not desired,
-use Mode C — `TMUXD_HUB_ONLY=1` hides `local` and refuses
-session-creation requests targeting the hub.
+⚠ **Caveat**: the server's `local` host is visible to **every** user that
+logs into the server, regardless of their namespace. Every signed-in
+user can open tmux sessions on the server box itself. If that's not
+desired, use Mode C — `TMUXD_RELAY=1` hides `local` and refuses
+session-creation requests targeting the server.
 
-**Threat model**: same as A, plus each agent is reachable to the
+**Threat model**: same as A, plus each client is reachable to the
 namespace its user-token hashes to. Cross-namespace probes return
 404; same hostId in two namespaces coexist (Alice's `laptop` ≠ Bob's
-`laptop`). The hub itself runs tmux as whoever started the hub
-process — so the hub box's filesystem and shell are accessible to
+`laptop`). The server itself runs tmux as whoever started the server
+process — so the server box's filesystem and shell are accessible to
 every signed-in user.
 
 ---
 
-## Mode C: Hub-only multi-user ⭐
+## Mode C: Relay multi-user ⭐
 
-The recommended multi-user shape. Hub is pure routing/auth; **no
-session is ever created on the hub box itself**. Every session lives
-on a user agent.
+The recommended multi-user shape. Server is pure routing/auth; **no
+session is ever created on the server box itself**. Every session lives
+on a user client.
 
-**Hub `.env`**:
+**Server `.env`**:
 
 ```bash
 TMUXD_SERVER_TOKEN=$(openssl rand -hex 32)
-TMUXD_HUB_ONLY=1
+TMUXD_RELAY=1
 HOST=0.0.0.0
 PORT=7681
 ```
 
-`TMUXD_HUB_ONLY=1` makes the hub:
+`TMUXD_RELAY=1` makes the server:
 
 - 403 every `POST /api/sessions` and `POST /api/hosts/local/sessions`
   with `local_host_disabled`
 - omit `local` from every namespace's `/api/hosts` response
-- still happily route to any registered agent
+- still happily route to any registered client
 
 **Each user**:
 
 1. Operator hands out the server token (see "Distributing the server token" below).
 2. User generates their own user token: `tmuxd login --hub <url> --server-token <secret> --user-token-generate`
-3. User runs `npm run agent` on whichever boxes they want exposed,
+3. User runs `npm run client` on whichever boxes they want exposed,
    using the same user token everywhere.
 
-**Onboarding cost**: zero hub config change for new users or new
-agents. The hub never learns who they are; it just hashes whatever
-user token shows up.
+**Onboarding cost**: zero server-side config change for new users or
+new clients. The server never learns who they are; it just hashes
+whatever user token shows up.
 
-**Threat model**: the only people who can reach the hub at all are
+**Threat model**: the only people who can reach the server at all are
 those who hold the server token. Within that circle, the namespace
 from `sha256(userToken)` keeps users out of each other's sessions
 **as long as user tokens stay private**. The strength of namespace
@@ -183,7 +194,7 @@ restart.
 
 ## Distributing the server token
 
-This is an **operational** choice, not a mode. The hub's behavior is
+This is an **operational** choice, not a mode. The server's behavior is
 identical regardless of how the server token gets to its eventual
 holders. What changes is who's in the trust circle.
 
@@ -194,14 +205,14 @@ The choice is a continuum:
 | 1Password / team vault, 5 people | small, mutually trusting | "convention isolation" — strangers blocked at the door, teammates *could* impersonate but won't |
 | New-hire onboarding email, 50 people | medium, professionally accountable | same as above; bigger circle, weaker assumptions |
 | Approval-gated signup (CAPTCHA, GitHub OAuth, manual review) | medium-large, partial trust | namespace becomes the only effective barrier between holders |
-| Public README / homepage | unbounded | anyone can reach the hub; namespace isolation is pure cryptographic separation between strangers |
+| Public README / homepage | unbounded | anyone can reach the server; namespace isolation is pure cryptographic separation between strangers |
 
 **Two important properties of the namespace gate**:
 
 1. **It IS a real cryptographic barrier between strangers.** A user
    with their own user token cannot enumerate, guess, or compute
    another user's namespace. The hash is one-way; cross-namespace
-   probes return 404. Two strangers on the same hub are genuinely
+   probes return 404. Two strangers on the same server are genuinely
    isolated as long as neither knows the other's user token.
 
 2. **It is NOT a barrier between people who already share the
@@ -219,8 +230,8 @@ The choice is a continuum:
   token through whatever channel you already trust for team secrets.
 - Wider audience: gate distribution behind something — at minimum a
   signup form with email confirmation, ideally an auth provider.
-- Public hub with the token in a README: only for ephemeral demos /
-  workshops / hackathons. Public hubs have **no defense against
+- Public server with the token in a README: only for ephemeral demos /
+  workshops / hackathons. Public servers have **no defense against
   resource abuse** (no rate limits, quotas, or per-user eviction);
   expect them to be used as relays for things you don't want to
   host. Add a reverse-proxy rate limit at minimum, and prefer a
@@ -235,18 +246,18 @@ like website passwords. They're **not** — and the design is
 deliberate, not a leak.
 
 ```
-┌─ Client (your laptop / phone / agent box) ──────────────────────┐
+┌─ Client device (your laptop / phone / client box) ──────────────┐
 │                                                                 │
 │   CLI:    ~/.tmuxd/cli/credentials.json   (plaintext, mode 0600)│
 │   Web:    localStorage[tmuxd:userToken]    (plaintext)          │
-│   Agent:  TMUXD_USER_TOKEN env var         (plaintext)          │
+│   Client: TMUXD_USER_TOKEN env var         (plaintext)          │
 │                                                                 │
 └─────────────────────────┬───────────────────────────────────────┘
                           │
                           │  HTTP body / WS query string (plaintext)
                           │  ←─ TLS encrypts this on the wire
                           ▼
-┌─ Hub ───────────────────────────────────────────────────────────┐
+┌─ Server ────────────────────────────────────────────────────────┐
 │                                                                 │
 │   Receives raw userToken                                        │
 │       ↓                                                         │
@@ -254,7 +265,7 @@ deliberate, not a leak.
 │       ↓                                                         │
 │   JWT / registry / ws-ticket all carry only the hashed namespace│
 │       ↓                                                         │
-│   Raw userToken goes out of scope; hub NEVER persists it        │
+│   Raw userToken goes out of scope; server NEVER persists it     │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -283,10 +294,11 @@ passwords:
   Slack, never committed to git, OS-level disk encryption ideally.
 - Use HTTPS in any non-loopback deployment. The CLI prints a stderr
   warning when `--hub http://...` points at a non-loopback host.
-- A compromised client = identity loss for that user. A compromised
-  hub does NOT one-shot leak every user's token, because the hub
-  doesn't have them — at most an attacker reads the live JWT list
-  (which carries namespaces, not raw tokens) until JWTs rotate.
+- A compromised client device = identity loss for that user. A
+  compromised server does NOT one-shot leak every user's token,
+  because the server doesn't have them — at most an attacker reads
+  the live JWT list (which carries namespaces, not raw tokens) until
+  JWTs rotate.
 
 ---
 
@@ -295,29 +307,29 @@ passwords:
 | Variable | A | B | C |
 |---|---|---|---|
 | `TMUXD_SERVER_TOKEN` | ✅ required | ✅ required | ✅ required |
-| `TMUXD_HUB_ONLY` | unset | unset | `1` |
+| `TMUXD_RELAY` | unset | unset | `1` |
 | `HOST` | `127.0.0.1` | `0.0.0.0` | `0.0.0.0` |
 | `PORT` | `7681` | `7681` | `7681` |
-| `TMUXD_USER_TOKEN` | **never on the hub** — lives on each user's client | | |
+| `TMUXD_USER_TOKEN` | **never on the server** — lives on each user's client | | |
 
 ---
 
-## Agent-side `.env` (any mode that runs agents)
+## Client-side `.env` (any mode that runs clients)
 
-Use `.env.agent.example` as the template. Minimum four values:
+Use `.env.client.example` as the template. Minimum four values:
 
 ```bash
-TMUXD_HUB_URL=https://hub.example.com
-TMUXD_SERVER_TOKEN=<same as hub>
+TMUXD_URL=https://tmuxd.example.com
+TMUXD_SERVER_TOKEN=<same as server>
 TMUXD_USER_TOKEN=<your personal token>
 TMUXD_HOST_ID=laptop
 ```
 
-The agent does **not** read `TMUXD_HUB_ONLY`, `HOST`, `PORT`,
+The client does **not** read `TMUXD_RELAY`, `HOST`, `PORT`,
 `JWT_SECRET`, `TMUXD_HOME`, or `TMUXD_AUDIT_DISABLE` — those are
-hub-side. The agent makes a single outbound WebSocket to
-`/agent/connect` and stays connected.
+server-side. The client makes a single outbound WebSocket to
+`/client/connect` and stays connected.
 
-See `docs/hub-mode.md` for the full operations cookbook (audit
+See `docs/relay-deployment.md` for the full operations cookbook (audit
 events, reconnect lifecycle, same-hostId-across-namespaces
 behavior, troubleshooting).

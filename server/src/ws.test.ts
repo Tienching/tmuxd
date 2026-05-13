@@ -45,11 +45,11 @@ function fakeRequest(url: string): { req: any; sock: Duplex; written: string[]; 
     return { req, sock, written, destroyed: () => isDestroyed }
 }
 
-interface FakeAgentRegistry {
+interface FakeClientRegistry {
     hasHost(ns: string, hostId: string): boolean
 }
 
-function makeRegistry(map: Record<string, string[]>): FakeAgentRegistry {
+function makeRegistry(map: Record<string, string[]>): FakeClientRegistry {
     return {
         hasHost: (ns, hostId) => (map[ns] ?? []).includes(hostId)
     }
@@ -65,7 +65,7 @@ describe('ws.tryHandleUpgrade — namespace gating', { concurrency: 1 }, () => {
                 `/ws/bob-desktop/main?token=${encodeURIComponent(aliceToken)}`
             )
             const handled = await tryHandleUpgrade(wss, TEST_SECRET, req, sock, Buffer.alloc(0), {
-                agentRegistry: registry as any
+                clientRegistry: registry as any
             })
             assert.equal(handled, true, 'tryHandleUpgrade should claim the request')
             const wrote = written.join('')
@@ -81,7 +81,7 @@ describe('ws.tryHandleUpgrade — namespace gating', { concurrency: 1 }, () => {
             const registry = makeRegistry({ [NS_ALICE]: ['alice-laptop'] })
             const { req, sock, written } = fakeRequest('/ws/alice-laptop/main?token=garbage')
             const handled = await tryHandleUpgrade(wss, TEST_SECRET, req, sock, Buffer.alloc(0), {
-                agentRegistry: registry as any
+                clientRegistry: registry as any
             })
             assert.equal(handled, true)
             const wrote = written.join('')
@@ -112,7 +112,7 @@ describe('ws.tryHandleUpgrade — namespace gating', { concurrency: 1 }, () => {
                 `/ws/bob-desktop/main?ticket=${encodeURIComponent(ticket)}`
             )
             const handled = await tryHandleUpgrade(wss, TEST_SECRET, req, sock, Buffer.alloc(0), {
-                agentRegistry: registry as any
+                clientRegistry: registry as any
             })
             assert.equal(handled, true)
             const wrote = written.join('')
@@ -129,7 +129,7 @@ describe('ws.tryHandleUpgrade — namespace gating', { concurrency: 1 }, () => {
             const registry = makeRegistry({ [NS_ALICE]: ['alice-laptop'] })
             const { req, sock, written } = fakeRequest('/ws/alice-laptop/main')
             const handled = await tryHandleUpgrade(wss, TEST_SECRET, req, sock, Buffer.alloc(0), {
-                agentRegistry: registry as any
+                clientRegistry: registry as any
             })
             assert.equal(handled, true)
             const wrote = written.join('')
@@ -145,7 +145,7 @@ describe('ws.tryHandleUpgrade — namespace gating', { concurrency: 1 }, () => {
             const registry = makeRegistry({ [NS_ALICE]: ['alice-laptop'] })
             const { req, sock } = fakeRequest('/api/something/else')
             const handled = await tryHandleUpgrade(wss, TEST_SECRET, req, sock, Buffer.alloc(0), {
-                agentRegistry: registry as any
+                clientRegistry: registry as any
             })
             assert.equal(handled, false, 'tryHandleUpgrade should not claim non-/ws paths')
         } finally {

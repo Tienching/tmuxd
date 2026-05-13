@@ -1,66 +1,66 @@
-# Hub mode
+# Relay deployment
 
-This document describes how to deploy tmuxd as a **shared, multi-user hub**
-where every user gets their own namespace without operator-side
+This document describes how to deploy tmuxd as a **shared, multi-user
+relay** where every user gets their own namespace without operator-side
 configuration. If you only want a single-user local web UI for `tmux`,
 ignore this file and follow the README quick start.
 
 Companion docs:
 - `docs/deployment-modes.md` — picking between the three shapes
-  (single-user, hub+agents mixed, hub-only multi-user) and how to
+  (single-user, server+clients mixed, relay multi-user) and how to
   distribute the server token within the chosen shape
 - `docs/identity-model.md` — trust-model rationale: server token vs
   user token, why hashing, threat model
 
-This file is the operations cookbook for the hub-only multi-user shape
+This file is the operations cookbook for the relay multi-user shape
 (Mode C in deployment-modes.md). Read either of the two above first.
 
 ## Mental model
 
-In hub mode the shared tmuxd server is a **proxy/router only**. It hosts
-no end-user tmux sessions itself. Each user runs a tmuxd **agent** on
-their own client device pointed at the hub; the hub routes the user's
-browser/CLI to their own agent(s). The web UI shows hosts/sessions
+In relay mode the shared tmuxd server is a **proxy/router only**. It hosts
+no end-user tmux sessions itself. Each user runs a tmuxd **client** on
+their own device pointed at the relay; the relay routes the user's
+browser/CLI to their own client(s). The web UI shows hosts/sessions
 filtered to the logged-in user's namespace.
 
 ```
-Alice's laptop ─── agent ─┐
-                          ├──►  shared tmuxd hub  ◄──── Alice (server + alice user-token)
+Alice's laptop ── client ─┐
+                          ├──►  shared tmuxd relay  ◄──── Alice (server + alice user-token)
                           │
-Bob's desktop  ─── agent ─┘                       ◄──── Bob   (server + bob user-token)
+Bob's desktop  ── client ─┘                         ◄──── Bob   (server + bob user-token)
 ```
 
 Two tokens, no operator coordination per user:
 
-- **Server token** (`TMUXD_SERVER_TOKEN` on the hub) is the shared
-  trust-circle key. Every user — and every agent — needs it. Treat it
+- **Server token** (`TMUXD_SERVER_TOKEN` on the relay) is the shared
+  trust-circle key. Every user — and every client — needs it. Treat it
   like a team API key.
 - **User token** (`TMUXD_USER_TOKEN` on every client device) is each
-  person's personal identity. The hub computes
+  person's personal identity. The relay computes
   `namespace = sha256(userToken).slice(0, 16)` from it on every
-  request. The hub does **not** store user tokens.
+  request. The relay does **not** store user tokens.
 
 There is no static `TMUXD_AGENT_TOKENS=alice/laptop=…` registration
-anymore. Agents self-declare on connect; the hub trusts the math
+anymore. Clients self-declare on connect; the relay trusts the math
 (server token gates the door, user token decides whose room you walk
 into) and keys all in-memory state by the hashed namespace.
 
 ## Setup
 
-### 1. Configure the hub
+### 1. Configure the relay
 
 ```bash
-# .env on the hub box
+# .env on the relay box
 TMUXD_SERVER_TOKEN=replace-with-a-long-random-secret
-TMUXD_HUB_ONLY=1
+TMUXD_RELAY=1
 
 HOST=0.0.0.0
 PORT=7681
 ```
 
-That's the entire hub config. `TMUXD_HUB_ONLY=1` disables every
+That's the entire relay config. `TMUXD_RELAY=1` disables every
 local-tmux route; the sysadmin who maintains the box should SSH in
-directly to use tmux there. Start the hub:
+directly to use tmux there. Start the relay:
 
 ```bash
 npm install
@@ -69,7 +69,7 @@ npm start
 ```
 
 The first user-namespace appears the moment any user logs in or any
-agent connects — no further server changes.
+client connects — no further server changes.
 
 ### 2. Hand each user the server token
 
@@ -80,7 +80,7 @@ TMUXD_SERVER_TOKEN=<the-long-random-secret-from-step-1>
 Send it through whatever channel you use for team secrets (1Password,
 shared vault, wire-format you trust). This is the only thing the
 operator hands out — adding a user is "give them the server token,
-tell them where the hub lives."
+tell them where the relay lives."
 
 ### 3. Each user picks (or generates) a user token
 
@@ -89,14 +89,14 @@ On Alice's laptop:
 ```bash
 # Generate a fresh random user token (32 bytes, 64 hex chars).
 # tmuxd login --user-token-generate prints it to stderr — save it
-# to a password manager. Whoever has this token IS you on the hub.
+# to a password manager. Whoever has this token IS you on the relay.
 npm run tmuxd -- login \
-  --hub https://hub.example.com \
+  --hub https://tmuxd.example.com \
   --server-token "$TMUXD_SERVER_TOKEN" \
   --user-token-generate
 # → tmuxd: generated user token (save this somewhere safe — it IS your identity):
 # →   d1a2c8...0f9b
-# → logged in to https://hub.example.com as namespace=1c3f5b8a1e6d9f02; JWT TTL 12h0m
+# → logged in to https://tmuxd.example.com as namespace=1c3f5b8a1e6d9f02; JWT TTL 12h0m
 # → credentials saved to /home/alice/.tmuxd/cli/credentials.json (mode 0600)
 ```
 
@@ -108,52 +108,52 @@ under the same identity. (Phone, work laptop, home desktop, CI runner
 Bob does the same, gets a different token, lands in a different
 namespace.
 
-### 4. Start the agents
+### 4. Start the clients
 
-On Alice's laptop, the agent connects with the same two tokens:
+On Alice's laptop, the client connects with the same two tokens:
 
 ```bash
-TMUXD_HUB_URL=https://hub.example.com \
+TMUXD_URL=https://tmuxd.example.com \
 TMUXD_SERVER_TOKEN=<the-server-token> \
 TMUXD_USER_TOKEN=<alice's-user-token-from-step-3> \
 TMUXD_HOST_ID=laptop \
 TMUXD_HOST_NAME="Alice Laptop" \
-  npm run agent
+  npm run client
 ```
 
 Or with explicit flags:
 
 ```bash
-npm run agent -- \
-  --hub https://hub.example.com \
+npm run client -- \
+  --hub https://tmuxd.example.com \
   --server-token "$TMUXD_SERVER_TOKEN" \
   --user-token  "$TMUXD_USER_TOKEN" \
   --host-id laptop \
   --host-name "Alice Laptop"
 ```
 
-The agent lands in `namespace = sha256(TMUXD_USER_TOKEN).slice(0, 16)`,
+The client lands in `namespace = sha256(TMUXD_USER_TOKEN).slice(0, 16)`,
 which is the same namespace the CLI/web logs into using that user
 token. Bob's machine is symmetric: same server token, his own user
 token, his own choice of `TMUXD_HOST_ID`.
 
-If the server token is wrong, the hub closes the upgrade with HTTP 401
-and the agent exits with code 2 (FatalConfigError; the agent prints a
+If the server token is wrong, the relay closes the upgrade with HTTP 401
+and the client exits with code 2 (FatalConfigError; the client prints a
 hint pointing at `TMUXD_SERVER_TOKEN`).
 
 ### 5. Use it from any terminal
 
-Once Alice's agent is running, Alice can read and control her sessions
+Once Alice's client is running, Alice can read and control her sessions
 from any terminal — laptop, phone via SSH, CI runner — using the
 `tmuxd` CLI. The CLI mirrors `tmux`'s own command vocabulary; the only
 new concept is `-t <host>[:<session>[:<window>.<pane>]]`.
 
 ```bash
 # One-time login on Alice's terminal.
-npm run tmuxd -- login --hub https://hub.example.com \
+npm run tmuxd -- login --hub https://tmuxd.example.com \
   --server-token "$TMUXD_SERVER_TOKEN" \
   --user-token  "$TMUXD_USER_TOKEN"
-# → "logged in to https://hub.example.com as namespace=1c3f5b8a1e6d9f02; JWT TTL 12h0m"
+# → "logged in to https://tmuxd.example.com as namespace=1c3f5b8a1e6d9f02; JWT TTL 12h0m"
 # → "credentials saved to /home/alice/.tmuxd/cli/credentials.json (mode 0600)"
 
 # Daily use — same verbs as tmux, just with `-t <host>:` in front.
@@ -164,19 +164,19 @@ npm run tmuxd -- send-text     -t laptop:main:0.0 --enter '/status'
 npm run tmuxd -- whoami       # shows JWT TTL; <30m → "(re-login soon)"
 ```
 
-The CLI *only* sees Alice's hosts, even though every namespace's agents
-register against the same hub. This is the same `(namespace, hostId)`
+The CLI *only* sees Alice's hosts, even though every namespace's clients
+register against the same relay. This is the same `(namespace, hostId)`
 isolation the API enforces — driven through the same JWT(`ns`) +
 `requireNamespace` + `hasHost(ns, hostId)` chokepoints used by the web
 UI. A quick way to confirm isolation works on a new deploy:
 
 ```bash
 # As bob, log in with HIS user token and try to peek at alice's host: must 404.
-npm run tmuxd -- login --hub https://hub.example.com \
+npm run tmuxd -- login --hub https://tmuxd.example.com \
   --server-token "$TMUXD_SERVER_TOKEN" \
   --user-token  "$BOB_USER_TOKEN"
 npm run tmuxd -- list-sessions -t laptop
-# tmuxd: not_found (https://hub.example.com/api/hosts/laptop/sessions)
+# tmuxd: not_found (https://tmuxd.example.com/api/hosts/laptop/sessions)
 # (exit code 3)
 ```
 
@@ -191,7 +191,7 @@ version:
 - **Server token = trust circle entry.** Anyone with it can pose as any
   persona by inventing or guessing a user token. Don't share it
   carelessly.
-- **User token = identity.** Whoever has it IS you on the hub. Treat
+- **User token = identity.** Whoever has it IS you on the relay. Treat
   like an SSH private key.
 - **Namespace isolation is convention.** It keeps users out of each
   other's sessions, but only as long as user tokens stay secret. It is
@@ -205,19 +205,19 @@ version:
 ## Operational notes
 
 - **Same hostId, different namespaces are distinct records.** Alice's
-  `laptop` and Bob's `laptop` do not collide. The registry keys agents
+  `laptop` and Bob's `laptop` do not collide. The registry keys clients
   by `(namespace, hostId)` end to end.
-- **`local` is not a valid hostId for an agent.** The hub rejects
-  agent hellos that try to claim it.
+- **`local` is not a valid hostId for a client.** The relay rejects
+  client hellos that try to claim it.
 - **Cross-namespace clipboard-image upload is not supported.** The
-  server saves uploads to its own filesystem; the agent's shell runs
+  relay saves uploads to its own filesystem; the client's shell runs
   on a different machine. The route returns
   `501 clipboard_image_remote_unsupported`.
 - **Duplicate hostId within one namespace is rejected at hello time.**
-  If Alice tries to start two agents both calling themselves `laptop`,
+  If Alice tries to start two clients both calling themselves `laptop`,
   the second one's WS closes with `1008 host_already_connected` and
-  the agent exits 2. Pick a different `--host-id` or stop the other
-  agent first.
+  the client exits 2. Pick a different `--host-id` or stop the other
+  client first.
 - **Web ticket consumption is one-shot.** A wrong-target probe still
   burns the ticket — an attacker who guesses a ticket but the wrong
   hostId/sessionName cannot retry.
@@ -231,10 +231,10 @@ prefixed with `[tmuxd:audit]`:
 [tmuxd:audit] {"ts":"2026-05-12T10:29:55.001Z","event":"login_success","namespace":"1c3f5b8a1e6d9f02","remoteAddr":"192.0.2.5"}
 [tmuxd:audit] {"ts":"2026-05-12T10:29:58.412Z","event":"login_failure","namespace":"","remoteAddr":"203.0.113.9","reason":"invalid_token"}
 [tmuxd:audit] {"ts":"2026-05-12T10:29:59.108Z","event":"auth_failure","namespace":"","remoteAddr":"203.0.113.9","reason":"invalid_jwt"}
-[tmuxd:audit] {"ts":"2026-05-12T10:30:14.012Z","event":"agent_register","namespace":"1c3f5b8a1e6d9f02","hostId":"laptop","name":"Alice Laptop","remoteAddr":"198.51.100.42"}
-[tmuxd:audit] {"ts":"2026-05-12T10:30:14.180Z","event":"agent_rejected","namespace":"","hostId":"laptop","name":"Eve Disguised","remoteAddr":"203.0.113.9","reason":"invalid_hello"}
+[tmuxd:audit] {"ts":"2026-05-12T10:30:14.012Z","event":"client_register","namespace":"1c3f5b8a1e6d9f02","hostId":"laptop","name":"Alice Laptop","remoteAddr":"198.51.100.42"}
+[tmuxd:audit] {"ts":"2026-05-12T10:30:14.180Z","event":"client_rejected","namespace":"","hostId":"laptop","name":"Eve Disguised","remoteAddr":"203.0.113.9","reason":"invalid_hello"}
 [tmuxd:audit] {"ts":"2026-05-12T10:31:02.881Z","event":"ws_attach","namespace":"1c3f5b8a1e6d9f02","hostId":"laptop","sessionName":"main","remoteAddr":"192.0.2.5"}
-[tmuxd:audit] {"ts":"2026-05-12T11:02:33.117Z","event":"agent_disconnect","namespace":"1c3f5b8a1e6d9f02","hostId":"laptop","reason":"agent_disconnected"}
+[tmuxd:audit] {"ts":"2026-05-12T11:02:33.117Z","event":"client_disconnect","namespace":"1c3f5b8a1e6d9f02","hostId":"laptop","reason":"client_disconnected"}
 ```
 
 - **`login_success`** fires after JWT issuance. The `namespace` field
@@ -250,21 +250,21 @@ prefixed with `[tmuxd:audit]`:
   `invalid_jwt`. Distinct from `login_failure` (which is for
   `/api/auth` only). Use this to spot brute-forcing the API surface
   vs the login endpoint.
-- **`agent_register`** fires when an agent successfully completes
-  hello. Use it to confirm that the right agent came up under the
+- **`client_register`** fires when a client successfully completes
+  hello. Use it to confirm that the right client came up under the
   right namespace. Carries `remoteAddr` so you can see where the
-  agent connected from.
-- **`agent_rejected`** fires when an agent connected with a valid
+  client connected from.
+- **`client_rejected`** fires when a client connected with a valid
   server token but its hello frame was refused. `reason` is one of
   `missing_hello`, `invalid_hello`, `not_authenticated`,
   `host_already_connected`, or `invalid_host_id`. Carries
-  `remoteAddr` of the agent process. (Wrong-server-token rejections
+  `remoteAddr` of the client process. (Wrong-server-token rejections
   happen at the upgrade layer and never reach this audit channel —
   they show up as 401 in the access log of the front proxy.)
-- **`agent_disconnect`** pairs with `agent_register`. `reason`
-  carries one of `agent_disconnected` (clean WS close from the
-  agent), `agent_error` (transport error), `agent_timeout` (the hub
-  stopped seeing heartbeats), or `server_shutdown`.
+- **`client_disconnect`** pairs with `client_register`. `reason`
+  carries one of `client_disconnected` (clean WS close from the
+  client), `client_error` (transport error), `client_timeout` (the
+  relay stopped seeing heartbeats), or `server_shutdown`.
 - **`ws_attach`** fires when the WS upgrade gate accepts an attach
   request. Use it to answer "who attached to my session at 3am" —
   the log line carries namespace + remote IP + sessionName.
@@ -275,7 +275,7 @@ Set `TMUXD_AUDIT_DISABLE=1` to silence the log (e.g. in tests).
 
 Single-user is the no-multi-user-coordination special case. Set
 `TMUXD_SERVER_TOKEN` and a fixed `TMUXD_USER_TOKEN`, do not set
-`TMUXD_HUB_ONLY`. The agent (if any) connects with the same two
+`TMUXD_RELAY`. The client (if any) connects with the same two
 tokens. The web UI / CLI logs in with the same two tokens. There's
 exactly one namespace because there's only one user token in play.
 

@@ -11,7 +11,7 @@ import {
 /**
  * `localHostEnabled()` is the gate that turns hub-only mode into actual
  * 403s in `routes/sessions.ts`. It defaults to true (legacy / single-user
- * mode) and is flipped to false at startup when TMUXD_HUB_ONLY=1. The
+ * mode) and is flipped to false at startup when TMUXD_RELAY=1. The
  * toggle is module-level state, so we save and restore it around each
  * test to avoid leaking into siblings that share the same import.
  */

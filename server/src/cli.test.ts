@@ -6,7 +6,7 @@ import { warnInsecureHubScheme } from './cli.ts'
  * Capture process.stderr.write for the duration of fn(), then restore.
  * Returns whatever bytes were written. We can't easily mock fetch from
  * here without importing the whole CLI machinery, so this test focuses
- * on the surgical decision: which hubUrl shapes get warned about.
+ * on the surgical decision: which tmuxdUrl shapes get warned about.
  */
 async function captureStderr(fn: () => void | Promise<void>): Promise<string> {
     const chunks: string[] = []

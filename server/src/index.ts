@@ -10,7 +10,7 @@ import { createSessionsRoutes } from './routes/sessions.js'
 import { createHealthRoutes } from './routes/health.js'
 import { createWsServer, tryHandleUpgrade } from './ws.js'
 import { setLocalHostEnabled } from './hosts.js'
-import { AgentRegistry } from './agentRegistry.js'
+import { ClientRegistry } from './clientRegistry.js'
 import { TmuxActionStore } from './actions.js'
 
 function resolveWebDist(): string | null {
@@ -56,7 +56,7 @@ async function main() {
             'identified by their personal TMUXD_USER_TOKEN. See docs/identity-model.md.'
         )
     }
-    const agentRegistry = new AgentRegistry(config.serverToken)
+    const clientRegistry = new ClientRegistry(config.serverToken)
     const actionStore = TmuxActionStore.inDataDir(config.dataDir)
 
     const app = new Hono()
@@ -81,7 +81,7 @@ async function main() {
             jwtTtlSeconds: parseTestTtl(process.env.TMUXD_JWT_TTL_SECONDS_FOR_TEST)
         })
     )
-    app.route('/api', createSessionsRoutes(config.jwtSecret, agentRegistry, actionStore))
+    app.route('/api', createSessionsRoutes(config.jwtSecret, clientRegistry, actionStore))
 
     const webDist = resolveWebDist()
     if (webDist) {
@@ -122,12 +122,12 @@ async function main() {
         }
     )
 
-    const wss = createWsServer({ jwtSecret: config.jwtSecret, agentRegistry })
+    const wss = createWsServer({ jwtSecret: config.jwtSecret, clientRegistry })
     server.on('upgrade', async (request, socket, head) => {
         try {
-            const handledAgent = await agentRegistry.tryHandleUpgrade(request, socket, head)
+            const handledAgent = await clientRegistry.tryHandleUpgrade(request, socket, head)
             if (handledAgent) return
-            const handled = await tryHandleUpgrade(wss, config.jwtSecret, request, socket, head, { agentRegistry })
+            const handled = await tryHandleUpgrade(wss, config.jwtSecret, request, socket, head, { clientRegistry })
             if (!handled) {
                 socket.destroy()
             }
@@ -147,7 +147,7 @@ async function main() {
             }
         }
         wss.close()
-        agentRegistry.close()
+        clientRegistry.close()
         server.close(() => process.exit(0))
         // Safety net: if sockets linger, force-exit after 3s.
         setTimeout(() => process.exit(0), 3000).unref()

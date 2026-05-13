@@ -1,5 +1,22 @@
 # tmuxd Hub / Agent Design
 
+> **Status: superseded.** This was the original design for the multi-host
+> feature. The vocabulary has since been retired:
+>
+> - "hub" → "server" (the box running `npm start`)
+> - "hub-only" → "relay" (a server with `TMUXD_RELAY=1`)
+> - "agent" → "client" (the outbound process exposing local tmux)
+>
+> The wire path `/agent/connect` was renamed to `/client/connect`,
+> audit events `agent_*` are now `client_*`, the npm script `npm run
+> agent` is now `npm run client`, and the env template `.env.agent.example`
+> is now `.env.client.example`.
+>
+> See the current docs: `docs/deployment-modes.md`,
+> `docs/relay-deployment.md`, `docs/identity-model.md`. The structural
+> argument and the "outbound WebSocket from the worker box" decision
+> below are still accurate; only the names changed.
+
 Status: implemented v1
 
 Branch: `feature/hub-agent-design`
@@ -212,7 +229,7 @@ For backward compatibility, missing `hostId` means `local`.
 Agents connect to the hub over a persistent WebSocket:
 
 ```text
-GET /agent/connect
+GET /client/connect
 Authorization: Bearer <agent-token>
 ```
 
@@ -396,10 +413,10 @@ Implemented as `AgentRegistry` plus host-aware local routes. Current local alias
 
 Implemented:
 
-- `/agent/connect` WebSocket endpoint.
+- `/client/connect` WebSocket endpoint.
 - Agent bearer-token validation. Prefer `TMUXD_AGENT_TOKENS=hostId=token,...` to bind each token to one stable host ID; `TMUXD_AGENT_TOKEN` remains as a single shared-token compatibility mode.
 - `list_sessions`, `create_session`, `kill_session`, and `capture_session` request/response frames.
-- `server/src/agent.ts` outbound Node agent entry point.
+- `server/src/client.ts` outbound Node agent entry point.
 
 ### Phase 4, remote terminal streaming
 
@@ -415,7 +432,7 @@ Implemented:
 
 ```bash
 npm start
-npm run agent -- --hub http://hub.example:7681 --token <token> --id workstation --name Workstation
+npm run client -- --hub http://hub.example:7681 --token <token> --id workstation --name Workstation
 ```
 
 The README documents hub setup, agent setup, and security notes.
@@ -501,16 +518,16 @@ This branch now includes the complete v1 hub/agent path:
 
 - `local` host metadata through `GET /api/hosts`.
 - Host-aware APIs under `/api/hosts/:hostId/sessions`.
-- Agent auth and outbound connection at `/agent/connect`.
+- Agent auth and outbound connection at `/client/connect`.
 - Remote list/create/kill/capture through the agent protocol.
 - Remote terminal attach through `/ws/:hostId/:sessionName`.
 - Workspace panes persist `{ hostId, sessionName }` targets and migrate old layouts.
 - Home page, desktop sidebar, mobile picker, and split chooser group sessions by host.
-- `npm run agent` starts the outbound agent.
+- `npm run client` starts the outbound agent.
 - E2E coverage starts a hub plus agent and validates remote create/list/capture/delete and WebSocket input.
 
 Known v1 limits:
 
 - One shared agent token is configured by environment variable; there is no web UI token manager yet.
 - Offline agents are removed from the current host list instead of retained with historical last-seen state.
-- There is no packaged `tmuxd hub` CLI yet; `npm start` is the hub/server and `npm run agent` is the agent.
+- There is no packaged `tmuxd hub` CLI yet; `npm start` is the hub/server and `npm run client` is the agent.

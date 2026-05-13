@@ -26,7 +26,7 @@ describe('audit', () => {
             return true
         }
         try {
-            audit.logAudit({ event: 'agent_register', namespace: 'alice', hostId: 'laptop', name: 'Alice Laptop' })
+            audit.logAudit({ event: 'client_register', namespace: 'alice', hostId: 'laptop', name: 'Alice Laptop' })
         } finally {
             ;(process.stderr as any).write = origWrite
         }
@@ -35,7 +35,7 @@ describe('audit', () => {
         assert.ok(line.startsWith('[tmuxd:audit] '), 'audit line should be prefixed')
         const json = line.slice('[tmuxd:audit] '.length).trim()
         const parsed = JSON.parse(json) as Record<string, unknown>
-        assert.equal(parsed.event, 'agent_register')
+        assert.equal(parsed.event, 'client_register')
         assert.equal(parsed.namespace, 'alice')
         assert.equal(parsed.hostId, 'laptop')
         assert.equal(parsed.name, 'Alice Laptop')
@@ -81,7 +81,7 @@ describe('audit', () => {
         }
     })
 
-    it('serializes login_success / login_failure / agent_disconnect with their fields', async () => {
+    it('serializes login_success / login_failure / client_disconnect with their fields', async () => {
         const audit = await importAudit(false)
         const lines: string[] = []
         const origWrite = process.stderr.write.bind(process.stderr)
@@ -102,10 +102,10 @@ describe('audit', () => {
                 reason: 'token_mismatch'
             })
             audit.logAudit({
-                event: 'agent_disconnect',
+                event: 'client_disconnect',
                 namespace: 'alice',
                 hostId: 'laptop',
-                reason: 'agent_error'
+                reason: 'client_error'
             })
         } finally {
             ;(process.stderr as any).write = origWrite
@@ -118,8 +118,8 @@ describe('audit', () => {
         assert.equal(parsed[1].event, 'login_failure')
         assert.equal(parsed[1].reason, 'token_mismatch')
         // login_failure with empty namespace is allowed (unparseable token).
-        assert.equal(parsed[2].event, 'agent_disconnect')
-        assert.equal(parsed[2].reason, 'agent_error')
+        assert.equal(parsed[2].event, 'client_disconnect')
+        assert.equal(parsed[2].reason, 'client_error')
         assert.equal(parsed[2].hostId, 'laptop')
     })
 })

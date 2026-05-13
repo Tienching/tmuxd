@@ -39,7 +39,7 @@ import {
     validateSessionTargetName
 } from '../tmux.js'
 import { issueWsTicket } from '../wsTickets.js'
-import { AgentError, type AgentRegistry } from '../agentRegistry.js'
+import { ClientError, type ClientRegistry } from '../clientRegistry.js'
 import { ActionStoreError, type TmuxActionStore } from '../actions.js'
 import { markPaneActivityRead, trackPaneActivity } from '../paneActivity.js'
 import { classifyPaneStatus, findPaneForTarget } from '../paneStatus.js'
@@ -136,7 +136,7 @@ const CLIPBOARD_IMAGE_EXTENSIONS: Record<string, string> = {
     'image/tiff': '.tiff'
 }
 
-export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: AgentRegistry | undefined, actionStore: TmuxActionStore): Hono {
+export function createSessionsRoutes(jwtSecret: Uint8Array, clientRegistry: ClientRegistry | undefined, actionStore: TmuxActionStore): Hono {
     const app = new Hono()
     app.use('*', bearerAuth(jwtSecret))
 
@@ -156,13 +156,13 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     app.get('/hosts', (c) => {
         const ns = requireNamespace(c)
         const local = localHostEnabled() ? [getLocalHost()] : []
-        return c.json({ hosts: [...local, ...(agentRegistry?.listHosts(ns) ?? [])] })
+        return c.json({ hosts: [...local, ...(clientRegistry?.listHosts(ns) ?? [])] })
     })
 
-    app.get('/agent/snapshot', async (c) => {
+    app.get('/client/snapshot', async (c) => {
         const query = snapshotQuerySchema.safeParse(readCaptureQuery(c, ['capture', 'captureLimit']))
         if (!query.success) return c.json({ error: 'invalid_query' }, 400)
-        return c.json(await buildAgentSnapshot(agentRegistry, requireNamespace(c), query.data))
+        return c.json(await buildClientSnapshot(clientRegistry, requireNamespace(c), query.data))
     })
 
     app.get('/sessions', async (c) => {
@@ -179,11 +179,11 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
         const hostId = c.req.param('hostId')
         const ns = requireNamespace(c)
         if (!isLocalHost(hostId)) {
-            if (!agentRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
+            if (!clientRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
             try {
-                return c.json({ sessions: await agentRegistry.listSessions(ns, hostId) })
+                return c.json({ sessions: await clientRegistry.listSessions(ns, hostId) })
             } catch (err) {
-                return agentRouteError(c, err)
+                return clientRouteError(c, err)
             }
         }
         if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
@@ -218,12 +218,12 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
         const parsed = createSessionSchema.safeParse(body)
         if (!parsed.success) return c.json({ error: 'invalid_body' }, 400)
         if (!isLocalHost(hostId)) {
-            if (!agentRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
+            if (!clientRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
             try {
-                await agentRegistry.createSession(ns, hostId, parsed.data.name)
+                await clientRegistry.createSession(ns, hostId, parsed.data.name)
                 return c.json({ ok: true }, 201)
             } catch (err) {
-                return agentRouteError(c, err)
+                return clientRouteError(c, err)
             }
         }
         if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
@@ -238,7 +238,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     })
 
     app.post('/ws-ticket', (c) => {
-        return issueTargetWsTicket(c, agentRegistry)
+        return issueTargetWsTicket(c, clientRegistry)
     })
 
     app.get('/actions', async (c) => {
@@ -299,7 +299,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     app.get('/hosts/:hostId/panes', async (c) => {
         const hostId = c.req.param('hostId')
         const session = c.req.query('session') || undefined
-        const result = await listPanesForHost(requireNamespace(c), hostId, session, agentRegistry)
+        const result = await listPanesForHost(requireNamespace(c), hostId, session, clientRegistry)
         if ('response' in result) return result.response
         return c.json({ panes: result.panes })
     })
@@ -307,7 +307,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     app.get('/hosts/:hostId/sessions/:name/panes', async (c) => {
         const hostId = c.req.param('hostId')
         const name = c.req.param('name')
-        const result = await listPanesForHost(requireNamespace(c), hostId, name, agentRegistry)
+        const result = await listPanesForHost(requireNamespace(c), hostId, name, clientRegistry)
         if ('response' in result) return result.response
         return c.json({ panes: result.panes })
     })
@@ -319,11 +319,11 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
         const query = paneCaptureQuerySchema.safeParse(readCaptureQuery(c))
         if (!query.success) return c.json({ error: 'invalid_query' }, 400)
         if (!isLocalHost(hostId)) {
-            if (!agentRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
+            if (!clientRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
             try {
-                return c.json(await agentRegistry.capturePane(ns, hostId, target, query.data.lines, query.data.maxBytes))
+                return c.json(await clientRegistry.capturePane(ns, hostId, target, query.data.lines, query.data.maxBytes))
             } catch (err) {
-                return agentRouteError(c, err)
+                return clientRouteError(c, err)
             }
         }
         if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
@@ -343,14 +343,14 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
         const query = paneCaptureQuerySchema.safeParse(readCaptureQuery(c))
         if (!query.success) return c.json({ error: 'invalid_query' }, 400)
         if (!isLocalHost(hostId)) {
-            if (!agentRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
+            if (!clientRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
             try {
-                const panes = await agentRegistry.listPanes(ns, hostId)
-                const capture = await agentRegistry.capturePane(ns, hostId, target, query.data.lines, query.data.maxBytes)
+                const panes = await clientRegistry.listPanes(ns, hostId)
+                const capture = await clientRegistry.capturePane(ns, hostId, target, query.data.lines, query.data.maxBytes)
                 const pane = findPaneForTarget(panes, target)
                 return c.json(classifyPaneStatus({ target, pane, capture, activity: trackPaneActivity({ hostId, target, pane, capture }) }))
             } catch (err) {
-                return agentRouteError(c, err)
+                return clientRouteError(c, err)
             }
         }
         if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
@@ -369,7 +369,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
     app.post('/hosts/:hostId/panes/:target/activity/read', async (c) => {
         const hostId = c.req.param('hostId')
         const target = c.req.param('target')
-        const result = await markPaneReadForHost(requireNamespace(c), hostId, target, agentRegistry)
+        const result = await markPaneReadForHost(requireNamespace(c), hostId, target, clientRegistry)
         if ('response' in result) return result.response
         return c.json({ ok: true, activity: result.activity })
     })
@@ -380,7 +380,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
         if (!parsed.success) return c.json({ error: 'invalid_body' }, 400)
         const hostId = c.req.param('hostId')
         const target = c.req.param('target')
-        const result = await sendInputToHost(requireNamespace(c), hostId, target, parsed.data, agentRegistry)
+        const result = await sendInputToHost(requireNamespace(c), hostId, target, parsed.data, clientRegistry)
         if ('response' in result) return result.response
         return c.json({ ok: true })
     })
@@ -391,7 +391,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
         if (!parsed.success) return c.json({ error: 'invalid_body' }, 400)
         const hostId = c.req.param('hostId')
         const target = c.req.param('target')
-        const result = await sendKeysToHost(requireNamespace(c), hostId, target, parsed.data.keys, agentRegistry)
+        const result = await sendKeysToHost(requireNamespace(c), hostId, target, parsed.data.keys, clientRegistry)
         if ('response' in result) return result.response
         return c.json({ ok: true })
     })
@@ -406,7 +406,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
         const action = await actionStore.get(parsedActionId.data)
         if (!action) return c.json({ error: 'action_not_found' }, 404)
         const startedAt = Date.now()
-        const result = await runActionOnHost(ns, hostId, target, action, agentRegistry)
+        const result = await runActionOnHost(ns, hostId, target, action, clientRegistry)
         if ('response' in result) {
             await recordActionRun(actionStore, action, hostId, target, false, startedAt, `http_${result.response.status}`)
             return result.response
@@ -453,7 +453,7 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
             // writes to the HUB's filesystem, and the agent's shell runs on
             // a different machine, so the path we'd paste wouldn't exist
             // there. Refuse explicitly rather than silently succeeding.
-            if (!agentRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
+            if (!clientRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
             return c.json({ error: 'clipboard_image_remote_unsupported' }, 501)
         }
         if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
@@ -482,11 +482,11 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
         const name = c.req.param('name')
         const ns = requireNamespace(c)
         if (!isLocalHost(hostId)) {
-            if (!agentRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
+            if (!clientRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
             try {
-                return c.json(await agentRegistry.captureSession(ns, hostId, name))
+                return c.json(await clientRegistry.captureSession(ns, hostId, name))
             } catch (err) {
-                return agentRouteError(c, err)
+                return clientRouteError(c, err)
             }
         }
         if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
@@ -507,12 +507,12 @@ export function createSessionsRoutes(jwtSecret: Uint8Array, agentRegistry: Agent
         const name = c.req.param('name')
         const ns = requireNamespace(c)
         if (!isLocalHost(hostId)) {
-            if (!agentRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
+            if (!clientRegistry?.hasHost(ns, hostId)) return c.json({ error: 'host_not_found' }, 404)
             try {
-                await agentRegistry.killSession(ns, hostId, name)
+                await clientRegistry.killSession(ns, hostId, name)
                 return c.body(null, 204)
             } catch (err) {
-                return agentRouteError(c, err)
+                return clientRouteError(c, err)
             }
         }
         if (!localHostEnabled()) return c.json({ error: 'local_host_disabled' }, 403)
@@ -572,14 +572,14 @@ function readOptionalInt(value: string | undefined, min: number, max: number): n
     return parsed
 }
 
-async function buildAgentSnapshot(
-    agentRegistry: AgentRegistry | undefined,
+async function buildClientSnapshot(
+    clientRegistry: ClientRegistry | undefined,
     namespace: string,
     query: { lines?: number; maxBytes?: number; capture?: string; captureLimit?: number }
 ): Promise<TmuxSnapshot> {
     const generatedAt = Date.now()
     const local = getLocalHost()
-    const remoteHosts = agentRegistry?.listHosts(namespace) ?? []
+    const remoteHosts = clientRegistry?.listHosts(namespace) ?? []
     const localIncluded = localHostEnabled()
     const hosts = localIncluded ? [local, ...remoteHosts] : [...remoteHosts]
     const sessions: ReturnType<typeof toTargetSessions> = []
@@ -602,12 +602,12 @@ async function buildAgentSnapshot(
 
     for (const host of remoteHosts) {
         try {
-            sessions.push(...(await agentRegistry!.listSessions(namespace, host.id)))
+            sessions.push(...(await clientRegistry!.listSessions(namespace, host.id)))
         } catch (err) {
             errors.push(snapshotError(host.id, 'list_sessions', err))
         }
         try {
-            panes.push(...toTargetPanes(await agentRegistry!.listPanes(namespace, host.id), host.id, host.name))
+            panes.push(...toTargetPanes(await clientRegistry!.listPanes(namespace, host.id), host.id, host.name))
         } catch (err) {
             errors.push(snapshotError(host.id, 'list_panes', err))
         }
@@ -623,7 +623,7 @@ async function buildAgentSnapshot(
                 try {
                     const capture = isLocalHost(pane.hostId)
                         ? await capturePane(pane.target, { lines: query.lines, maxBytes: query.maxBytes })
-                        : await agentRegistry!.capturePane(namespace, pane.hostId, pane.target, query.lines, query.maxBytes)
+                        : await clientRegistry!.capturePane(namespace, pane.hostId, pane.target, query.lines, query.maxBytes)
                     return {
                         status: classifyPaneStatus({
                             target: pane.target,
@@ -708,7 +708,7 @@ function snapshotError(hostId: string, operation: string, err: unknown): TmuxSna
     return {
         hostId,
         operation,
-        error: err instanceof AgentError ? err.message : 'tmux_error',
+        error: err instanceof ClientError ? err.message : 'tmux_error',
         message
     }
 }
@@ -739,7 +739,7 @@ async function recordActionRun(
     }
 }
 
-async function issueTargetWsTicket(c: Context, agentRegistry?: AgentRegistry) {
+async function issueTargetWsTicket(c: Context, clientRegistry?: ClientRegistry) {
     const raw = await c.req.text().catch(() => '')
     let body: unknown = undefined
     if (raw.trim()) {
@@ -756,7 +756,7 @@ async function issueTargetWsTicket(c: Context, agentRegistry?: AgentRegistry) {
     if (isLocalHost(hostId) && !localHostEnabled()) {
         return c.json({ error: 'local_host_disabled' }, 403)
     }
-    if (!isLocalHost(hostId) && !agentRegistry?.hasHost(ns, hostId)) {
+    if (!isLocalHost(hostId) && !clientRegistry?.hasHost(ns, hostId)) {
         return c.json({ error: 'host_not_found' }, 404)
     }
     return c.json(
@@ -772,14 +772,14 @@ async function listPanesForHost(
     namespace: string,
     hostId: string,
     session: string | undefined,
-    agentRegistry?: AgentRegistry
+    clientRegistry?: ClientRegistry
 ): Promise<{ panes: ReturnType<typeof toTargetPanes> } | { response: Response }> {
     if (!isLocalHost(hostId)) {
-        if (!agentRegistry) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
-        const host = agentRegistry.listHosts(namespace).find((candidate) => candidate.id === hostId)
+        if (!clientRegistry) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
+        const host = clientRegistry.listHosts(namespace).find((candidate) => candidate.id === hostId)
         if (!host) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
         try {
-            const panes = await agentRegistry.listPanes(namespace, hostId, session)
+            const panes = await clientRegistry.listPanes(namespace, hostId, session)
             return { panes: toTargetPanes(panes, host.id, host.name) }
         } catch (err) {
             return { response: await agentErrorResponse(err) }
@@ -797,21 +797,21 @@ async function listPanesForHost(
     }
 }
 
-function agentRouteError(c: Context, err: unknown) {
+function clientRouteError(c: Context, err: unknown) {
     if (err instanceof ZodError) return c.json({ error: 'agent_protocol_mismatch' }, 502)
     const message = errMsg(err)
-    if (err instanceof AgentError) {
+    if (err instanceof ClientError) {
         if (message === 'host_not_found') return c.json({ error: 'host_not_found' }, 404)
         if (message === 'capability_not_supported') return c.json({ error: 'capability_not_supported' }, 405)
         if (/already exists/i.test(message)) return c.json({ error: 'session_exists' }, 409)
         if (/can't find|no such|not found/i.test(message)) return c.json({ error: 'session_not_found' }, 404)
         if (/invalid/i.test(message)) return c.json({ error: 'tmux_error', message }, 400)
-        if (/timeout/i.test(message)) return c.json({ error: 'agent_timeout' }, 504)
+        if (/timeout/i.test(message)) return c.json({ error: 'client_timeout' }, 504)
     }
     if (/already exists/i.test(message)) return c.json({ error: 'session_exists' }, 409)
     if (/can't find|no such|not found/i.test(message)) return c.json({ error: 'session_not_found' }, 404)
     if (/invalid/i.test(message)) return c.json({ error: 'tmux_error', message }, 400)
-    return c.json({ error: 'agent_error', message }, 502)
+    return c.json({ error: 'client_error', message }, 502)
 }
 
 function actionRouteError(c: Context, err: unknown) {
@@ -827,12 +827,12 @@ async function sendInputToHost(
     hostId: string,
     target: string,
     input: { text: string; enter?: boolean },
-    agentRegistry?: AgentRegistry
+    clientRegistry?: ClientRegistry
 ): Promise<{ ok: true } | { response: Response }> {
     if (!isLocalHost(hostId)) {
-        if (!agentRegistry?.hasHost(namespace, hostId)) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
+        if (!clientRegistry?.hasHost(namespace, hostId)) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
         try {
-            await agentRegistry.sendText(namespace, hostId, target, input.text, input.enter)
+            await clientRegistry.sendText(namespace, hostId, target, input.text, input.enter)
             return { ok: true }
         } catch (err) {
             return { response: await agentErrorResponse(err) }
@@ -852,12 +852,12 @@ async function sendKeysToHost(
     hostId: string,
     target: string,
     keys: string[],
-    agentRegistry?: AgentRegistry
+    clientRegistry?: ClientRegistry
 ): Promise<{ ok: true } | { response: Response }> {
     if (!isLocalHost(hostId)) {
-        if (!agentRegistry?.hasHost(namespace, hostId)) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
+        if (!clientRegistry?.hasHost(namespace, hostId)) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
         try {
-            await agentRegistry.sendKeys(namespace, hostId, target, keys)
+            await clientRegistry.sendKeys(namespace, hostId, target, keys)
             return { ok: true }
         } catch (err) {
             return { response: await agentErrorResponse(err) }
@@ -876,15 +876,15 @@ async function markPaneReadForHost(
     namespace: string,
     hostId: string,
     target: string,
-    agentRegistry?: AgentRegistry
+    clientRegistry?: ClientRegistry
 ): Promise<{ activity: ReturnType<typeof markPaneActivityRead> } | { response: Response }> {
     const readCaptureOptions = { lines: 120, maxBytes: 65_536 }
     if (!isLocalHost(hostId)) {
-        if (!agentRegistry?.hasHost(namespace, hostId)) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
+        if (!clientRegistry?.hasHost(namespace, hostId)) return { response: jsonResponse({ error: 'host_not_found' }, 404) }
         try {
-            const panes = await agentRegistry.listPanes(namespace, hostId)
+            const panes = await clientRegistry.listPanes(namespace, hostId)
             const pane = findPaneForTarget(panes, target)
-            const capture = await agentRegistry.capturePane(namespace, hostId, target, readCaptureOptions.lines, readCaptureOptions.maxBytes)
+            const capture = await clientRegistry.capturePane(namespace, hostId, target, readCaptureOptions.lines, readCaptureOptions.maxBytes)
             trackPaneActivity({ hostId, target, pane, capture })
             return { activity: markPaneActivityRead({ hostId, target, pane }) }
         } catch (err) {
@@ -911,26 +911,26 @@ async function runActionOnHost(
     hostId: string,
     target: string,
     action: TmuxAction,
-    agentRegistry?: AgentRegistry
+    clientRegistry?: ClientRegistry
 ): Promise<{ ok: true } | { response: Response }> {
     if (action.kind === 'send-keys') {
-        return sendKeysToHost(namespace, hostId, target, action.keys ?? [], agentRegistry)
+        return sendKeysToHost(namespace, hostId, target, action.keys ?? [], clientRegistry)
     }
-    return sendInputToHost(namespace, hostId, target, { text: action.payload ?? '', enter: action.enter }, agentRegistry)
+    return sendInputToHost(namespace, hostId, target, { text: action.payload ?? '', enter: action.enter }, clientRegistry)
 }
 
 async function agentErrorResponse(err: unknown): Promise<Response> {
     if (err instanceof ZodError) return jsonResponse({ error: 'agent_protocol_mismatch' }, 502)
     const message = errMsg(err)
-    if (err instanceof AgentError) {
+    if (err instanceof ClientError) {
         if (message === 'host_not_found') return jsonResponse({ error: 'host_not_found' }, 404)
         if (message === 'capability_not_supported') return jsonResponse({ error: 'capability_not_supported' }, 405)
         if (/can't find|no such|not found/i.test(message)) return jsonResponse({ error: 'session_not_found' }, 404)
         if (/invalid/i.test(message)) return jsonResponse({ error: 'tmux_error', message }, 400)
-        if (/timeout/i.test(message)) return jsonResponse({ error: 'agent_timeout' }, 504)
+        if (/timeout/i.test(message)) return jsonResponse({ error: 'client_timeout' }, 504)
     }
     if (/invalid/i.test(message)) return jsonResponse({ error: 'tmux_error', message }, 400)
-    return jsonResponse({ error: 'agent_error', message }, 502)
+    return jsonResponse({ error: 'client_error', message }, 502)
 }
 
 function jsonResponse(body: object, status: number): Response {

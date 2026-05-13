@@ -7,11 +7,11 @@ import { logAudit } from './audit.js'
 import { attachTmuxPty, type PtyBridge } from './ptyManager.js'
 import { consumeWsTicket } from './wsTickets.js'
 import { clientWsMessageSchema, LOCAL_HOST_ID, type ServerWsMessage } from '@tmuxd/shared'
-import type { AgentRegistry } from './agentRegistry.js'
+import type { ClientRegistry } from './clientRegistry.js'
 
 export interface WsDeps {
     jwtSecret: Uint8Array
-    agentRegistry?: AgentRegistry
+    clientRegistry?: ClientRegistry
 }
 
 const MAX_PAYLOAD = 64 * 1024 // 64KB cap on inbound WS frames
@@ -117,7 +117,7 @@ export function createWsServer(deps: WsDeps): WebSocketServer {
 
         async function startBridge() {
             try {
-                bridge = await attachTarget(context, deps.agentRegistry)
+                bridge = await attachTarget(context, deps.clientRegistry)
             } catch (err) {
                 sendJson(ws, { type: 'error', message: errMsg(err) })
                 try {
@@ -227,13 +227,13 @@ export function createWsServer(deps: WsDeps): WebSocketServer {
     return wss
 }
 
-async function attachTarget(context: BrowserWsContext, agentRegistry?: AgentRegistry): Promise<TerminalBridge> {
+async function attachTarget(context: BrowserWsContext, clientRegistry?: ClientRegistry): Promise<TerminalBridge> {
     if (isLocalHost(context.hostId)) {
         if (!localHostEnabled()) throw new Error('local_host_disabled')
         return wrapLocalBridge(attachTmuxPty(context.session, context.cols, context.rows))
     }
-    if (!agentRegistry) throw new Error('host_not_found')
-    const remote = await agentRegistry.attach(context.namespace, context.hostId, context.session, context.cols, context.rows)
+    if (!clientRegistry) throw new Error('host_not_found')
+    const remote = await clientRegistry.attach(context.namespace, context.hostId, context.session, context.cols, context.rows)
     return {
         session: remote.session,
         cols: remote.cols,
@@ -306,7 +306,7 @@ export async function tryHandleUpgrade(
     request: IncomingMessage,
     socket: Duplex,
     head: Buffer,
-    opts?: { allowedOrigins?: string[]; agentRegistry?: AgentRegistry }
+    opts?: { allowedOrigins?: string[]; clientRegistry?: ClientRegistry }
 ): Promise<boolean> {
     const urlStr = request.url || ''
     const url = new URL(urlStr, 'http://localhost')
@@ -352,7 +352,7 @@ export async function tryHandleUpgrade(
             socket.destroy()
             return true
         }
-    } else if (!opts?.agentRegistry?.hasHost(namespace, hostId)) {
+    } else if (!opts?.clientRegistry?.hasHost(namespace, hostId)) {
         socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n')
         socket.destroy()
         return true

@@ -63,7 +63,7 @@ import {
 const VERSION = '0.1.0'
 
 // ---------------------------------------------------------------------------
-// arg parsing — extends the simple style from server/src/agent.ts
+// arg parsing — extends the simple style from server/src/client.ts
 // ---------------------------------------------------------------------------
 
 interface ParsedArgs {
@@ -537,7 +537,7 @@ class NotFoundError extends Error {
 
 async function api<T>(cred: SavedCred, path: string, opts: ApiOptions<T> = {}): Promise<T> {
     const method = opts.method ?? 'GET'
-    const url = cred.hubUrl.replace(/\/+$/, '') + path
+    const url = cred.tmuxdUrl.replace(/\/+$/, '') + path
     const headers: Record<string, string> = {
         Authorization: `Bearer ${cred.jwt}`
     }
@@ -575,7 +575,7 @@ async function api<T>(cred: SavedCred, path: string, opts: ApiOptions<T> = {}): 
             : code)
         if (res.status === 401) {
             throw new AuthError(
-                `JWT rejected (${code}). Run \`tmuxd login --hub ${cred.hubUrl} --server-token ... --user-token ...\` again.`
+                `JWT rejected (${code}). Run \`tmuxd login --hub ${cred.tmuxdUrl} --server-token ... --user-token ...\` again.`
             )
         }
         if (res.status === 404 && opts.treat404AsNotFound) {
@@ -609,20 +609,20 @@ async function api<T>(cred: SavedCred, path: string, opts: ApiOptions<T> = {}): 
 // credential loading helper
 // ---------------------------------------------------------------------------
 
-async function requireCred(hubUrl?: string): Promise<SavedCred> {
-    const cred = await loadCredentials(hubUrl)
+async function requireCred(tmuxdUrl?: string): Promise<SavedCred> {
+    const cred = await loadCredentials(tmuxdUrl)
     if (!cred) {
         throw new AuthError(
-            hubUrl
-                ? `no credentials for ${hubUrl}. Run \`tmuxd login --hub ${hubUrl} --server-token ... --user-token ...\` first.`
+            tmuxdUrl
+                ? `no credentials for ${tmuxdUrl}. Run \`tmuxd login --hub ${tmuxdUrl} --server-token ... --user-token ...\` first.`
                 : `no credentials saved. Run \`tmuxd login --hub <url> --server-token ... --user-token ...\` first.`
         )
     }
     const now = Math.floor(Date.now() / 1000)
     if (cred.expiresAt <= now) {
         throw new AuthError(
-            `JWT for ${cred.hubUrl} expired ${now - cred.expiresAt}s ago. ` +
-                `Run \`tmuxd login --hub ${cred.hubUrl} --server-token ... --user-token ...\` to renew.`
+            `JWT for ${cred.tmuxdUrl} expired ${now - cred.expiresAt}s ago. ` +
+                `Run \`tmuxd login --hub ${cred.tmuxdUrl} --server-token ... --user-token ...\` to renew.`
         )
     }
     return cred
@@ -720,8 +720,8 @@ async function readSecretInput(
 }
 
 async function cmdLogin(args: ParsedArgs): Promise<number> {
-    const hubUrl = args.flags.hub?.replace(/\/+$/, '')
-    if (!hubUrl) {
+    const tmuxdUrl = args.flags.hub?.replace(/\/+$/, '')
+    if (!tmuxdUrl) {
         throw usageError('login requires --hub <url>')
     }
     const serverToken = await readSecretInput(
@@ -783,7 +783,7 @@ async function cmdLogin(args: ParsedArgs): Promise<number> {
                 `will be invisible. Save the token in a password manager, then on each\n` +
                 `subsequent device:\n` +
                 `\n` +
-                `    tmuxd login --hub ${hubUrl} --server-token ... \\\n` +
+                `    tmuxd login --hub ${tmuxdUrl} --server-token ... \\\n` +
                 `                --user-token <the value above>\n` +
                 `\n` +
                 `Or set TMUXD_USER_TOKEN=<value> in that machine's shell environment.\n`
@@ -809,8 +809,8 @@ async function cmdLogin(args: ParsedArgs): Promise<number> {
     // labs/internal-network deployments, but every operator should know
     // their JWT is sniffable on the path. Localhost stays silent because
     // the only attacker who can sniff loopback already owns the box.
-    warnInsecureHubScheme(hubUrl)
-    const url = hubUrl + '/api/auth'
+    warnInsecureHubScheme(tmuxdUrl)
+    const url = tmuxdUrl + '/api/auth'
     let res: Response
     try {
         res = await fetch(url, {
@@ -841,7 +841,7 @@ async function cmdLogin(args: ParsedArgs): Promise<number> {
         throw new ApiError(res.status, 'invalid_response', 'login response missing token / expiresAt / namespace')
     }
     await saveCredentials({
-        hubUrl,
+        tmuxdUrl,
         jwt: body.token,
         expiresAt: body.expiresAt,
         namespace: body.namespace,
@@ -853,7 +853,7 @@ async function cmdLogin(args: ParsedArgs): Promise<number> {
     })
     const ttl = body.expiresAt - Math.floor(Date.now() / 1000)
     process.stdout.write(
-        `logged in to ${hubUrl} as namespace=${body.namespace}; JWT TTL ${formatDuration(ttl)}\n` +
+        `logged in to ${tmuxdUrl} as namespace=${body.namespace}; JWT TTL ${formatDuration(ttl)}\n` +
             `credentials saved to ${credentialsPath()} (mode 0600)\n`
     )
     return 0
@@ -865,8 +865,8 @@ async function cmdLogout(args: ParsedArgs): Promise<number> {
         process.stdout.write('no credentials to clear\n')
         return 0
     }
-    await clearCredentials(cred.hubUrl)
-    process.stdout.write(`cleared credentials for ${cred.hubUrl}\n`)
+    await clearCredentials(cred.tmuxdUrl)
+    process.stdout.write(`cleared credentials for ${cred.tmuxdUrl}\n`)
     return 0
 }
 
@@ -886,7 +886,7 @@ async function cmdWhoami(args: ParsedArgs): Promise<number> {
     const ttl = cred.expiresAt - Math.floor(Date.now() / 1000)
     if (args.flags.json) {
         printJson({
-            hubUrl: cred.hubUrl,
+            tmuxdUrl: cred.tmuxdUrl,
             namespace: cred.namespace,
             expiresAt: cred.expiresAt,
             ttlSeconds: ttl,
@@ -895,7 +895,7 @@ async function cmdWhoami(args: ParsedArgs): Promise<number> {
         return 0
     }
     process.stdout.write(
-        `hub:        ${cred.hubUrl}\n` +
+        `hub:        ${cred.tmuxdUrl}\n` +
             `namespace:  ${cred.namespace}\n` +
             `JWT TTL:    ${formatDuration(ttl)}${ttl < 1800 ? ' (re-login soon)' : ''}\n` +
             `creds file: ${credentialsPath()}\n`
@@ -903,7 +903,7 @@ async function cmdWhoami(args: ParsedArgs): Promise<number> {
     // Expired JWT → still prints the diagnostic above but exits 2 so scripts
     // can detect the condition without parsing stdout.
     if (ttl <= 0) {
-        throw new AuthError(`JWT for ${cred.hubUrl} has expired. Run \`tmuxd login\` again.`)
+        throw new AuthError(`JWT for ${cred.tmuxdUrl} has expired. Run \`tmuxd login\` again.`)
     }
     return 0
 }
@@ -1205,7 +1205,7 @@ async function cmdSnapshot(args: ParsedArgs): Promise<number> {
     if (args.flags.lines) params.set('lines', args.flags.lines)
     if (args.flags['max-bytes']) params.set('maxBytes', args.flags['max-bytes'])
     const qs = params.toString()
-    const path = `/api/agent/snapshot${qs ? '?' + qs : ''}`
+    const path = `/api/client/snapshot${qs ? '?' + qs : ''}`
     const snap = await api<unknown>(cred, path)
     printJson(snap)
     return 0
@@ -1238,7 +1238,7 @@ async function cmdAttachSession(args: ParsedArgs): Promise<number> {
     // hosts and `/attach/<session>` for local. We always emit the
     // host-qualified form because the CLI reaches a hub whose `local`
     // (if any) is just one host among many.
-    const url = `${cred.hubUrl.replace(/\/+$/, '')}/attach/${encodeURIComponent(target.hostId)}/${encodeURIComponent(target.sessionName)}`
+    const url = `${cred.tmuxdUrl.replace(/\/+$/, '')}/attach/${encodeURIComponent(target.hostId)}/${encodeURIComponent(target.sessionName)}`
     if (args.flags.json) {
         printJson({ attachUrl: url, hostId: target.hostId, sessionName: target.sessionName })
         return 0
@@ -1273,11 +1273,11 @@ function requireTarget(args: ParsedArgs, _cmd: string, hint: string): ParsedTarg
  * Set TMUXD_INSECURE_HTTP=1 to silence the warning if the operator
  * has read this comment, accepted the risk, and wants quiet logs.
  */
-export function warnInsecureHubScheme(hubUrl: string): void {
+export function warnInsecureHubScheme(tmuxdUrl: string): void {
     if (process.env.TMUXD_INSECURE_HTTP === '1') return
     let parsed: URL
     try {
-        parsed = new URL(hubUrl)
+        parsed = new URL(tmuxdUrl)
     } catch {
         // Malformed URL — fetch will fail soon and surface a real error.
         return

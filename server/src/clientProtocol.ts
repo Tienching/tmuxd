@@ -13,7 +13,7 @@ const captureBytesSchema = z.number().int().min(1024).max(384 * 1024)
  * Agent hello frame.
  *
  * Namespace is **not** in the hello — it's derived by the hub from the
- * `userToken` query string at WS upgrade time (see `agentRegistry.ts`).
+ * `userToken` query string at WS upgrade time (see `clientRegistry.ts`).
  * The agent self-declares only the host-level metadata (id, name,
  * version, capabilities); the hub authoritatively assigns the namespace.
  *
@@ -21,7 +21,7 @@ const captureBytesSchema = z.number().int().min(1024).max(384 * 1024)
  * than the one its userToken hashes to, even if it crafts a custom
  * hello frame.
  */
-export const agentHelloSchema = z.object({
+export const clientHelloSchema = z.object({
     type: z.literal('hello'),
     id: hostIdSchema.optional(),
     name: z.string().min(1).max(64),
@@ -34,8 +34,8 @@ const agentResultSchema = z.union([
     z.object({ type: z.literal('result'), id: requestIdSchema, ok: z.literal(false), error: z.string().min(1).max(1024) })
 ])
 
-export const agentClientMessageSchema = z.union([
-    agentHelloSchema,
+export const clientToServerMessageSchema = z.union([
+    clientHelloSchema,
     agentResultSchema,
     z.object({ type: z.literal('stream_ready'), streamId: streamIdSchema, session: sessionTargetNameSchema, cols: z.number().int().min(1).max(1000), rows: z.number().int().min(1).max(1000) }),
     z.object({ type: z.literal('stream_data'), streamId: streamIdSchema, payload: base64Schema }),
@@ -44,10 +44,10 @@ export const agentClientMessageSchema = z.union([
     z.object({ type: z.literal('pong') })
 ])
 
-export type AgentHelloMessage = z.infer<typeof agentHelloSchema>
-export type AgentClientMessage = z.infer<typeof agentClientMessageSchema>
+export type ClientHelloMessage = z.infer<typeof clientHelloSchema>
+export type ClientToServerMessage = z.infer<typeof clientToServerMessageSchema>
 
-export type AgentServerMessage =
+export type ServerToClientMessage =
     | { type: 'hello_ack'; hostId: string; heartbeatMs: number }
     | { type: 'list_sessions'; id: string }
     | { type: 'create_session'; id: string; name: string }
@@ -63,7 +63,7 @@ export type AgentServerMessage =
     | { type: 'detach'; streamId: string }
     | { type: 'ping' }
 
-export const agentServerMessageSchema = z.union([
+export const serverToClientMessageSchema = z.union([
     z.object({ type: z.literal('hello_ack'), hostId: hostIdSchema, heartbeatMs: z.number().int().min(1000) }),
     z.object({ type: z.literal('list_sessions'), id: requestIdSchema }),
     z.object({ type: z.literal('create_session'), id: requestIdSchema, name: sessionNameSchema }),

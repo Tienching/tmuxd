@@ -38,7 +38,7 @@ describe('cliCredentials', () => {
     it('save → load round trip', async () => {
         const m = await freshModule()
         const cred = {
-            hubUrl: 'http://hub.example:7681',
+            tmuxdUrl: 'http://hub.example:7681',
             jwt: 'eyJtest',
             expiresAt: Math.floor(Date.now() / 1000) + 3600,
             namespace: 'aaaaaaaaaaaaaaaa', serverToken: 'srv-tok-1', userToken: 'alice-user-tok'
@@ -57,7 +57,7 @@ describe('cliCredentials', () => {
     it('writes file with mode 0600 and parent dir mode 0700', async () => {
         const m = await freshModule()
         await m.saveCredentials({
-            hubUrl: 'http://hub.example:7681',
+            tmuxdUrl: 'http://hub.example:7681',
             jwt: 'eyJtest',
             expiresAt: Math.floor(Date.now() / 1000) + 3600,
             namespace: 'aaaaaaaaaaaaaaaa', serverToken: 'srv-tok-1', userToken: 'alice-user-tok'
@@ -73,7 +73,7 @@ describe('cliCredentials', () => {
         const m = await freshModule()
         // Save once at 0600 so the file exists and is well-formed JSON.
         await m.saveCredentials({
-            hubUrl: 'http://hub.example:7681',
+            tmuxdUrl: 'http://hub.example:7681',
             jwt: 'eyJtest',
             expiresAt: Math.floor(Date.now() / 1000) + 3600,
             namespace: 'aaaaaaaaaaaaaaaa', serverToken: 'srv-tok-1', userToken: 'alice-user-tok'
@@ -95,7 +95,7 @@ describe('cliCredentials', () => {
     it('refuses to load a 0640 file (group bit set)', async () => {
         const m = await freshModule()
         await m.saveCredentials({
-            hubUrl: 'http://hub.example:7681',
+            tmuxdUrl: 'http://hub.example:7681',
             jwt: 'eyJtest',
             expiresAt: Math.floor(Date.now() / 1000) + 3600,
             namespace: 'aaaaaaaaaaaaaaaa', serverToken: 'srv-tok-1', userToken: 'alice-user-tok'
@@ -139,16 +139,16 @@ describe('cliCredentials', () => {
         await assert.rejects(() => m.loadCredentials(), /version mismatch.*Delete/is)
     })
 
-    it('multi-hub: load(hubUrl) selects the requested hub', async () => {
+    it('multi-hub: load(tmuxdUrl) selects the requested hub', async () => {
         const m = await freshModule()
         const a = {
-            hubUrl: 'http://hub-a.example',
+            tmuxdUrl: 'http://hub-a.example',
             jwt: 'a-jwt',
             expiresAt: Math.floor(Date.now() / 1000) + 3600,
             namespace: 'aaaaaaaaaaaaaaaa', serverToken: 'srv-tok-1', userToken: 'alice-user-tok'
         }
         const b = {
-            hubUrl: 'http://hub-b.example',
+            tmuxdUrl: 'http://hub-b.example',
             jwt: 'b-jwt',
             expiresAt: Math.floor(Date.now() / 1000) + 3600,
             namespace: 'bbbbbbbbbbbbbbbb', serverToken: 'srv-tok-1', userToken: 'bob-user-tok'
@@ -157,9 +157,9 @@ describe('cliCredentials', () => {
         await m.saveCredentials(b)
         // Latest save becomes the default.
         assert.deepEqual(await m.loadCredentials(), b)
-        // Explicit hubUrl looks up that entry.
-        assert.deepEqual(await m.loadCredentials(a.hubUrl), a)
-        assert.deepEqual(await m.loadCredentials(b.hubUrl), b)
+        // Explicit tmuxdUrl looks up that entry.
+        assert.deepEqual(await m.loadCredentials(a.tmuxdUrl), a)
+        assert.deepEqual(await m.loadCredentials(b.tmuxdUrl), b)
         // Unknown hub returns null.
         assert.equal(await m.loadCredentials('http://nope.example'), null)
     })
@@ -167,13 +167,13 @@ describe('cliCredentials', () => {
     it('clearCredentials removes one hub and picks new default', async () => {
         const m = await freshModule()
         const a = {
-            hubUrl: 'http://hub-a.example',
+            tmuxdUrl: 'http://hub-a.example',
             jwt: 'a-jwt',
             expiresAt: Math.floor(Date.now() / 1000) + 3600,
             namespace: 'aaaaaaaaaaaaaaaa', serverToken: 'srv-tok-1', userToken: 'alice-user-tok'
         }
         const b = {
-            hubUrl: 'http://hub-b.example',
+            tmuxdUrl: 'http://hub-b.example',
             jwt: 'b-jwt',
             expiresAt: Math.floor(Date.now() / 1000) + 3600,
             namespace: 'bbbbbbbbbbbbbbbb', serverToken: 'srv-tok-1', userToken: 'bob-user-tok'
@@ -181,11 +181,11 @@ describe('cliCredentials', () => {
         await m.saveCredentials(a)
         await m.saveCredentials(b)
         // b is default; clear it and a should become default.
-        await m.clearCredentials(b.hubUrl)
+        await m.clearCredentials(b.tmuxdUrl)
         const def = await m.loadCredentials()
-        assert.equal(def?.hubUrl, a.hubUrl)
+        assert.equal(def?.tmuxdUrl, a.tmuxdUrl)
         // Clear the last one too; loadCredentials returns null.
-        await m.clearCredentials(a.hubUrl)
+        await m.clearCredentials(a.tmuxdUrl)
         assert.equal(await m.loadCredentials(), null)
     })
 
@@ -196,13 +196,13 @@ describe('cliCredentials', () => {
         const m = await freshModule()
         const url = 'http://hub.example'
         await m.saveCredentials({
-            hubUrl: url,
+            tmuxdUrl: url,
             jwt: 'alice-jwt',
             expiresAt: 9999999999,
             namespace: 'aaaaaaaaaaaaaaaa', serverToken: 'srv-tok-1', userToken: 'alice-user-tok'
         })
         await m.saveCredentials({
-            hubUrl: url,
+            tmuxdUrl: url,
             jwt: 'bob-jwt',
             expiresAt: 9999999999,
             namespace: 'bbbbbbbbbbbbbbbb', serverToken: 'srv-tok-1', userToken: 'bob-user-tok'
@@ -226,7 +226,7 @@ describe('cliCredentials', () => {
         await writeFile(tmp, 'stale garbage', { mode: 0o600 })
         // saveCredentials should clean up and succeed.
         await m.saveCredentials({
-            hubUrl: 'http://hub.example',
+            tmuxdUrl: 'http://hub.example',
             jwt: 'eyJfresh',
             expiresAt: 9999999999,
             namespace: 'aaaaaaaaaaaaaaaa', serverToken: 'srv-tok-1', userToken: 'alice-user-tok'

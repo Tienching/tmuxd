@@ -1,5 +1,14 @@
 # Agent-facing tmux API design
 
+> **Status: superseded.** This document was the original design for the
+> programmatic tmux API surface (panes, input, actions). The vocabulary
+> has been retired: "outbound tmuxd agent" is now "outbound tmuxd
+> client", the `/agent/snapshot` route is now `/client/snapshot`, and
+> the `tmuxd-agent` audit events are now `client_*`. The current
+> contract lives in `server/src/routes/sessions.ts` (programmatic
+> routes) and `docs/identity-model.md` (auth surface). Kept for
+> historical context.
+
 ## Context
 
 The Hermes `tmux` skill treats tmux as an agent-control substrate: list sessions and panes, capture recent output, send literal input/special keys, and cautiously advance interactive prompts. `tmuxd` already provides a browser terminal and hub/agent remote hosts, so the right abstraction is not another shell wrapper; it is an authenticated JSON API that exposes the same tmux primitives across local and remote hosts.
@@ -96,7 +105,7 @@ States are `idle`, `running`, `needs_input`, `permission_prompt`, `copy_mode`, a
 
 ### Aggregate snapshot
 
-`GET /api/agent/snapshot?capture=1&captureLimit=8&lines=120&maxBytes=65536` returns one inventory for local and connected remote hosts:
+`GET /api/client/snapshot?capture=1&captureLimit=8&lines=120&maxBytes=65536` returns one inventory for local and connected remote hosts:
 
 ```json
 {
