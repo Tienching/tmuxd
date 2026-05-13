@@ -326,4 +326,92 @@ describe('ClientRegistry — trust-model handshake', { concurrency: 1 }, () => {
             await hub.close()
         }
     })
+
+    it('rejects upgrade on the legacy /agent/connect path (rename audit)', async () => {
+        // Catches a regression where someone re-adds /agent/connect as a
+        // back-compat alias. The wire path is part of the security
+        // boundary — the CHANGELOG explicitly flagged it as a breaking
+        // change, so silent acceptance of the old path would defeat the
+        // rename. Same shape as the wrong-path test above; this one
+        // pins the ONE specific URL we care about.
+        const hub = await startHub('correct-server-token')
+        try {
+            const url = new URL('/agent/connect', hub.baseUrl)
+            url.searchParams.set('serverToken', 'correct-server-token')
+            url.searchParams.set('userToken', 'alice')
+            const ws = new WebSocket(url.toString())
+            const result = await new Promise<{ code: number; status: number | null }>((resolve) => {
+                let status: number | null = null
+                ws.on('unexpected-response', (_req, res) => {
+                    status = res.statusCode ?? null
+                })
+                ws.on('error', () => resolve({ code: 0, status }))
+                ws.on('close', (code) => resolve({ code, status }))
+            })
+            assert.notEqual(result.status, 101, 'legacy /agent/connect must NOT upgrade')
+        } finally {
+            await hub.close()
+        }
+    })
+
+    it('emits client_register on successful agent connect (rename audit)', async () => {
+        // The audit-event rename was a breaking change for SIEM filters.
+        // audit.test.ts only round-trips JSON.stringify on a hand-crafted
+        // event object; this test pins the actual wire shape clientRegistry
+        // emits during a real connect flow. If someone reverts a callsite
+        // to `agent_register`, this fires.
+        if (process.env.TMUXD_AUDIT_DISABLE === '1') {
+            // The audit module captures `enabled` at import time. If
+            // some other test process exported the disable flag, we
+            // can't reliably observe writes — skip.
+            return
+        }
+        const hub = await startHub('correct-server-token')
+        const captured: string[] = []
+        const origWrite = process.stderr.write.bind(process.stderr)
+        // The Node typings for stream.write are split across overloads
+        // (string|Buffer × callback variants); we only need to observe
+        // the string path the audit module uses. Cast through unknown
+        // to keep TS happy without re-declaring all six overloads.
+        process.stderr.write = ((chunk: unknown, ...rest: unknown[]) => {
+            if (typeof chunk === 'string' && chunk.includes('[tmuxd:audit]')) {
+                captured.push(chunk)
+            }
+            return (origWrite as unknown as (...a: unknown[]) => boolean)(chunk, ...rest)
+        }) as typeof process.stderr.write
+        try {
+            await runAgentClient({
+                baseUrl: hub.baseUrl,
+                serverToken: 'correct-server-token',
+                userToken: 'alice-audit',
+                hello: { type: 'hello', id: 'laptop', name: 'Alice Laptop' },
+                closeAfterAck: true
+            })
+            // Give the close-handler audit a moment to fire too.
+            await new Promise((r) => setTimeout(r, 50))
+            const events = captured
+                .map((line) => line.replace(/^\[tmuxd:audit\]\s*/, ''))
+                .map((line) => {
+                    try {
+                        return JSON.parse(line) as Record<string, unknown>
+                    } catch {
+                        return null
+                    }
+                })
+                .filter((e): e is Record<string, unknown> => !!e)
+            const eventNames = events.map((e) => e.event)
+            assert.ok(
+                eventNames.includes('client_register'),
+                `expected a client_register audit event, got: ${eventNames.join(', ')}`
+            )
+            // Belt-and-suspenders: ensure NO 'agent_register' leaked through.
+            assert.ok(
+                !eventNames.some((n) => typeof n === 'string' && n.startsWith('agent_')),
+                `legacy agent_* event surfaced: ${eventNames.join(', ')}`
+            )
+        } finally {
+            process.stderr.write = origWrite as typeof process.stderr.write
+            await hub.close()
+        }
+    })
 })

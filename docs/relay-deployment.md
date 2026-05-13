@@ -49,6 +49,20 @@ into) and keys all in-memory state by the hashed namespace.
 
 ### 1. Configure the relay
 
+The fastest path is to let `tmuxd init` write the `.env` for you:
+
+```bash
+# In whatever directory you'll start the relay from:
+npm run tmuxd -- init relay
+```
+
+This generates a fresh `TMUXD_SERVER_TOKEN` (64 hex chars), prints it
+once to stderr (save it somewhere safe — anyone with it can use this
+relay), and writes a Mode C `.env` with `TMUXD_RELAY=1`, `HOST=0.0.0.0`,
+`PORT=7681`. The file is mode 0600.
+
+If you'd rather hand-edit:
+
 ```bash
 # .env on the relay box
 TMUXD_SERVER_TOKEN=replace-with-a-long-random-secret
@@ -110,7 +124,23 @@ namespace.
 
 ### 4. Start the clients
 
-On Alice's laptop, the client connects with the same two tokens:
+On Alice's laptop, write the client `.env` with `tmuxd init`:
+
+```bash
+npm run tmuxd -- init client \
+  --url https://tmuxd.example.com \
+  --server-token "$TMUXD_SERVER_TOKEN" \
+  --user-token  "$ALICE_USER_TOKEN" \
+  --host-id laptop \
+  --host-name "Alice Laptop"
+npm run client
+```
+
+`tmuxd init client` writes a 0600 `.env` with the four required values
+(plus optional host id/name). It does NOT auto-generate any tokens —
+both come from the operator (server token) and from step 3 (user token).
+
+Or, equivalently, pass the values inline as env vars or flags:
 
 ```bash
 TMUXD_URL=https://tmuxd.example.com \
@@ -119,11 +149,8 @@ TMUXD_USER_TOKEN=<alice's-user-token-from-step-3> \
 TMUXD_HOST_ID=laptop \
 TMUXD_HOST_NAME="Alice Laptop" \
   npm run client
-```
 
-Or with explicit flags:
-
-```bash
+# or:
 npm run client -- \
   --hub https://tmuxd.example.com \
   --server-token "$TMUXD_SERVER_TOKEN" \

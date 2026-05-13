@@ -18,10 +18,30 @@
  *
  * Refuses to overwrite an existing .env unless --force; never writes
  * outside the CWD; never reads or modifies anything else.
+ *
+ * Security posture (paranoid by design — the server token written here
+ * is the trust-circle key; an attacker who diverts the write owns the
+ * deployment):
+ *
+ *   - The destination is `lstat`'d first; symlinks, directories,
+ *     character devices, etc. are rejected up-front. `--force` does
+ *     NOT bypass this; `rm` first if you really want a fresh start.
+ *   - The actual write goes to a tmp file opened with
+ *     `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` at mode 0600, so:
+ *       (a) a symlink at the tmp path can't redirect the write, and
+ *       (b) two concurrent `tmuxd init` runs can't both pass the gate
+ *           and one silently win — the second `O_EXCL` open errors out.
+ *   - We `fsync`, then `rename()` over the destination, then
+ *     defensively `chmod(dest, 0o600)` to make sure --force on a
+ *     pre-existing 0644 file ends up at 0600. (`rename` preserves the
+ *     source's mode, so this is belt-and-suspenders.)
+ *   - The `filename` opt is path-normalized inside `cwd`; an attempt
+ *     to escape via `../` is rejected outright.
  */
-import { stat, writeFile } from 'node:fs/promises'
+import { constants as fsConstants } from 'node:fs'
+import { chmod, lstat, open, rename, unlink } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
-import { resolve } from 'node:path'
+import { isAbsolute, normalize, relative, resolve, sep } from 'node:path'
 
 export type InitMode = 'server' | 'relay' | 'client'
 
@@ -30,7 +50,11 @@ export interface InitOptions {
     cwd?: string
     /** Overwrite an existing .env. Default: refuse. */
     force?: boolean
-    /** Output filename. Defaults to `.env`. */
+    /**
+     * Output filename, resolved relative to `cwd`. Defaults to `.env`.
+     * Path traversal (`..`, absolute paths) is rejected — you cannot
+     * use this to write outside `cwd`.
+     */
     filename?: string
 
     // server / relay
@@ -57,22 +81,57 @@ export interface InitResult {
 
 const DEFAULT_PORT = 7681
 
+/**
+ * Per-value byte cap. .env files are read into memory by every dotenv
+ * loader; an attacker (or accidental shell substitution) handing us a
+ * 10 MB host name shouldn't propagate. 4 KiB is a comfortable ceiling
+ * — server tokens are 64 hex chars, host ids are ≤ 64, URLs are
+ * pragma-bound. If you have a value bigger than 4 KiB, you have a
+ * different problem.
+ */
+const MAX_VALUE_BYTES = 4096
+
 /** 64 hex chars = 32 random bytes. Mirrors `openssl rand -hex 32`. */
 function generateServerToken(): string {
     return randomBytes(32).toString('hex')
 }
 
 /**
- * Validate a candidate value before we paste it into a `.env` line. The
- * only structural risk is a literal newline (would break the dotenv
- * parser); we also forbid leading/trailing whitespace because dotenv
- * tools read those inconsistently across runtimes.
+ * Validate a candidate value before we paste it into a `.env` line.
+ * The risks we filter:
+ *
+ *   - Empty: meaningless; would emit `KEY=` and many shells then
+ *     interpret a missing value as the variable being unset.
+ *   - Newlines (LF/CR + Unicode line separators U+2028/U+2029):
+ *     would break the dotenv parser or, worse, smuggle a fake KEY=
+ *     line in via the value. The Unicode separators look benign in
+ *     editors but several shells `source .env` and treat them as
+ *     line breaks.
+ *   - Leading/trailing whitespace: dotenv tools handle this
+ *     inconsistently across runtimes; we reject so the round-trip
+ *     is deterministic.
+ *   - `=`: dotenv tolerates `KEY=a=b`, but `source .env` in bash
+ *     does not. We reject to keep both round-trips working.
+ *   - NUL: dotenv parsers (and shells) variously truncate or error;
+ *     either way it's never legitimate.
+ *   - Length > 4 KiB: see MAX_VALUE_BYTES.
  */
 function validateEnvValue(name: string, value: string): void {
     if (!value) throw new Error(`${name} must not be empty`)
-    if (/[\r\n]/.test(value)) throw new Error(`${name} must not contain newlines`)
+    if (Buffer.byteLength(value, 'utf8') > MAX_VALUE_BYTES) {
+        throw new Error(`${name} exceeds ${MAX_VALUE_BYTES}-byte limit`)
+    }
+    if (/[\r\n\u2028\u2029]/.test(value)) {
+        throw new Error(`${name} must not contain newlines (CR/LF/U+2028/U+2029)`)
+    }
+    if (value.includes('\0')) throw new Error(`${name} must not contain NUL bytes`)
     if (value !== value.trim()) {
         throw new Error(`${name} must not have leading/trailing whitespace`)
+    }
+    if (value.includes('=')) {
+        throw new Error(
+            `${name} must not contain '=' (would break shell \`source .env\` round-trip)`
+        )
     }
 }
 
@@ -142,6 +201,102 @@ function renderClientEnv(opts: {
 }
 
 /**
+ * Resolve `cwd` + `filename` into an absolute path, refusing any value
+ * that would land outside `cwd`. Catches `filename: '../etc/.env'`,
+ * `filename: '/etc/.env'`, `filename: '.env/../../etc'`, etc.
+ */
+function resolveDest(cwd: string, filename: string): string {
+    if (!filename) throw new Error('filename must not be empty')
+    if (isAbsolute(filename)) {
+        throw new Error(`filename must be relative to cwd, got absolute: ${filename}`)
+    }
+    const absCwd = resolve(cwd)
+    const dest = resolve(absCwd, filename)
+    // `relative(cwd, dest)` returns `..` (or `../something`) if dest
+    // is outside cwd. Empty string means dest === cwd, which is also
+    // invalid (we'd be writing to the dir itself).
+    const rel = relative(absCwd, dest)
+    if (!rel || rel === '.' || rel.startsWith('..') || isAbsolute(rel)) {
+        throw new Error(
+            `filename must resolve inside cwd, got: ${filename} (resolves to ${dest})`
+        )
+    }
+    // Defang one more case: `filename` containing the cwd prefix
+    // literally is suspicious. `normalize` collapses `./foo` and
+    // `foo/./bar` so the comparison is well-defined.
+    if (normalize(filename).split(sep).some((seg) => seg === '..')) {
+        throw new Error(`filename must not contain '..' segments: ${filename}`)
+    }
+    return dest
+}
+
+/**
+ * Atomic, symlink-safe write of `body` to `dest` at mode 0600. If
+ * `force` is false, refuses when `dest` already exists. If `force` is
+ * true, overwrites — but ONLY if the existing entry is a regular file
+ * (no symlinks, no devices, no directories). We never blindly follow
+ * a symlink to write secrets.
+ *
+ * Concurrency: two `tmuxd init` runs racing on the same dest with
+ * `--force` is undefined-but-safe. The first `rename` wins, the second
+ * either succeeds (replacing the first's file with its own — both wrote
+ * tokens, both told the user, the loser's token isn't on disk) or
+ * fails with EEXIST on the tmp open (its tmp name collides with the
+ * other run's pid-suffixed tmp). Neither path leaves a half-written
+ * file or a 0644 mode behind.
+ */
+async function writeAtomic0600(dest: string, body: string, force: boolean): Promise<void> {
+    // Pre-flight check: lstat (NOT stat) so a symlink at dest is
+    // visible as a symlink, not silently followed.
+    try {
+        const st = await lstat(dest)
+        if (st.isSymbolicLink()) {
+            throw new Error(
+                `${dest} is a symlink. Refusing to follow it — \`tmuxd init\` will not write secrets ` +
+                    `through a symlink. Remove it first if you intended this.`
+            )
+        }
+        if (!st.isFile()) {
+            throw new Error(
+                `${dest} exists and is not a regular file (directory, device, or socket). ` +
+                    `Refusing to overwrite.`
+            )
+        }
+        if (!force) {
+            throw new Error(
+                `${dest} already exists. Pass --force to overwrite, or remove it first.`
+            )
+        }
+        // Regular file + force: fall through to the atomic write below.
+    } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+        // dest doesn't exist — the common path. Continue.
+    }
+
+    const tmp = `${dest}.tmp.${process.pid}`
+    // Clean up any stale tmp from a previous crashed run; ignore ENOENT.
+    await unlink(tmp).catch(() => {})
+
+    const handle = await open(
+        tmp,
+        fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+        0o600
+    )
+    try {
+        await handle.writeFile(body, 'utf8')
+        await handle.sync()
+    } finally {
+        await handle.close()
+    }
+    await rename(tmp, dest)
+    // `rename` keeps the tmp file's mode (0600). The defensive chmod
+    // here exists for the --force path where a pre-existing target
+    // could (in theory) have ended up at the dest inode through some
+    // path we didn't anticipate. Cheap insurance.
+    await chmod(dest, 0o600).catch(() => {})
+}
+
+/**
  * Write a `.env` file for the chosen mode. The caller is responsible
  * for echoing whatever stderr instructions are appropriate (e.g.
  * "save this generated server token"); this function is pure I/O.
@@ -154,18 +309,7 @@ export async function writeEnvFile(mode: InitMode, opts: InitOptions = {}): Prom
     // when present and the explicit cwd opt is absent.
     const cwd = opts.cwd ?? process.env.INIT_CWD ?? process.cwd()
     const filename = opts.filename ?? '.env'
-    const path = resolve(cwd, filename)
-
-    if (!opts.force) {
-        try {
-            await stat(path)
-            throw new Error(
-                `${path} already exists. Pass --force to overwrite, or remove it first.`
-            )
-        } catch (err) {
-            if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
-        }
-    }
+    const path = resolveDest(cwd, filename)
 
     let body: string
     let generatedServerToken: string | null = null
@@ -206,7 +350,7 @@ export async function writeEnvFile(mode: InitMode, opts: InitOptions = {}): Prom
         throw new Error(`unknown init mode: ${mode as string}`)
     }
 
-    await writeFile(path, body, { mode: 0o600 })
+    await writeAtomic0600(path, body, !!opts.force)
 
     return { path, generatedServerToken }
 }

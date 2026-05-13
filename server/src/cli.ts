@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * tmuxd CLI — first-class HTTP-API client for tmuxd hubs.
+ * tmuxd CLI — first-class HTTP-API client for tmuxd servers.
  *
  * The mental model intentionally mirrors `tmux`:
  *
@@ -13,19 +13,26 @@
  *   tmuxd send-text     -t HOST:TARGET [--enter] TEXT...
  *   tmuxd pane-status   -t HOST:TARGET
  *
- * Plus three CLI-only verbs:
+ * Plus a few CLI-only verbs:
  *
- *   tmuxd login   --hub URL --server-token SECRET --user-token SECRET
+ *   tmuxd init {server|relay|client} [...]
+ *   tmuxd login   --server URL --server-token SECRET --user-token SECRET
  *   tmuxd whoami
- *   tmuxd logout  [--hub URL]
+ *   tmuxd logout  [--server URL]
  *   tmuxd list-hosts
  *   tmuxd snapshot [--capture] [--limit N]
  *
  * The two-token model:
  *   - `--server-token` (env: TMUXD_SERVER_TOKEN) is the shared trust-circle
- *     token that authorizes you to use this hub at all.
+ *     token that authorizes you to use this server at all.
  *   - `--user-token` (env: TMUXD_USER_TOKEN) is *your* personal token. The
- *     hub derives `namespace = sha256(userToken).slice(0, 16)` from it.
+ *     server derives `namespace = sha256(userToken).slice(0, 16)` from it.
+ *
+ * The "where is the server" flag has three accepted spellings — `--server`
+ * (canonical), `--hub` (back-compat alias from the pre-rename era), and
+ * `--url` (used by `init client`, where `--server` would collide with the
+ * subcommand name in the user's mental model). All three resolve to the
+ * same field via getHubFlag().
  *
  * `--user-token-generate` flag prints a fresh random token (32 random
  * bytes hex) for first-time setup, so users don't have to invent their
@@ -83,7 +90,17 @@ interface ParsedArgs {
  * boolean", because that path silently swallows legitimate dash-prefixed
  * values like `--text -draft`.
  */
-const BOOLEAN_FLAGS = new Set(['help', 'enter', 'json', 'capture', 'version', 'user-token-generate', 'force', 'public'])
+const BOOLEAN_FLAGS = new Set([
+    'help',
+    'enter',
+    'json',
+    'capture',
+    'version',
+    'user-token-generate',
+    'force',
+    'public',
+    'server-token-from-env'
+])
 
 /**
  * Short-flag → long-flag mapping for value-taking single-letter flags.
@@ -203,6 +220,21 @@ function usageError(msg: string): UsageError {
     return new UsageError(msg)
 }
 
+/**
+ * Resolve the "where is the tmuxd server" flag. The canonical name is
+ * `--server <url>`; `--hub <url>` is a back-compat alias from the
+ * pre-rename era and `--url` is what `init client` uses (because
+ * `--server` would collide with the subcommand's `init server` name in
+ * the user's mental model). All three resolve to the same field.
+ *
+ * Order: --server > --hub > --url. We never combine them — if more
+ * than one is set, the first wins silently, which is consistent with
+ * how the rest of the CLI treats redundant flags.
+ */
+function getHubFlag(args: ParsedArgs): string | undefined {
+    return args.flags.server || args.flags.hub || args.flags.url
+}
+
 // ---------------------------------------------------------------------------
 // target parsing — `host`, `host:session`, `host:session:0.0`, `host:%paneId`
 // ---------------------------------------------------------------------------
@@ -262,15 +294,15 @@ function parseTarget(raw: string): ParsedTarget {
 // ---------------------------------------------------------------------------
 
 function printRootHelp(): void {
-    process.stdout.write(`tmuxd ${VERSION} — control plane CLI for tmuxd hubs
+    process.stdout.write(`tmuxd ${VERSION} — control plane CLI for tmuxd servers
 
 Usage:
   tmuxd <subcommand> [flags] [args]
 
 Auth (one-time):
-  tmuxd login   --hub <url> --server-token <secret> --user-token <secret>
+  tmuxd login   --server <url> --server-token <secret> --user-token <secret>
   tmuxd whoami
-  tmuxd logout  [--hub <url>]
+  tmuxd logout  [--server <url>]
 
 Bootstrap a new box:
   tmuxd init server  [--public] [--port N] [--server-token VAL] [--force]
@@ -303,8 +335,8 @@ Common flags:
 
 Two-token auth (login only):
   --server-token <value>      Shared trust-circle token (= TMUXD_SERVER_TOKEN
-                              on the hub). Get this from your hub admin.
-  --user-token <value>        Your personal token. The hub derives
+                              on the server). Get this from your server admin.
+  --user-token <value>        Your personal token. The server derives
                               namespace = sha256(userToken).slice(0, 16).
                               Use --user-token-generate to make a fresh one.
   --server-token-file <path>  Read server token from a 0600 file.
@@ -312,17 +344,22 @@ Two-token auth (login only):
   TMUXD_SERVER_TOKEN env      Fallback if --server-token absent.
   TMUXD_USER_TOKEN env        Fallback if --user-token absent.
 
+Server URL flag:
+  --server <url>              Canonical name. Where the tmuxd server lives.
+                              (Aliases: --hub <url>, kept for back-compat;
+                              and --url <url>, used by \`init client\`.)
+
 Other subcommands read the JWT from ~/.tmuxd/cli/credentials.json.
 
 Exit codes:
   0   success
   1   usage error / network / unexpected
-  2   auth error (no creds, JWT expired, hub rejected)
+  2   auth error (no creds, JWT expired, server rejected)
   3   target not found (host/session/pane 404)
 
 Examples:
-  # First-time login: hub admin gave you SERVER_TOKEN; you make a user token.
-  tmuxd login --hub https://hub.example.com \\
+  # First-time login: server admin gave you SERVER_TOKEN; you make a user token.
+  tmuxd login --server https://tmuxd.example.com \\
               --server-token "$SERVER_TOKEN" --user-token-generate
 
   # Daily use:
@@ -342,16 +379,17 @@ See README.md and docs/identity-model.md for the trust model.
  * answer "what flags work here" without making the user grep.
  */
 const SUBCOMMAND_HELP: Record<string, string> = {
-    login: `tmuxd login — authenticate to a tmuxd hub
+    login: `tmuxd login — authenticate to a tmuxd server
 
 Usage:
-  tmuxd login --hub <url> --server-token <secret> --user-token <secret>
-  tmuxd login --hub <url> --server-token <secret> --user-token-generate
+  tmuxd login --server <url> --server-token <secret> --user-token <secret>
+  tmuxd login --server <url> --server-token <secret> --user-token-generate
 
 Required:
-  --hub <url>                Hub base URL, e.g. https://hub.example.com
+  --server <url>             Server base URL, e.g. https://tmuxd.example.com
+                             (Alias: --hub <url>, kept for back-compat.)
   --server-token <value>     Shared trust-circle token (= TMUXD_SERVER_TOKEN
-                             on the hub). Get this from your hub admin.
+                             on the server). Get this from your server admin.
   --user-token <value>       Your personal identity. The hub derives
                              namespace = sha256(userToken).slice(0, 16).
                              OR --user-token-generate to make a fresh one
@@ -511,16 +549,28 @@ Modes:
 Common flags:
   --force          Overwrite an existing .env in CWD (default: refuse).
   --port <n>       HTTP port for server / relay (default: 7681).
-  --server-token   For init server / init relay: skip auto-generation
-                   and use this value. (Default: generate openssl-rand-hex
-                   32-byte token, print once to stderr.)
+  --server-token <value>
+                   For init server / init relay: skip auto-generation
+                   and use this exact value. (Default: generate
+                   openssl-rand-hex 32-byte token, print once to stderr.)
+  --server-token-from-env
+                   For init server / init relay: explicitly opt into
+                   reusing TMUXD_SERVER_TOKEN from your shell, instead
+                   of generating a fresh one. Without this flag (or
+                   --server-token), bare \`init server\` errors out
+                   when TMUXD_SERVER_TOKEN is set in the environment
+                   — silent reuse of an ambient token would defeat
+                   the "mint a fresh trust-circle key" intent of
+                   \`init\`.
 
 Auto-generated server tokens are printed ONCE to stderr in the
  \`tmuxd: generated server token (save this somewhere safe...)\` form.
-You're expected to copy it out into a password manager / 1Password /
-team vault. The CLI never re-prints it.
+The same token is also written to .env, so if you lose the stderr
+scrollback you can recover with \`grep ^TMUXD_SERVER_TOKEN= .env\`.
 
-The .env file is written to CWD with mode 0600.
+The .env file is written to CWD with mode 0600. Symlinks at the
+target path are rejected (no exception, even with --force) — \`tmuxd
+init\` will not write secrets through a symlink.
 
 Examples:
   # Single-user local server on this laptop:
@@ -629,7 +679,7 @@ async function api<T>(cred: SavedCred, path: string, opts: ApiOptions<T> = {}): 
             : code)
         if (res.status === 401) {
             throw new AuthError(
-                `JWT rejected (${code}). Run \`tmuxd login --hub ${cred.tmuxdUrl} --server-token ... --user-token ...\` again.`
+                `JWT rejected (${code}). Run \`tmuxd login --server ${cred.tmuxdUrl} --server-token ... --user-token ...\` again.`
             )
         }
         if (res.status === 404 && opts.treat404AsNotFound) {
@@ -668,15 +718,15 @@ async function requireCred(tmuxdUrl?: string): Promise<SavedCred> {
     if (!cred) {
         throw new AuthError(
             tmuxdUrl
-                ? `no credentials for ${tmuxdUrl}. Run \`tmuxd login --hub ${tmuxdUrl} --server-token ... --user-token ...\` first.`
-                : `no credentials saved. Run \`tmuxd login --hub <url> --server-token ... --user-token ...\` first.`
+                ? `no credentials for ${tmuxdUrl}. Run \`tmuxd login --server ${tmuxdUrl} --server-token ... --user-token ...\` first.`
+                : `no credentials saved. Run \`tmuxd login --server <url> --server-token ... --user-token ...\` first.`
         )
     }
     const now = Math.floor(Date.now() / 1000)
     if (cred.expiresAt <= now) {
         throw new AuthError(
             `JWT for ${cred.tmuxdUrl} expired ${now - cred.expiresAt}s ago. ` +
-                `Run \`tmuxd login --hub ${cred.tmuxdUrl} --server-token ... --user-token ...\` to renew.`
+                `Run \`tmuxd login --server ${cred.tmuxdUrl} --server-token ... --user-token ...\` to renew.`
         )
     }
     return cred
@@ -774,7 +824,7 @@ async function readSecretInput(
 }
 
 async function cmdLogin(args: ParsedArgs): Promise<number> {
-    const tmuxdUrl = args.flags.hub?.replace(/\/+$/, '')
+    const tmuxdUrl = getHubFlag(args)?.replace(/\/+$/, '')
     if (!tmuxdUrl) {
         throw usageError('login requires --hub <url>')
     }
@@ -837,7 +887,7 @@ async function cmdLogin(args: ParsedArgs): Promise<number> {
                 `will be invisible. Save the token in a password manager, then on each\n` +
                 `subsequent device:\n` +
                 `\n` +
-                `    tmuxd login --hub ${tmuxdUrl} --server-token ... \\\n` +
+                `    tmuxd login --server ${tmuxdUrl} --server-token ... \\\n` +
                 `                --user-token <the value above>\n` +
                 `\n` +
                 `Or set TMUXD_USER_TOKEN=<value> in that machine's shell environment.\n`
@@ -914,7 +964,7 @@ async function cmdLogin(args: ParsedArgs): Promise<number> {
 }
 
 async function cmdLogout(args: ParsedArgs): Promise<number> {
-    const cred = await loadCredentials(args.flags.hub)
+    const cred = await loadCredentials(getHubFlag(args))
     if (!cred) {
         process.stdout.write('no credentials to clear\n')
         return 0
@@ -925,16 +975,16 @@ async function cmdLogout(args: ParsedArgs): Promise<number> {
 }
 
 async function cmdWhoami(args: ParsedArgs): Promise<number> {
-    const cred = await loadCredentials(args.flags.hub)
+    const cred = await loadCredentials(getHubFlag(args))
     if (!cred) {
         // Per the documented exit-code contract, "no credentials" is an auth
         // error → exit 2. Routing through AuthError keeps the message style
         // consistent with the rest of the auth surface and matches what users
         // see from `tmuxd list-hosts` etc. when they've never logged in.
         throw new AuthError(
-            args.flags.hub
-                ? `not logged in to ${args.flags.hub}. Run \`tmuxd login --hub ${args.flags.hub} --server-token ... --user-token ...\`.`
-                : 'not logged in. Run `tmuxd login --hub <url> --server-token ... --user-token ...`.'
+            getHubFlag(args)
+                ? `not logged in to ${getHubFlag(args)}. Run \`tmuxd login --server ${getHubFlag(args)} --server-token ... --user-token ...\`.`
+                : 'not logged in. Run `tmuxd login --server <url> --server-token ... --user-token ...`.'
         )
     }
     const ttl = cred.expiresAt - Math.floor(Date.now() / 1000)
@@ -963,7 +1013,7 @@ async function cmdWhoami(args: ParsedArgs): Promise<number> {
 }
 
 async function cmdListHosts(args: ParsedArgs): Promise<number> {
-    const cred = await requireCred(args.flags.hub)
+    const cred = await requireCred(getHubFlag(args))
     const { hosts } = await api(cred, '/api/hosts', { schema: hostsResponseSchema })
     if (args.flags.json) {
         printJson(hosts)
@@ -973,14 +1023,14 @@ async function cmdListHosts(args: ParsedArgs): Promise<number> {
         { header: 'HOST', pick: (h) => h.id },
         { header: 'NAME', pick: (h) => h.name },
         { header: 'STATUS', pick: (h) => h.status },
-        { header: 'KIND', pick: (h) => (h.isLocal ? 'local' : 'agent') },
+        { header: 'KIND', pick: (h) => (h.isLocal ? 'local' : 'client') },
         { header: 'CAPS', pick: (h) => (h.capabilities ?? []).join(',') }
     ])
     return 0
 }
 
 async function cmdListSessions(args: ParsedArgs): Promise<number> {
-    const cred = await requireCred(args.flags.hub)
+    const cred = await requireCred(getHubFlag(args))
     const target = args.flags.target ? parseTarget(args.flags.target) : null
     let sessions: SessionInfo[]
     if (target) {
@@ -1026,7 +1076,7 @@ async function cmdListSessions(args: ParsedArgs): Promise<number> {
 }
 
 async function cmdNewSession(args: ParsedArgs): Promise<number> {
-    const cred = await requireCred(args.flags.hub)
+    const cred = await requireCred(getHubFlag(args))
     const targetHost = args.flags.target ? parseTarget(args.flags.target).hostId : null
     const name = args.flags.name
     const body: { name?: string } = name ? { name } : {}
@@ -1075,7 +1125,7 @@ async function cmdNewSession(args: ParsedArgs): Promise<number> {
 async function cmdKillSession(args: ParsedArgs): Promise<number> {
     const target = requireTarget(args, 'kill-session', 'expected -t <host>:<session>')
     if (!target.sessionName) throw usageError('kill-session requires -t <host>:<session>')
-    const cred = await requireCred(args.flags.hub)
+    const cred = await requireCred(getHubFlag(args))
     await api<void>(
         cred,
         `/api/hosts/${encodeURIComponent(target.hostId)}/sessions/${encodeURIComponent(target.sessionName)}`,
@@ -1088,7 +1138,7 @@ async function cmdKillSession(args: ParsedArgs): Promise<number> {
 }
 
 async function cmdListPanes(args: ParsedArgs): Promise<number> {
-    const cred = await requireCred(args.flags.hub)
+    const cred = await requireCred(getHubFlag(args))
     const target = args.flags.target ? parseTarget(args.flags.target) : null
     let panes: PaneInfo[]
     if (target) {
@@ -1139,7 +1189,7 @@ async function cmdCapturePane(args: ParsedArgs): Promise<number> {
     if (!target.paneTarget && !target.sessionName) {
         throw usageError('capture-pane requires a pane target like -t laptop:main:0.0 or -t laptop:%7')
     }
-    const cred = await requireCred(args.flags.hub)
+    const cred = await requireCred(getHubFlag(args))
     const paneTarget = target.paneTarget ?? `${target.sessionName}:0.0`
     const params = new URLSearchParams()
     if (args.flags.lines) params.set('lines', args.flags.lines)
@@ -1168,7 +1218,7 @@ async function cmdPaneStatus(args: ParsedArgs): Promise<number> {
     if (!target.paneTarget && !target.sessionName) {
         throw usageError(`${verb} requires a pane target`)
     }
-    const cred = await requireCred(args.flags.hub)
+    const cred = await requireCred(getHubFlag(args))
     const paneTarget = target.paneTarget ?? `${target.sessionName}:0.0`
     const params = new URLSearchParams()
     if (args.flags.lines) params.set('lines', args.flags.lines)
@@ -1212,7 +1262,7 @@ async function cmdSendKeys(args: ParsedArgs): Promise<number> {
     if (args.positional.length === 0) {
         throw usageError('send-keys requires at least one key')
     }
-    const cred = await requireCred(args.flags.hub)
+    const cred = await requireCred(getHubFlag(args))
     const paneTarget = target.paneTarget ?? target.sessionName!
     const path = `/api/hosts/${encodeURIComponent(target.hostId)}/panes/${encodeURIComponent(paneTarget)}/keys`
     await api(cred, path, {
@@ -1235,7 +1285,7 @@ async function cmdSendText(args: ParsedArgs): Promise<number> {
     if (args.positional.length === 0) {
         throw usageError('send-text requires text to send')
     }
-    const cred = await requireCred(args.flags.hub)
+    const cred = await requireCred(getHubFlag(args))
     const paneTarget = target.paneTarget ?? target.sessionName!
     const path = `/api/hosts/${encodeURIComponent(target.hostId)}/panes/${encodeURIComponent(paneTarget)}/input`
     const text = args.positional.join(' ')
@@ -1252,7 +1302,7 @@ async function cmdSendText(args: ParsedArgs): Promise<number> {
 }
 
 async function cmdSnapshot(args: ParsedArgs): Promise<number> {
-    const cred = await requireCred(args.flags.hub)
+    const cred = await requireCred(getHubFlag(args))
     const params = new URLSearchParams()
     if (args.flags.capture) params.set('capture', '1')
     if (args.flags.limit) params.set('captureLimit', args.flags.limit)
@@ -1288,7 +1338,74 @@ async function cmdInit(args: ParsedArgs): Promise<number> {
     }
     const force = !!args.flags.force
     const port = args.flags.port ? Number(args.flags.port) : undefined
-    const serverToken = args.flags['server-token'] || process.env.TMUXD_SERVER_TOKEN || undefined
+
+    // Server / relay: special handling for the server-token sourcing.
+    //
+    // The default for `init server|relay` is "mint a fresh trust-circle
+    // token, print it once to stderr." That intent gets silently
+    // shadowed if the user has TMUXD_SERVER_TOKEN already exported in
+    // their shell — a likely state, since they're standing up tmuxd.
+    // The same shape bit us with --user-token-generate on cmdLogin (see
+    // the postmortem comment block in cmdLogin); we don't repeat the
+    // mistake here.
+    //
+    // Rule: for `init server|relay`, an env-var-only source is treated
+    // as ambiguous unless the user explicitly opts in. They have three
+    // unambiguous paths:
+    //
+    //   1. Pass --server-token <value>: use that exact token.
+    //   2. Pass --server-token-from-env: explicitly opt into the env
+    //      var. Useful for scripts that are passing a token they
+    //      already minted via some external secret store.
+    //   3. Don't set the env var: let init mint a fresh one.
+    //
+    // Bare `init server` with TMUXD_SERVER_TOKEN exported in the shell
+    // throws a UsageError instead of silently picking either path.
+    let serverToken: string | undefined
+    if (mode === 'server' || mode === 'relay') {
+        const flagSrc = args.flags['server-token']
+        const envSrc = process.env.TMUXD_SERVER_TOKEN?.trim()
+        const optedIn = !!args.flags['server-token-from-env']
+        if (flagSrc && optedIn) {
+            throw usageError(
+                '--server-token and --server-token-from-env cannot be combined. Pick one source.'
+            )
+        }
+        if (flagSrc) {
+            serverToken = flagSrc
+        } else if (optedIn) {
+            if (!envSrc) {
+                throw usageError(
+                    '--server-token-from-env was set, but TMUXD_SERVER_TOKEN is empty in the environment.'
+                )
+            }
+            serverToken = envSrc
+        } else if (envSrc) {
+            // Bare `init server|relay` with the env var set: the only
+            // case where we refuse rather than guess. Tell the user
+            // exactly which two outs they have.
+            throw usageError(
+                `TMUXD_SERVER_TOKEN is set in your environment, but neither ` +
+                    `--server-token <value> nor --server-token-from-env was passed. ` +
+                    `\`init ${mode}\` won't silently reuse the env var (you might be expecting ` +
+                    `a fresh token to be minted). Pick one:\n` +
+                    `  - Mint a fresh token: \`unset TMUXD_SERVER_TOKEN; tmuxd init ${mode}\`\n` +
+                    `  - Reuse the env var:  \`tmuxd init ${mode} --server-token-from-env\`\n` +
+                    `  - Pass it explicitly: \`tmuxd init ${mode} --server-token "$TMUXD_SERVER_TOKEN"\``
+            )
+        }
+        // else: fall through — writeEnvFile mints a fresh token.
+    } else {
+        // mode === 'client'. The client flow EXPECTS the user to supply
+        // a server token + user token; env-var fallback is the
+        // ergonomic path (the user's shell may already have them
+        // exported). Same fallback semantics as cmdLogin — flag wins,
+        // env is ambient. No surprise here because the client init has
+        // no auto-generate option.
+        serverToken =
+            args.flags['server-token'] || process.env.TMUXD_SERVER_TOKEN?.trim() || undefined
+    }
+
     let result
     try {
         if (mode === 'server' || mode === 'relay') {
@@ -1300,8 +1417,10 @@ async function cmdInit(args: ParsedArgs): Promise<number> {
             })
         } else {
             // mode === 'client'
-            const tmuxdUrl = args.flags.url || args.flags.hub || process.env.TMUXD_URL
-            const userToken = args.flags['user-token'] || process.env.TMUXD_USER_TOKEN
+            const tmuxdUrl =
+                args.flags.url || getHubFlag(args) || process.env.TMUXD_URL?.trim() || undefined
+            const userToken =
+                args.flags['user-token'] || process.env.TMUXD_USER_TOKEN?.trim() || undefined
             if (!tmuxdUrl) {
                 throw usageError(
                     'init client requires --url <server-url> (or TMUXD_URL env). ' +
@@ -1345,10 +1464,17 @@ async function cmdInit(args: ParsedArgs): Promise<number> {
                 `\n` +
                 `    ${result.generatedServerToken}\n` +
                 `\n` +
+                `Also written to ${result.path} as TMUXD_SERVER_TOKEN; recover with\n` +
+                `\`grep ^TMUXD_SERVER_TOKEN= ${result.path}\` if you lose this scrollback.\n` +
+                `\n` +
                 `Distribute it through whatever channel you trust for team secrets\n` +
                 `(1Password, shared vault, etc). Each user pairs it with their own\n` +
                 `personal user token via \`tmuxd login --user-token-generate\` on\n` +
-                `their first device.\n`
+                `their first device.\n` +
+                `\n` +
+                `If you ran this under a process supervisor (systemd / journald /\n` +
+                `pm2 / docker logs), the token may now be in the supervisor's log.\n` +
+                `Rotate it if that's not acceptable.\n`
         )
     }
     process.stdout.write(`wrote ${result.path} (mode 0600)\n`)
@@ -1377,7 +1503,7 @@ async function cmdAttachSession(args: ParsedArgs): Promise<number> {
     if (!target.sessionName) {
         throw usageError('attach-session requires -t <host>:<session>')
     }
-    const cred = await requireCred(args.flags.hub)
+    const cred = await requireCred(getHubFlag(args))
     // The web UI exposes attach as `/attach/<host>/<session>` for non-local
     // hosts and `/attach/<session>` for local. We always emit the
     // host-qualified form because the CLI reaches a hub whose `local`
