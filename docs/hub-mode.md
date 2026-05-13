@@ -5,9 +5,14 @@ where every user gets their own namespace without operator-side
 configuration. If you only want a single-user local web UI for `tmux`,
 ignore this file and follow the README quick start.
 
-For the trust-model rationale (server token vs user token, why hashing,
-threat model), read `docs/identity-model.md` first. This file is the
-operations cookbook.
+Companion docs:
+- `docs/deployment-modes.md` — picking between the four shapes
+  (single-user, hub+agents mixed, hub-only team, public community)
+- `docs/identity-model.md` — trust-model rationale: server token vs
+  user token, why hashing, threat model
+
+This file is the operations cookbook for the hub-only multi-user shape
+(Mode C in deployment-modes.md). Read either of the two above first.
 
 ## Mental model
 

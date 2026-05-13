@@ -70,7 +70,15 @@ for the rationale.
 
 ## Configuration
 
-`tmuxd` reads `.env` from the project root.
+`tmuxd` reads `.env` from the project root. There are two templates:
+
+- `.env.example` — for the **hub** (the box running `npm start`)
+- `.env.agent.example` — for **agent** boxes (the ones running `npm run agent`)
+
+The hub has four deployment shapes (single-user local, hub+agents
+mixed, hub-only team, public community) — pick one before filling in
+`.env`. See [docs/deployment-modes.md](docs/deployment-modes.md) for
+the decision tree.
 
 | Variable | Default | Description |
 | --- | --- | --- |
