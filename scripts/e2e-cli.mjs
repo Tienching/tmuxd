@@ -145,6 +145,16 @@ function spawnAgent({ userToken, hostId, hostName }) {
  * tmux ops the CLI provokes go into the scratch socket dir).
  */
 async function cli(who, ...args) {
+    return cliWithEnv(who, {}, ...args)
+}
+
+/**
+ * Same as cli(), but lets a test override env vars on top of the
+ * defang baseline. Used by the --user-token-generate-vs-env tests
+ * that need to assert behavior when TMUXD_USER_TOKEN is set in the
+ * shell.
+ */
+async function cliWithEnv(who, extraEnv, ...args) {
     const home = `${FAKE_HOME}-${who}`
     const result = await execFileP('node', ['node_modules/.bin/tsx', 'server/src/cli.ts', ...args], {
         env: {
@@ -158,7 +168,8 @@ async function cli(who, ...args) {
             // login test to spell out --server-token / --user-token.
             TMUXD_SERVER_TOKEN: '',
             TMUXD_USER_TOKEN: '',
-            TMUX_TMPDIR
+            TMUX_TMPDIR,
+            ...extraEnv
         },
         encoding: 'utf8',
         // Some subcommands intentionally exit non-zero (logout-when-empty, expired); capture both.
@@ -180,6 +191,9 @@ async function main() {
     await rm(`${FAKE_HOME}-alice`, { recursive: true, force: true }).catch(() => {})
     await rm(`${FAKE_HOME}-bob`, { recursive: true, force: true }).catch(() => {})
     await rm(`${FAKE_HOME}-mallory`, { recursive: true, force: true }).catch(() => {})
+    await rm(`${FAKE_HOME}-iris`, { recursive: true, force: true }).catch(() => {})
+    await rm(`${FAKE_HOME}-jasper`, { recursive: true, force: true }).catch(() => {})
+    await rm(`${FAKE_HOME}-kelly`, { recursive: true, force: true }).catch(() => {})
     await mkdir(TMUX_TMPDIR, { recursive: true })
 
     const hub = spawnHub()
@@ -684,6 +698,99 @@ async function main() {
             }
             if (expectedNs === ALICE_NS || expectedNs === BOB_NS) {
                 throw new Error(`generated namespace collided with alice/bob — broken entropy?`)
+            }
+        })
+
+        // ─── 13a. --user-token-generate must NOT be silently shadowed by
+        // a TMUXD_USER_TOKEN env var. The pre-fix bug: readSecretInput
+        // tried env first, found it, returned that value, and the
+        // generate flag was never honored — so a user with a stale
+        // TMUXD_USER_TOKEN in their shell who ran `--user-token-generate`
+        // landed in their OLD namespace with no warning. The new
+        // behavior must (a) actually generate, (b) tell the user we
+        // ignored the env. We verify both.
+        await check('--user-token-generate ignores stale TMUXD_USER_TOKEN env (with warning)', async () => {
+            const STALE_USER_TOKEN = 'stale-user-token-' + Math.random().toString(36).slice(2)
+            const r = await cliWithEnv(
+                'iris',
+                { TMUXD_USER_TOKEN: STALE_USER_TOKEN },
+                'login',
+                '--hub',
+                HUB_URL,
+                '--server-token',
+                SERVER_TOKEN,
+                '--user-token-generate'
+            )
+            if (r.failed) throw new Error(`generate-vs-env exited ${r.code}: ${r.stderr}`)
+            // The CLI must say it's overriding the env.
+            if (!/ignoring TMUXD_USER_TOKEN/i.test(r.stderr)) {
+                throw new Error(
+                    `stderr missing override warning (must mention "ignoring TMUXD_USER_TOKEN"): ${r.stderr}`
+                )
+            }
+            // And the namespace must be sha256 of the GENERATED token,
+            // NOT of the stale env value.
+            const m = r.stderr.match(/^\s+([a-f0-9]{64})\s*$/m)
+            if (!m) throw new Error(`could not extract generated token from stderr:\n${r.stderr}`)
+            const generated = m[1]
+            if (generated === STALE_USER_TOKEN) {
+                throw new Error(`generated token equals env stale value — entropy or mock failure`)
+            }
+            const expectedNs = computeNamespace(generated)
+            const staleNs = computeNamespace(STALE_USER_TOKEN)
+            if (!r.stdout.includes(`namespace=${expectedNs}`)) {
+                throw new Error(`landed in ns=${staleNs} from env, not ns=${expectedNs} from generate`)
+            }
+        })
+
+        // ─── 13b. --user-token-generate combined with --user-token must
+        // refuse: ambiguous intent should be a UsageError, not silently
+        // resolved one way or the other.
+        await check('--user-token-generate with --user-token → exit 1 UsageError', async () => {
+            const r = await cli(
+                'jasper',
+                'login',
+                '--hub',
+                HUB_URL,
+                '--server-token',
+                SERVER_TOKEN,
+                '--user-token',
+                'some-explicit-token',
+                '--user-token-generate'
+            )
+            if (!r.failed) throw new Error('expected refusal on conflicting user-token sources')
+            if (r.code !== 1) {
+                throw new Error(`expected exit 1 (UsageError), got ${r.code}: ${r.stderr}`)
+            }
+            if (!/cannot be combined/i.test(r.stderr)) {
+                throw new Error(`stderr missing 'cannot be combined' message: ${r.stderr}`)
+            }
+        })
+
+        // ─── 13c. The stderr message must teach multi-device reuse.
+        // Without this, users on a second device run --user-token-generate
+        // again, get a new identity, and lose their sessions. The
+        // message is the only thing standing between them and that
+        // failure mode, so we pin it.
+        await check('--user-token-generate stderr explains multi-device reuse', async () => {
+            const r = await cli(
+                'kelly',
+                'login',
+                '--hub',
+                HUB_URL,
+                '--server-token',
+                SERVER_TOKEN,
+                '--user-token-generate'
+            )
+            if (r.failed) throw new Error(`generate-login failed: ${r.stderr}`)
+            // Two things the message must communicate, both critical:
+            //   (a) "this IS your identity" (treat carefully)
+            //   (b) "use the SAME token on each device" (don't re-generate)
+            if (!/IS your permanent identity/i.test(r.stderr)) {
+                throw new Error(`stderr missing 'IS your permanent identity' framing: ${r.stderr}`)
+            }
+            if (!/SAME token there/i.test(r.stderr) && !/do not run --user-token-generate again/i.test(r.stderr)) {
+                throw new Error(`stderr missing multi-device reuse hint: ${r.stderr}`)
             }
         })
 

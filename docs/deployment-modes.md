@@ -32,6 +32,39 @@ and `HOST` change. `TMUXD_USER_TOKEN` **never** appears in the hub's
 
 ---
 
+## First-time identity setup (one-time, before any of the modes below)
+
+Every user runs this once, on whichever machine they set up first
+(laptop is typical):
+
+```bash
+npm run tmuxd -- login \
+  --hub <hub-url> \
+  --server-token <value> \
+  --user-token-generate
+```
+
+The CLI prints a fresh 64-char hex token to **stderr** and saves it
+to `~/.tmuxd/cli/credentials.json`. **Save the printed value to a
+password manager.** It is your permanent identity on this hub:
+
+- Same user token on every device → same namespace → same sessions
+  visible everywhere.
+- Different user token → different namespace → previous sessions
+  invisible, no recovery path.
+
+On every additional device (other laptops, phone, agent boxes), use
+the **same** token via `--user-token <value>` or the
+`TMUXD_USER_TOKEN` env var. **Do not run `--user-token-generate`
+again** unless you genuinely want a new identity.
+
+This is intentionally CLI-only. The web UI does not generate tokens
+— it would be too easy to click "Generate" on a second device, get
+a fresh token, close the tab, and silently lose the original
+identity.
+
+---
+
 ## Mode A: Single-user local
 
 The default. Hub and tmux on your laptop, only loopback access.

@@ -55,18 +55,26 @@ npm run build
 npm start
 ```
 
-Open the URL printed by the server, usually:
+The server prints a URL, usually `http://127.0.0.1:7681`.
 
-```text
-http://127.0.0.1:7681
+**First time only**: generate a personal user token. This is your
+permanent identity on this hub — re-use the same value on every device
+(laptop CLI, web UI, agent processes) so they all land in the same
+namespace.
+
+```bash
+npm run tmuxd -- login \
+  --hub http://127.0.0.1:7681 \
+  --server-token "$TMUXD_SERVER_TOKEN" \
+  --user-token-generate
+# stderr prints the generated token. Save it to a password manager.
 ```
 
-Sign in with two values: the **server token** (from `TMUXD_SERVER_TOKEN`
-in `.env`) and a **user token** (yours — click "Generate" on the login
-page if it's your first time, then save the value). The hub hashes the
-user token into a 16-hex-char namespace; same user token always
-produces the same namespace. See [docs/identity-model.md](docs/identity-model.md)
-for the rationale.
+Then open the web URL and sign in with the **server token** plus the
+**same user token** you just generated. See
+[docs/identity-model.md](docs/identity-model.md) for the trust model
+rationale and [docs/deployment-modes.md](docs/deployment-modes.md) for
+multi-user / agent setups.
 
 ## Configuration
 
@@ -188,7 +196,8 @@ who already hold the server token.
 
 1. Visit the server URL.
 2. Enter the **server token** from `.env` and your personal **user token**
-   (click **Generate** for first-time setup).
+   (the one printed by `tmuxd login --user-token-generate` on first-time
+   setup — see Quick start).
 3. Click **Sign in**.
 
 ### New session

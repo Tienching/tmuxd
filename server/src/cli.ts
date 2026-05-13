@@ -737,24 +737,69 @@ async function cmdLogin(args: ParsedArgs): Promise<number> {
                 'This is the shared team token from your hub admin.'
         )
     }
-    let userToken = await readSecretInput(
-        args.flags,
-        'user-token',
-        'user-token-file',
-        'TMUXD_USER_TOKEN'
-    )
-    if (!userToken && args.flags['user-token-generate']) {
+    // --user-token-generate is the first-time-setup escape hatch: mint
+    // a fresh personal identity, print it to stderr, persist it as the
+    // login credential. It MUST take precedence over env / flag / file
+    // sources, otherwise a stale TMUXD_USER_TOKEN in the user's shell
+    // (e.g. inherited from .env, or set on a previous identity) will
+    // silently shadow the generate request — the user gets the OLD
+    // identity, the hub stamps them into the OLD namespace, and the
+    // intent ("give me a new identity") is dropped on the floor with
+    // no warning. That's the bug the API review caught.
+    //
+    // We also refuse outright if --user-token-generate is combined
+    // with an explicit --user-token / --user-token-file, because the
+    // user's intent is genuinely ambiguous and silently picking either
+    // one is wrong. Env vars are tolerated (they're often "ambient"
+    // and the user may not even remember setting them) — we just log
+    // that we ignored them.
+    let userToken: string | null
+    if (args.flags['user-token-generate']) {
+        if (args.flags['user-token'] || args.flags['user-token-file']) {
+            throw usageError(
+                '--user-token-generate cannot be combined with --user-token / ' +
+                    '--user-token-file. Pick one: generate a fresh identity, OR ' +
+                    'authenticate with an existing one.'
+            )
+        }
+        if (process.env.TMUXD_USER_TOKEN?.trim()) {
+            // Don't silently honor it; don't silently override it; tell
+            // the user we're overriding so they don't end up confused
+            // about which identity they just logged in as.
+            process.stderr.write(
+                `tmuxd: --user-token-generate is set, ignoring TMUXD_USER_TOKEN env var.\n`
+            )
+        }
         userToken = generateUserToken()
         process.stderr.write(
             `tmuxd: generated user token (save this somewhere safe — it IS your identity):\n` +
-                `  ${userToken}\n` +
-                `Re-use it via TMUXD_USER_TOKEN or --user-token / --user-token-file on later logins.\n`
+                `\n` +
+                `    ${userToken}\n` +
+                `\n` +
+                `IMPORTANT: this token IS your permanent identity on this hub. To see\n` +
+                `the same sessions from another device (laptop, phone, agent box), set\n` +
+                `the SAME token there — do not run --user-token-generate again on each\n` +
+                `device, or you will land in a different namespace and your sessions\n` +
+                `will be invisible. Save the token in a password manager, then on each\n` +
+                `subsequent device:\n` +
+                `\n` +
+                `    tmuxd login --hub ${hubUrl} --server-token ... \\\n` +
+                `                --user-token <the value above>\n` +
+                `\n` +
+                `Or set TMUXD_USER_TOKEN=<value> in that machine's shell environment.\n`
+        )
+    } else {
+        userToken = await readSecretInput(
+            args.flags,
+            'user-token',
+            'user-token-file',
+            'TMUXD_USER_TOKEN'
         )
     }
     if (!userToken) {
         throw usageError(
             'login requires --user-token <secret> (or --user-token-file <path>, ' +
-                'or TMUXD_USER_TOKEN env, or --user-token-generate to make one). ' +
+                'or TMUXD_USER_TOKEN env, or --user-token-generate for first-time setup). ' +
                 'This is your personal token; the hub uses sha256(userToken) as your namespace.'
         )
     }

@@ -1,69 +1,50 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { generateAndPersistUserToken, USER_TOKEN_LS_KEY } from './login'
+import { USER_TOKEN_LS_KEY } from './login'
 
 /**
- * The behavior under test: clicking "Generate" on the login form must
- * persist the freshly-minted user token to localStorage *immediately*,
- * not wait for a successful submit. The pre-fix code wrote the token
- * to React state but only persisted on the submit-success path —
- * meaning a 401 on first login (wrong server token) silently lost the
- * generated identity. See login.tsx for the rationale.
+ * The web login form deliberately has NO "Generate user token" button —
+ * generation belongs in the CLI, where the freshly-minted token can be
+ * captured into stderr → password manager. A web-side Generate would
+ * invite users on a second device to click it, get a fresh token, and
+ * silently land in a brand-new namespace where their existing sessions
+ * are invisible.
  *
- * We exercise the pure helper rather than the whole component: this
- * web workspace runs node-test without jsdom, so React rendering is
- * out of reach. The helper is the load-bearing piece anyway; the rest
- * of <LoginPage> is wiring around it.
+ * These tests pin two things that hold the design together:
+ *   1. The USER_TOKEN_LS_KEY constant stays canonical so a refactor that
+ *      renames it doesn't orphan everyone's saved user token on the
+ *      next deploy.
+ *   2. The web bundle does NOT export a generate-and-persist helper —
+ *      that's a regression guard against accidentally re-introducing
+ *      the button by adding the helper first and "wiring it up later."
+ *
+ * The web workspace runs node-test without jsdom, so React render tests
+ * are out of reach; these are the bits we CAN cover at unit-test
+ * granularity.
  */
-function makeFakeStorage(): Pick<Storage, 'setItem'> & { writes: Array<[string, string]> } {
-    const writes: Array<[string, string]> = []
-    return {
-        writes,
-        setItem(key: string, value: string) {
-            writes.push([key, value])
-        }
-    }
-}
-
-describe('generateAndPersistUserToken', () => {
-    it('persists a fresh token to localStorage on every call', () => {
-        const storage = makeFakeStorage()
-        const t1 = generateAndPersistUserToken(storage)
-        assert.equal(typeof t1, 'string')
-        assert.match(t1, /^[a-f0-9]{64}$/, 'generated token should be 64 hex chars')
-        assert.deepEqual(storage.writes, [[USER_TOKEN_LS_KEY, t1]])
-    })
-
-    it('produces distinct tokens across calls (entropy sanity check)', () => {
-        const storage = makeFakeStorage()
-        const t1 = generateAndPersistUserToken(storage)
-        const t2 = generateAndPersistUserToken(storage)
-        assert.notEqual(t1, t2, 'two calls must not collide')
-        assert.equal(storage.writes.length, 2)
-        assert.equal(storage.writes[0][1], t1)
-        assert.equal(storage.writes[1][1], t2)
-    })
-
-    it('uses the canonical localStorage key the rest of the app reads from', () => {
-        // Pin the key so a refactor that renames the constant in login.tsx
-        // doesn't silently invalidate everyone's saved user token (the
-        // initial-state hook reads `localStorage.getItem(USER_TOKEN_LS_KEY)`
-        // — a typo there or here would orphan every user's identity on
-        // the next deploy).
+describe('web login form', () => {
+    it('exposes the canonical localStorage key', () => {
+        // Pin the key so a refactor that renames the constant in
+        // login.tsx doesn't silently invalidate everyone's saved user
+        // token (the initial-state hook reads
+        // `localStorage.getItem(USER_TOKEN_LS_KEY)` — a typo there or
+        // here would orphan every user's identity on the next deploy).
         assert.equal(USER_TOKEN_LS_KEY, 'tmuxd:userToken')
     })
 
-    it('writes the token BEFORE returning, not after', () => {
-        // Regression guard for the original bug: the old code returned the
-        // token without writing, leaving the persist for the submit-success
-        // handler. If a future refactor splits this back into "compute" +
-        // "persist later" steps, this test will catch the gap by asserting
-        // a write is observable as soon as the helper returns.
-        const storage = makeFakeStorage()
-        const before = storage.writes.length
-        const token = generateAndPersistUserToken(storage)
-        const after = storage.writes.length
-        assert.equal(after - before, 1, 'exactly one persist per call')
-        assert.equal(storage.writes[storage.writes.length - 1][1], token)
+    it('does NOT export a generate-and-persist helper', async () => {
+        // Regression guard: removing the button on its own is reversible
+        // by accident if someone adds the helper back "for testability"
+        // and an LLM-generated PR wires up the button to call it. Keep
+        // the helper out of the module surface entirely so the only
+        // path to client-side token generation is "rip out this test
+        // and explain why in a commit message."
+        const mod = (await import('./login')) as Record<string, unknown>
+        assert.equal(
+            mod.generateAndPersistUserToken,
+            undefined,
+            'web bundle should not expose a client-side user-token generator; ' +
+                'the canonical path is `tmuxd login --user-token-generate` in the CLI.'
+        )
     })
 })
