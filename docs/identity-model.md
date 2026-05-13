@@ -194,23 +194,35 @@ Reject paths:
 
 ## Shapes you can build on top of this
 
+The trust-circle size is a continuum (see "Distributing the server
+token" in `docs/deployment-modes.md`); these are points on it.
+
 - **Single-user.** The "default" deployment: one server token, one
   user token. The user token is implicit (a fixed string in `.env`,
   or generated once with `tmuxd login --user-token-generate`).
 - **Small team, no SSO.** One server token in 1Password, every member
   picks their own user token (or generates one). Onboarding is "tell
   them the server token + show them how to run `tmuxd login`."
-- **Public community hub.** Server token written in the README. Every
-  user generates their own user token; the namespace is the only
-  thing keeping their sessions distinct from a stranger's. **Do
-  not** use this shape for anything you'd hate strangers to see —
-  the trust model is "anyone in the trust circle." A public hub puts
-  everyone in the circle.
+- **Wider audience with a signup gate.** Server token distributed via
+  an approval-gated flow (CAPTCHA / email confirmation / GitHub
+  OAuth). Same hub config as the small-team shape; the gate lives
+  in the distribution layer, not the hub. Namespace separation
+  becomes the primary barrier between holders, so this is appropriate
+  only for use cases where "anyone in the circle could in principle
+  reach anyone else's namespace if they knew the user token" is
+  acceptable.
 - **Corporate SSO** (phase 2). Hub computes the user token by
   HMAC-ing the SSO subject ID. The user token is never typed; it's
   derived from "the user who just authed via SSO." The wire contract
   is unchanged: hub still receives `userToken` from the auth flow,
   still computes the same `sha256` namespace.
+
+A note on truly **public** distribution (server token in a README):
+the hub itself doesn't care, but at scale you'll hit problems the
+trust model can't solve — resource abuse, no per-user eviction,
+rotation locks out legitimate users along with attackers. Add a
+signup gate even for "public" demos, or run the hub behind an
+authenticating reverse proxy.
 
 ## Why sha256 and 16 hex chars
 

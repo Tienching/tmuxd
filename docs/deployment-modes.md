@@ -1,8 +1,8 @@
 # Deployment modes
 
-Four shapes you can run tmuxd in. They all share the same `.env`
+Three shapes you can run tmuxd in. They share the same `.env`
 vocabulary; the differences are which switches you flip and what
-threat model you're signing up for.
+the threat surface looks like.
 
 For the trust-model rationale (why two tokens, what `namespace = sha256(userToken)`
 buys you and what it doesn't), read `docs/identity-model.md` first.
@@ -11,14 +11,11 @@ buys you and what it doesn't), read `docs/identity-model.md` first.
 
 ```
 Want anyone besides yourself to use this hub?
-├── No  → Mode A (single-user local)
+├── No  → Mode A: single-user local
 └── Yes →
       Should the hub box itself host tmux sessions?
-      ├── Yes → Mode B (hub + remote agents, mixed)
-      └── No  → Mode C/D (TMUXD_HUB_ONLY=1)
-                  Server token: private team key, or public?
-                  ├── Private → Mode C (team deployment)
-                  └── Public  → Mode D (community hub — read warnings)
+      ├── Yes → Mode B: hub + remote agents (mixed)
+      └── No  → Mode C: hub-only multi-user ⭐
 ```
 
 ## Mode matrix
@@ -27,10 +24,9 @@ Want anyone besides yourself to use this hub?
 |---|---|---|---|---|
 | **A. Single-user local** | One person, hub + tmux on the same box | unset | `127.0.0.1` | the user (web/CLI) |
 | **B. Hub + remote agents** | Hub also hosts some sessions, plus agents on other boxes | unset | `0.0.0.0` | every web/CLI user **and** every agent |
-| **C. Hub-only team** | Hub as pure router; sessions live on user agents | `1` | `0.0.0.0` | every user (same token for their CLI + their agent) |
-| **D. Public community hub** | Anyone with the (public) server token can use the hub | `1` | `0.0.0.0` | every user generates their own |
+| **C. Hub-only multi-user** | Hub as pure router; sessions live on user agents | `1` | `0.0.0.0` | every user (same token for their CLI + their agent) |
 
-`.env` for the hub is the same skeleton in all four; only `TMUXD_HUB_ONLY`
+`.env` for the hub is the same skeleton in all three; only `TMUXD_HUB_ONLY`
 and `HOST` change. `TMUXD_USER_TOKEN` **never** appears in the hub's
 `.env` — it lives on each user's client device.
 
@@ -104,7 +100,7 @@ every signed-in user.
 
 ---
 
-## Mode C: Hub-only team deployment ⭐
+## Mode C: Hub-only multi-user ⭐
 
 The recommended multi-user shape. Hub is pure routing/auth; **no
 session is ever created on the hub box itself**. Every session lives
@@ -128,7 +124,7 @@ PORT=7681
 
 **Each user**:
 
-1. Operator hands out the server token (1Password, team vault, etc.).
+1. Operator hands out the server token (see "Distributing the server token" below).
 2. User generates their own user token: `tmuxd login --hub <url> --server-token <secret> --user-token-generate`
 3. User runs `npm run agent` on whichever boxes they want exposed,
    using the same user token everywhere.
@@ -138,14 +134,11 @@ agents. The hub never learns who they are; it just hashes whatever
 user token shows up.
 
 **Threat model**: the only people who can reach the hub at all are
-those who hold the server token (treat like a team API key). Within
-that circle, the namespace from `sha256(userToken)` keeps users out
-of each other's sessions **as long as user tokens stay private**.
-Namespace isolation is *convention isolation* — it does not defend
-against a teammate who already holds the server token AND knows
-another teammate's user token. For that level of isolation, you'd
-need a real per-user authentication system (phase 2; see
-`docs/identity-model.md`).
+those who hold the server token. Within that circle, the namespace
+from `sha256(userToken)` keeps users out of each other's sessions
+**as long as user tokens stay private**. The strength of namespace
+isolation depends on whether you trust the people who hold the
+server token — see "Distributing the server token" below.
 
 **Eviction**: rotate `TMUXD_SERVER_TOKEN` to lock everyone out who
 hasn't received the new value. JWTs survive until 12h TTL expires;
@@ -155,96 +148,124 @@ restart.
 
 ---
 
-## Mode D: Public community hub
+## Distributing the server token
 
-⚠ **Read this section in full before deploying. Mode D is rarely the
-right answer; it exists primarily to make the threat model boundary
-unambiguous.**
+This is an **operational** choice, not a mode. The hub's behavior is
+identical regardless of how the server token gets to its eventual
+holders. What changes is who's in the trust circle.
 
-Same `.env` as Mode C. The only difference is **what you do with the
-server token**: you publish it. The README, a public web page, a
-Slack channel anyone can join — somewhere a stranger can find it.
+The choice is a continuum:
 
-```bash
-TMUXD_SERVER_TOKEN=public-demo-2026   # ← publicly known
-TMUXD_HUB_ONLY=1
-HOST=0.0.0.0
-PORT=7681
+| Distribution | Trust circle size | Isolation strength |
+|---|---|---|
+| 1Password / team vault, 5 people | small, mutually trusting | "convention isolation" — strangers blocked at the door, teammates *could* impersonate but won't |
+| New-hire onboarding email, 50 people | medium, professionally accountable | same as above; bigger circle, weaker assumptions |
+| Approval-gated signup (CAPTCHA, GitHub OAuth, manual review) | medium-large, partial trust | namespace becomes the only effective barrier between holders |
+| Public README / homepage | unbounded | anyone can reach the hub; namespace isolation is pure cryptographic separation between strangers |
+
+**Two important properties of the namespace gate**:
+
+1. **It IS a real cryptographic barrier between strangers.** A user
+   with their own user token cannot enumerate, guess, or compute
+   another user's namespace. The hash is one-way; cross-namespace
+   probes return 404. Two strangers on the same hub are genuinely
+   isolated as long as neither knows the other's user token.
+
+2. **It is NOT a barrier between people who already share the
+   server token.** If Bob holds the server token, namespace
+   isolation does not stop Bob from logging in with whatever user
+   token he wants. It stops him from *seeing Alice's namespace*
+   only because he doesn't know Alice's user token, not because
+   the system actively authenticates "Bob is not Alice." For real
+   per-user authentication, see the phase-2 SSO path in
+   `docs/identity-model.md`.
+
+**Practical defaults**:
+
+- Closed team (≤ N people you'd give an SSH key to): pass the server
+  token through whatever channel you already trust for team secrets.
+- Wider audience: gate distribution behind something — at minimum a
+  signup form with email confirmation, ideally an auth provider.
+- Public hub with the token in a README: only for ephemeral demos /
+  workshops / hackathons. Public hubs have **no defense against
+  resource abuse** (no rate limits, quotas, or per-user eviction);
+  expect them to be used as relays for things you don't want to
+  host. Add a reverse-proxy rate limit at minimum, and prefer a
+  signup gate even for "public" demos.
+
+---
+
+## How user tokens are actually handled
+
+Common misconception: user tokens are encrypted/hashed before use,
+like website passwords. They're **not** — and the design is
+deliberate, not a leak.
+
+```
+┌─ Client (your laptop / phone / agent box) ──────────────────────┐
+│                                                                 │
+│   CLI:    ~/.tmuxd/cli/credentials.json   (plaintext, mode 0600)│
+│   Web:    localStorage[tmuxd:userToken]    (plaintext)          │
+│   Agent:  TMUXD_USER_TOKEN env var         (plaintext)          │
+│                                                                 │
+└─────────────────────────┬───────────────────────────────────────┘
+                          │
+                          │  HTTP body / WS query string (plaintext)
+                          │  ←─ TLS encrypts this on the wire
+                          ▼
+┌─ Hub ───────────────────────────────────────────────────────────┐
+│                                                                 │
+│   Receives raw userToken                                        │
+│       ↓                                                         │
+│   namespace = sha256(userToken).slice(0, 16)                    │
+│       ↓                                                         │
+│   JWT / registry / ws-ticket all carry only the hashed namespace│
+│       ↓                                                         │
+│   Raw userToken goes out of scope; hub NEVER persists it        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### How does isolation still work if the server token is public?
+**vs a normal password system:**
 
-The server token only authorizes *use of the hub*. It does not
-identify you. Identity comes from your **user token**, which the
-hub turns into your namespace via `sha256(userToken).slice(0, 16)`.
-A stranger who reads the README can:
+| | Normal website password | tmuxd user token |
+|---|---|---|
+| Client storage | OS keychain / browser autofill (plaintext) | plaintext file or localStorage |
+| Wire format | plaintext over HTTPS | plaintext over HTTPS |
+| Server storage | bcrypt/argon2 hash in DB | **not stored** — hashed once to derive namespace, then dropped |
+| What identifies you | password + DB lookup | the user token IS the identity |
 
-- Reach the hub: yes (they have the server token).
-- See their own namespace: yes (whatever user token they invent).
-- See **other people's** sessions: no, unless they happen to know
-  someone else's user token. The hash is one-way; namespaces are
-  not enumerable; cross-namespace probes return 404.
+The model is closer to **API keys / SSH private keys** than to
+passwords:
 
-So namespace isolation in Mode D is genuine cryptographic isolation
-between strangers — stronger, in some sense, than Mode C's
-"convention" isolation between teammates who all hold the server
-token.
+- The token *is* the credential. There's no "password reset" flow
+  because there's nothing to look up.
+- Whoever holds the token IS the identity it points at.
+- Losing the file means losing the identity (and any sessions tied
+  to its namespace).
 
-### Why is Mode D still risky?
+**What this means in practice:**
 
-Three reasons. None of them are about isolation; they're about
-*denial of service* and *user mistakes*.
-
-1. **Resource abuse**. Anyone can use the hub as a tmux relay.
-   tmuxd has no rate limits, quotas, or billing. A public hub
-   pointed at a non-trivial machine *will* be used to mine
-   crypto / proxy spam / host C2.
-
-2. **Server-token rotation hurts**. The Mode C eviction story
-   ("rotate the team key in 1Password") doesn't work — you'd have
-   to update the public README and tell every legitimate stranger
-   the new value, while attackers in the middle of an active
-   session get a free TTL window.
-
-3. **No way to evict an individual abuser**. There is no per-user
-   ban list. Your only mitigations are network-layer (block their
-   IP at your reverse proxy) or wholesale (rotate the server
-   token, locking out everyone).
-
-4. **Users will lose their identity**. Most strangers who hit a
-   public hub will never save the user token they generated. Next
-   visit they'll generate a new one, land in a fresh namespace,
-   and find their old sessions invisible. That's correct behavior
-   per the trust model, but it confuses everyone.
-
-### When IS Mode D appropriate?
-
-Honestly, almost never as-deployed. If you want a "demo anyone can
-try":
-
-- Run Mode C with the server token gated behind a signup flow
-  (operator emails it after a CAPTCHA, GitHub OAuth, etc.). Sign
-  up = receive server token. The flow remains "you generate your
-  own user token from there."
-- Add a reverse proxy with per-IP rate limiting and short JWT
-  TTLs.
-- Auto-prune disconnected agents and idle sessions.
-
-If you really want strangers to share a hub, look at the phase-2
-SSO path in `docs/identity-model.md` — that's where this gets
-real.
+- Treat user tokens like SSH private keys: 0600 file mode, never in
+  Slack, never committed to git, OS-level disk encryption ideally.
+- Use HTTPS in any non-loopback deployment. The CLI prints a stderr
+  warning when `--hub http://...` points at a non-loopback host.
+- A compromised client = identity loss for that user. A compromised
+  hub does NOT one-shot leak every user's token, because the hub
+  doesn't have them — at most an attacker reads the live JWT list
+  (which carries namespaces, not raw tokens) until JWTs rotate.
 
 ---
 
 ## What you do NOT set, by mode
 
-| Variable | A | B | C | D |
-|---|---|---|---|---|
-| `TMUXD_SERVER_TOKEN` | ✅ required | ✅ required | ✅ required | ✅ required (publicly known) |
-| `TMUXD_HUB_ONLY` | unset | unset | `1` | `1` |
-| `HOST` | `127.0.0.1` | `0.0.0.0` | `0.0.0.0` | `0.0.0.0` |
-| `PORT` | `7681` | `7681` | `7681` | `7681` |
-| `TMUXD_USER_TOKEN` | **never on the hub** — lives on each user's client | | | |
+| Variable | A | B | C |
+|---|---|---|---|
+| `TMUXD_SERVER_TOKEN` | ✅ required | ✅ required | ✅ required |
+| `TMUXD_HUB_ONLY` | unset | unset | `1` |
+| `HOST` | `127.0.0.1` | `0.0.0.0` | `0.0.0.0` |
+| `PORT` | `7681` | `7681` | `7681` |
+| `TMUXD_USER_TOKEN` | **never on the hub** — lives on each user's client | | |
 
 ---
 

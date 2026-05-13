@@ -6,8 +6,9 @@ configuration. If you only want a single-user local web UI for `tmux`,
 ignore this file and follow the README quick start.
 
 Companion docs:
-- `docs/deployment-modes.md` — picking between the four shapes
-  (single-user, hub+agents mixed, hub-only team, public community)
+- `docs/deployment-modes.md` — picking between the three shapes
+  (single-user, hub+agents mixed, hub-only multi-user) and how to
+  distribute the server token within the chosen shape
 - `docs/identity-model.md` — trust-model rationale: server token vs
   user token, why hashing, threat model
 
