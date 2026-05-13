@@ -238,12 +238,31 @@ function connectOnce(config: AgentConfig): Promise<void> {
             if (!settled) {
                 settled = true
                 if (code === 1008 && reason === 'host_already_connected') {
-                    reject(
-                        new FatalConfigError(
-                            `hub rejected hello: another agent is already connected with this host id`,
-                            'pick a different --host-id, or stop the other agent before reconnecting.'
-                        )
+                    // The hub already has a connection registered under our
+                    // (namespace, hostId). This is NOT a fatal config error
+                    // even though it looks like one: a previous instance of
+                    // this same agent may have died abruptly (hard kill,
+                    // network drop, machine sleep) and the hub takes up to
+                    // HEARTBEAT_MS × 3 = 45s to reap the stale entry. If we
+                    // exit 2 here, a transient network blip permanently
+                    // kills the agent process — systemd / docker-restart
+                    // can't help because the exit code is 2 (config error
+                    // by convention), not a generic crash.
+                    //
+                    // The right move is to log clearly and let the main
+                    // loop's backoff (capped at 30s) retry. Most cases
+                    // self-heal within one heartbeat window. If the user
+                    // ACTUALLY ran two agents with the same host id, the
+                    // log line tells them what to do; they can stop the
+                    // other one and this loop will succeed on the next
+                    // attempt.
+                    console.error(
+                        `[agent] hub rejected hello: another agent is already connected with this host id. ` +
+                            `If a previous instance just died, the hub will reap it within ~45s and we will retry. ` +
+                            `If you are intentionally running two agents on the same hub, give them distinct ` +
+                            `--host-id values.`
                     )
+                    resolve()
                     return
                 }
                 resolve()

@@ -4,7 +4,25 @@ import { generateUserToken } from '@tmuxd/shared'
 import { api } from '../api/client'
 import { setToken } from '../auth/tokenStore'
 
-const USER_TOKEN_LS_KEY = 'tmuxd:userToken'
+export const USER_TOKEN_LS_KEY = 'tmuxd:userToken'
+
+/**
+ * Generate a fresh user token AND persist it to localStorage in the same
+ * call. Exported (and tested) separately because the failure mode it
+ * fixes — submit fails after Generate, user reloads, token is gone — is
+ * subtle enough to warrant a focused unit test rather than relying on
+ * a manual click-test of the whole login form.
+ *
+ * Returns the generated token so the caller can also stuff it into
+ * component state.
+ */
+export function generateAndPersistUserToken(
+    storage: Pick<Storage, 'setItem'> = localStorage
+): string {
+    const token = generateUserToken()
+    storage.setItem(USER_TOKEN_LS_KEY, token)
+    return token
+}
 
 /**
  * Login form for the two-token model. The user fills in:
@@ -17,7 +35,8 @@ const USER_TOKEN_LS_KEY = 'tmuxd:userToken'
  * doesn't have to re-type it on every JWT refresh — only the JWT itself
  * has been browser-resident before, so this is a small extension of an
  * already-persisted secret. The "Generate" button creates a fresh
- * random token for first-time setup.
+ * random token for first-time setup AND persists it on the spot, so
+ * a failed submit doesn't drop a freshly-minted identity on the floor.
  */
 export function LoginPage() {
     const navigate = useNavigate()
@@ -28,7 +47,17 @@ export function LoginPage() {
     const [showGeneratedHint, setShowGeneratedHint] = useState(false)
 
     function generate() {
-        const token = generateUserToken()
+        // Persist IMMEDIATELY (inside generateAndPersistUserToken), before
+        // submit. Otherwise a 401 on first-ever login (e.g. user typed the
+        // wrong server token) drops the freshly-generated user token on
+        // the floor: the failure path doesn't reach saveCredentials, so
+        // localStorage stays empty, and the next click on Generate yields
+        // a different token. The user has now silently lost their
+        // identity — anything they had under the discarded namespace is
+        // unreachable. Persisting on click means the worst case is a
+        // localStorage entry with no live JWT, which the user can recover
+        // by retrying the form.
+        const token = generateAndPersistUserToken()
         setUserToken(token)
         setShowGeneratedHint(true)
     }

@@ -88,6 +88,32 @@ describe('auth route', () => {
         assert.equal(res.status, 400)
     })
 
+    it('rejects when body mixes old + new shapes (loginSchema is .strict())', async () => {
+        // A buggy migration that left a stale `token` field alongside the
+        // correct `{serverToken, userToken}` would silently work without
+        // .strict() — and break later once the legacy field gets sanitized.
+        // .strict() makes that breakage immediate and obvious.
+        const res = await postJson(makeApp(), '/api/auth', {
+            token: SERVER_TOKEN,
+            serverToken: SERVER_TOKEN,
+            userToken: 'alice-token'
+        })
+        assert.equal(res.status, 400)
+    })
+
+    it('rejects unknown extra fields in the body', async () => {
+        const res = await postJson(makeApp(), '/api/auth', {
+            serverToken: SERVER_TOKEN,
+            userToken: 'alice-token',
+            namespace: 'aaaaaaaaaaaaaaaa' // attacker tries to self-declare ns
+        })
+        assert.equal(
+            res.status,
+            400,
+            'extra ns field must be rejected — namespace is server-derived only'
+        )
+    })
+
     it('rate-limits after 5 bad serverTokens from the same client IP (returns 429)', async () => {
         const ip = `198.51.100.${Math.floor(Math.random() * 250) + 2}`
         const headers = { 'content-type': 'application/json', 'x-real-ip': ip }

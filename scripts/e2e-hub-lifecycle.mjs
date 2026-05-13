@@ -251,32 +251,47 @@ async function main() {
             }
         })
 
-        // ── 6. Trying to register Alice's agent again before kill should fail
-        // (host_already_connected). This proves the per-namespace registry
-        // doesn't leak duplicates within a namespace.
-        await check("duplicate Alice-agent connect rejected (host_already_connected)", async () => {
+        // ── 6. Trying to register Alice's agent again before kill should
+        // be rejected by the hub (host_already_connected) but the agent
+        // process itself stays alive and retries. This is the key
+        // behavior the trust-model review forced — a transient network
+        // blip during reconnect must not permanently kill the agent
+        // (the hub takes up to ~45s to reap a stale entry, so a fatal
+        // exit on the first 1008 would brick the agent every time the
+        // network hiccups). Verifies:
+        //   - Alice's view still shows exactly 1 'laptop' (the original)
+        //   - the dup process does NOT exit on its own; we kill it
+        //     ourselves at the end
+        await check("duplicate Alice-agent rejected at hello, retries (does not exit)", async () => {
             const dup = spawnAgent({
                 userToken: ALICE_USER_TOKEN,
                 hostId: 'laptop',
                 hostName: 'Alice Duplicate'
             })
-            // The duplicate hello should be rejected. Agent's `connectOnce`
-            // catches `host_already_connected` as FatalConfigError and exits
-            // with code 2. We just want to confirm Alice's view doesn't show
-            // two hosts and the duplicate dies cleanly.
-            const exitCode = await new Promise((resolve) => {
-                const t = setTimeout(() => {
-                    dup.kill('SIGKILL')
-                    resolve('timeout')
-                }, 5000)
-                dup.on('exit', (code) => {
-                    clearTimeout(t)
-                    resolve(code)
-                })
-            })
-            if (exitCode !== 2) throw new Error(`duplicate agent expected exit 2, got ${exitCode}`)
-            const a = await listRemoteHostIds(aliceJwt)
-            if (a.length !== 1) throw new Error(`alice has ${a.length} hosts: ${JSON.stringify(a)}`)
+            try {
+                // Settle window: the dup tries to hello, gets 1008
+                // host_already_connected, logs, and goes into backoff.
+                // We give it ~2s to finish that round-trip. If the dup
+                // were still treating this as fatal, it would exit
+                // within that window — assert it doesn't.
+                const earlyExit = await Promise.race([
+                    new Promise((resolve) => dup.on('exit', (c) => resolve(c))),
+                    sleep(2000).then(() => 'still-running')
+                ])
+                if (earlyExit !== 'still-running') {
+                    throw new Error(
+                        `duplicate agent exited prematurely with code ${earlyExit}; ` +
+                            `expected it to retry on host_already_connected, not exit`
+                    )
+                }
+                // Alice's view must still show exactly her one original host.
+                const a = await listRemoteHostIds(aliceJwt)
+                if (a.length !== 1 || a[0] !== 'laptop') {
+                    throw new Error(`alice now shows ${JSON.stringify(a)} (expected ['laptop'])`)
+                }
+            } finally {
+                await killAndWait(dup)
+            }
         })
 
         // ── 7. Cross-namespace probe still safe

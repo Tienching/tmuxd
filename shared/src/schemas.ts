@@ -124,10 +124,21 @@ export const tmuxActionIdSchema = z
  *
  * See `docs/identity-model.md`.
  */
-export const loginSchema = z.object({
-    serverToken: z.string().min(1).max(1024),
-    userToken: z.string().min(1).max(1024)
-})
+export const loginSchema = z
+    .object({
+        serverToken: z.string().min(1).max(1024),
+        userToken: z.string().min(1).max(1024)
+    })
+    // .strict() makes us reject any extra fields outright. The intent is
+    // to make stale-client breakage *loud* rather than silent: a client
+    // that still sends `{token: "secret:alice", serverToken: "...",
+    // userToken: "..."}` (mixing old + new shapes) gets a clear 400
+    // pointing at the wrong shape, instead of being silently accepted
+    // and looking like it works in dev but failing once the legacy
+    // field gets sanitized later. The cost is zero forwards-compat
+    // tolerance — every additive change to the auth body has to land
+    // in this schema first.
+    .strict()
 
 export const createSessionSchema = z.object({
     name: sessionNameSchema
