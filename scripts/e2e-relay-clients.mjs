@@ -37,7 +37,7 @@
 
 import { spawn } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { rm } from 'node:fs/promises'
+import { rm, mkdir } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 
 const HOST = '127.0.0.1'
@@ -46,6 +46,11 @@ const SERVER_TOKEN = 'real-agent-server-token-' + Math.random().toString(36).sli
 const ALICE_USER_TOKEN = 'alice-real-agent-' + Math.random().toString(36).slice(2)
 const BOB_USER_TOKEN = 'bob-real-agent-' + Math.random().toString(36).slice(2)
 const TMUXD_HOME = `/tmp/tmuxd-e2e-real-agents-${process.pid}`
+// One TMUX_TMPDIR shared by all clients in this run, isolated from the
+// user's default socket dir. Each client spawns its own tmux server
+// inside; an isolated parent dir means a crash here can't touch the
+// user's interactive tmux.
+const TMUX_TMPDIR = `/tmp/tmuxd-e2e-real-clients-tmux-${process.pid}`
 
 /** Mirror of shared/src/identity.ts#computeNamespace — see e2e-relay.mjs. */
 function computeNamespace(userToken) {
@@ -121,7 +126,8 @@ function spawnAgent({ userToken, hostId, hostName, serverToken = SERVER_TOKEN })
                 TMUXD_HOST_NAME: hostName,
                 TMUXD_AUDIT_DISABLE: '1',
                 // No HOME-dir tmux state needed; agent only opens a WS.
-                TMUXD_HOME: `${TMUXD_HOME}-agent-${hostId}`
+                TMUXD_HOME: `${TMUXD_HOME}-agent-${hostId}`,
+                TMUX_TMPDIR
             },
             stdio: ['ignore', 'pipe', 'pipe']
         }
@@ -143,6 +149,8 @@ async function waitForHostId(token, hostId, maxMs = 5000) {
 
 async function main() {
     await rm(TMUXD_HOME, { recursive: true, force: true }).catch(() => {})
+    await rm(TMUX_TMPDIR, { recursive: true, force: true }).catch(() => {})
+    await mkdir(TMUX_TMPDIR, { recursive: true })
 
     const hub = spawn(
         'node',
@@ -155,7 +163,8 @@ async function main() {
                 TMUXD_HOME,
                 TMUXD_AUDIT_DISABLE: '1',
                 HOST,
-                PORT: String(PORT)
+                PORT: String(PORT),
+                TMUX_TMPDIR
             },
             stdio: ['ignore', 'inherit', 'inherit']
         }
@@ -335,6 +344,7 @@ async function main() {
             })
         })
         await rm(TMUXD_HOME, { recursive: true, force: true }).catch(() => {})
+        await rm(TMUX_TMPDIR, { recursive: true, force: true }).catch(() => {})
     }
 
     console.log('\n---')

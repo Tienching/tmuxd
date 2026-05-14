@@ -30,6 +30,9 @@ const SERVER_TOKEN = 'lifecycle-server-token-' + Math.random().toString(36).slic
 const ALICE_USER_TOKEN = 'alice-lifecycle-' + Math.random().toString(36).slice(2)
 const BOB_USER_TOKEN = 'bob-lifecycle-' + Math.random().toString(36).slice(2)
 const TMUXD_HOME = `/tmp/tmuxd-e2e-lifecycle-${process.pid}`
+// Shared TMUX_TMPDIR for all clients in this run; isolated from the
+// user's default socket dir.
+const TMUX_TMPDIR = `/tmp/tmuxd-e2e-lifecycle-tmux-${process.pid}`
 
 const passes = []
 const fails = []
@@ -95,7 +98,8 @@ function spawnAgent({ userToken, hostId, hostName }) {
                 TMUXD_HOST_ID: hostId,
                 TMUXD_HOST_NAME: hostName,
                 TMUXD_AUDIT_DISABLE: '1',
-                TMUXD_HOME: `${TMUXD_HOME}-agent-${userToken}-${hostId}`
+                TMUXD_HOME: `${TMUXD_HOME}-agent-${userToken}-${hostId}`,
+                TMUX_TMPDIR
             },
             stdio: ['ignore', 'pipe', 'pipe']
         }
@@ -145,6 +149,9 @@ async function killAndWait(proc) {
 
 async function main() {
     await rm(TMUXD_HOME, { recursive: true, force: true }).catch(() => {})
+    await rm(TMUX_TMPDIR, { recursive: true, force: true }).catch(() => {})
+    const { mkdir } = await import('node:fs/promises')
+    await mkdir(TMUX_TMPDIR, { recursive: true })
 
     const hub = spawn(
         'node',
@@ -157,7 +164,8 @@ async function main() {
                 TMUXD_HOME,
                 TMUXD_AUDIT_DISABLE: '1',
                 HOST,
-                PORT: String(PORT)
+                PORT: String(PORT),
+                TMUX_TMPDIR
             },
             stdio: ['ignore', 'inherit', 'inherit']
         }
@@ -326,6 +334,7 @@ async function main() {
             })
         })
         await rm(TMUXD_HOME, { recursive: true, force: true }).catch(() => {})
+        await rm(TMUX_TMPDIR, { recursive: true, force: true }).catch(() => {})
     }
 
     console.log('\n---')

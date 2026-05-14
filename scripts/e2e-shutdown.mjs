@@ -8,10 +8,14 @@
  *   2. the client sees a 'close' event within the same window
  */
 import { spawn } from 'node:child_process'
+import { mkdir, rm } from 'node:fs/promises'
 import WebSocket from 'ws'
 
 const PORT = 17684
 const TOKEN = 'shutdown-test-token'
+// Isolate the tmux server this test creates so a crash here can't take
+// out the user's interactive tmux sessions. Same pattern as e2e-cli.mjs.
+const TMUX_TMPDIR = `/tmp/tmuxd-e2e-shutdown-tmux-${process.pid}`
 
 async function waitUp(port, maxMs = 8000) {
     const deadline = Date.now() + maxMs
@@ -28,6 +32,8 @@ async function waitUp(port, maxMs = 8000) {
 }
 
 async function main() {
+    await rm(TMUX_TMPDIR, { recursive: true, force: true }).catch(() => {})
+    await mkdir(TMUX_TMPDIR, { recursive: true })
     const server = spawn(
         'node',
         ['node_modules/.bin/tsx', 'server/src/index.ts'],
@@ -37,7 +43,8 @@ async function main() {
                 TMUXD_SERVER_TOKEN: TOKEN,
                 PORT: String(PORT),
                 HOST: '127.0.0.1',
-                TMUXD_HOME: '/tmp/tmuxd-shutdown-home'
+                TMUXD_HOME: '/tmp/tmuxd-shutdown-home',
+                TMUX_TMPDIR
             },
             stdio: ['ignore', 'pipe', 'pipe']
         }
@@ -110,7 +117,15 @@ async function main() {
     )
 
     const { execFile } = await import('node:child_process')
-    await new Promise((r) => execFile('tmux', ['kill-session', '-t', 'tmuxd-shut'], () => r()))
+    await new Promise((r) =>
+        execFile(
+            'tmux',
+            ['kill-session', '-t', 'tmuxd-shut'],
+            { env: { ...process.env, TMUX_TMPDIR } },
+            () => r()
+        )
+    )
+    await rm(TMUX_TMPDIR, { recursive: true, force: true }).catch(() => {})
 
     if (result !== 'ok') {
         console.log('--- server log ---')

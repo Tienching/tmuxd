@@ -11,6 +11,14 @@
  *          wrong Origin rejected when allowlist configured.
  *   SHUTDOWN: SIGTERM ends cleanly, even with a live WS.
  *
+ * NOTE: this script does NOT spawn its own server — the caller must provide
+ * one. When invoked via `npm run e2e` (scripts/e2e-all.mjs), the umbrella
+ * sets TMUX_TMPDIR to a per-run scratch dir, which both this script and the
+ * client subprocess inherit. When invoked standalone (`npm run e2e:api`)
+ * the operator is responsible for providing both the server *and* an
+ * isolated TMUX_TMPDIR — otherwise the spawned client and any direct tmux
+ * calls land in /tmp/tmux-<uid>/ alongside the user's interactive sessions.
+ *
  * Exits non-zero on first failure. Prints a summary.
  */
 import { spawn } from 'node:child_process'

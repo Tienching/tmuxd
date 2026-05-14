@@ -6,10 +6,22 @@
  * Used by: npm run e2e
  */
 import { spawn } from 'node:child_process'
+import { mkdir, rm } from 'node:fs/promises'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 const PORT = 17686
 const TOKEN = 'e2e-all-token'
+
+// Isolate every tmux server we (or anything we spawn that doesn't set its
+// own TMUX_TMPDIR) start under a per-run scratch directory. Without this
+// our API-suite server lands in /tmp/tmux-<uid>/, sharing the user's
+// default socket dir — a single tmux 3.x server crash can then take out
+// the user's interactive sessions. Independent of the per-script
+// isolation that e2e-cli.mjs / e2e-shutdown.mjs / etc. already do for
+// their own children; this catches the API server e2e-all spawns
+// directly, plus serves as a fallback umbrella for any sub-script that
+// inherits from us.
+const TMUX_TMPDIR = `/tmp/tmuxd-e2e-all-tmux-${process.pid}`
 
 async function waitUp(port, maxMs = 10000) {
     const deadline = Date.now() + maxMs
@@ -31,6 +43,8 @@ function run(script, env = {}) {
 }
 
 async function main() {
+    await rm(TMUX_TMPDIR, { recursive: true, force: true }).catch(() => {})
+    await mkdir(TMUX_TMPDIR, { recursive: true })
     // Boot a server for the API suite.
     const server = spawn(
         'node',
@@ -41,7 +55,8 @@ async function main() {
                 TMUXD_SERVER_TOKEN: TOKEN,
                 PORT: String(PORT),
                 HOST: '127.0.0.1',
-                TMUXD_HOME: '/tmp/tmuxd-e2e-all'
+                TMUXD_HOME: '/tmp/tmuxd-e2e-all',
+                TMUX_TMPDIR
             },
             stdio: ['ignore', 'inherit', 'inherit']
         }
@@ -57,7 +72,14 @@ async function main() {
                 PORT: String(PORT),
                 TMUXD_SERVER_TOKEN: TOKEN,
                 HOST: '127.0.0.1',
-                TMUXD_E2E_CLIENT_HOST_BOUND: '1'
+                TMUXD_E2E_CLIENT_HOST_BOUND: '1',
+                // CRITICAL: e2e.mjs runs `tmux has-session`, `tmux capture-pane`,
+                // `tmux display-message` directly to verify the server's effects.
+                // Those calls MUST hit the same socket the server is on, otherwise
+                // they look at an empty tmux world and assertions fail. Pass our
+                // umbrella TMUX_TMPDIR through explicitly. Same applies to
+                // the agent process e2e.mjs spawns via startAgentProcess().
+                TMUX_TMPDIR
             })
         } catch (e) {
             fails.push('api')
@@ -67,7 +89,9 @@ async function main() {
         try {
             // This script has its port baked in for port 17683; we need to pass env.
             // Easier: reuse the API-test port by calling e2e-multi via env.
-            await run('scripts/e2e-multi.mjs', {})
+            // No tmux ops in e2e-multi.mjs itself, but pass TMUX_TMPDIR for
+            // any sub-process that might exist.
+            await run('scripts/e2e-multi.mjs', { TMUX_TMPDIR })
         } catch (e) {
             fails.push('multi-tab')
         }
@@ -75,6 +99,11 @@ async function main() {
         server.kill('SIGTERM')
         await new Promise((r) => server.on('exit', r))
     }
+
+    // Past this point the sub-scripts spawn their own servers/clients;
+    // each isolates its own TMUX_TMPDIR. Drop ours so the e2e-all
+    // umbrella doesn't leave a stale empty dir behind.
+    await rm(TMUX_TMPDIR, { recursive: true, force: true }).catch(() => {})
 
     console.log('\n=== Shutdown (own server) ===')
     try {

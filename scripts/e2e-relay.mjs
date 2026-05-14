@@ -41,6 +41,11 @@ const SERVER_TOKEN = 'e2e-hub-server-token-' + Math.random().toString(36).slice(
 const ALICE_USER_TOKEN = 'alice-user-token-' + Math.random().toString(36).slice(2)
 const BOB_USER_TOKEN = 'bob-user-token-' + Math.random().toString(36).slice(2)
 const TMUXD_HOME = `/tmp/tmuxd-e2e-hub-${process.pid}`
+// Relay mode (TMUXD_RELAY=1) means the server itself never spawns tmux,
+// but we isolate TMUX_TMPDIR anyway: belt-and-suspenders against future
+// regressions where a relay-mode code path accidentally invokes tmux,
+// and consistent with the rest of the e2e fleet.
+const TMUX_TMPDIR = `/tmp/tmuxd-e2e-relay-tmux-${process.pid}`
 
 const passes = []
 const fails = []
@@ -99,6 +104,9 @@ function decodeJwtNs(token) {
 
 async function main() {
     await rm(TMUXD_HOME, { recursive: true, force: true }).catch(() => {})
+    await rm(TMUX_TMPDIR, { recursive: true, force: true }).catch(() => {})
+    const { mkdir } = await import('node:fs/promises')
+    await mkdir(TMUX_TMPDIR, { recursive: true })
 
     const server = spawn(
         'node',
@@ -109,6 +117,7 @@ async function main() {
                 TMUXD_SERVER_TOKEN: SERVER_TOKEN,
                 TMUXD_RELAY: '1',
                 TMUXD_HOME,
+                TMUX_TMPDIR,
                 TMUXD_AUDIT_DISABLE: '1', // keep test stderr clean
                 HOST,
                 PORT: String(PORT)
@@ -277,6 +286,7 @@ async function main() {
             })
         })
         await rm(TMUXD_HOME, { recursive: true, force: true }).catch(() => {})
+        await rm(TMUX_TMPDIR, { recursive: true, force: true }).catch(() => {})
     }
 
     console.log('\n---')

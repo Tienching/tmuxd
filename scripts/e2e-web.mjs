@@ -9,12 +9,16 @@
  *      login form renders at runtime.
  */
 import { spawn, execFile } from 'node:child_process'
+import { mkdir, rm } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 const execFileP = promisify(execFile)
 const PORT = 17685
 const TOKEN = 'web-smoke-token'
+// Isolate any tmux server the smoke-test triggers so we cannot trample
+// /tmp/tmux-<uid>/ where the user's interactive tmux lives.
+const TMUX_TMPDIR = `/tmp/tmuxd-e2e-web-tmux-${process.pid}`
 
 async function waitUp(port, maxMs = 10000) {
     const deadline = Date.now() + maxMs
@@ -37,6 +41,8 @@ const log = (name, ok, extra = '') => {
 }
 
 async function main() {
+    await rm(TMUX_TMPDIR, { recursive: true, force: true }).catch(() => {})
+    await mkdir(TMUX_TMPDIR, { recursive: true })
     const server = spawn(
         'node',
         ['node_modules/.bin/tsx', 'server/src/index.ts'],
@@ -46,7 +52,8 @@ async function main() {
                 TMUXD_SERVER_TOKEN: TOKEN,
                 PORT: String(PORT),
                 HOST: '127.0.0.1',
-                TMUXD_HOME: '/tmp/tmuxd-web-smoke'
+                TMUXD_HOME: '/tmp/tmuxd-web-smoke',
+                TMUX_TMPDIR
             },
             stdio: ['ignore', 'pipe', 'pipe']
         }
@@ -108,6 +115,7 @@ async function main() {
     } finally {
         server.kill('SIGTERM')
         await new Promise((r) => server.on('exit', r))
+        await rm(TMUX_TMPDIR, { recursive: true, force: true }).catch(() => {})
     }
 
     console.log(`\n  PASS: ${passed}   FAIL: ${failed}`)
